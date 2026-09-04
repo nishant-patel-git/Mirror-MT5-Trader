@@ -17,3 +17,13 @@ MT5_TRADER_LADDER_PROMPT.md
 *.db
 *.db-wal
 *.db-shm
+
+# The MetaTrader 5 template, built by deploy/make-golden-terminal.ps1.
+# Hundreds of megabytes, and a mis-stripped one carries an accounts
+# file - so it travels on a USB stick or a share, never in the repo.
+MT5-golden.zip
+deploy/MT5-golden.zip
+
+# Answers for an unattended configure.py run: this file HOLDS THE TWO
+# MT5 PASSWORDS in clear text. Delete it once the machine is set up.
+answers.json
