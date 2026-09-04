@@ -1,21 +1,23 @@
 @echo off
 REM  MT5-Trader - double-click this to start trading.
 REM
-REM  It does the whole start: finds a Python, picks up the latest code,
-REM  brings the dependencies up to date, checks the machine can actually
-REM  connect, runs the safety tests, starts the engine and opens the
-REM  ladders in your browser.
+REM  It does the whole start: finds a Python, brings the dependencies up
+REM  to date, checks the machine can actually connect, runs the safety
+REM  tests, starts the engine and opens the ladders in your browser.
+REM
+REM  It does NOT change the version of the code on this machine. That is
+REM  deploy\UPDATE.BAT, run deliberately by whoever maintains it.
 REM
 REM  Two rules it will not bend:
 REM
 REM    * It never starts the engine on a failing test suite. That rule
 REM      is what keeps a bad build away from a live account.
 REM
-REM    * It never leaves the trader with a black window. Anything that
-REM      is merely the OFFICE INTERNET being down - the update, the
-REM      dependency check - warns and carries on with the copy already
-REM      on the machine. Only a fault that would make trading WRONG
-REM      stops the start.
+REM    * It never leaves the trader with a black window. The dependency
+REM      check needs the internet and the office internet goes down, so
+REM      that failure warns and carries on with what is already
+REM      installed. Only a fault that would make trading WRONG stops
+REM      the start.
 REM
 REM  Plain ASCII on purpose: a console running the default code page
 REM  turns anything else into mojibake in the one message that matters.
@@ -57,37 +59,15 @@ if not defined PY (
 )
 echo   Using Python: %PY%
 
-REM --- 2. The latest code ----------------------------------------------
-REM  The daily update, and it is deliberately allowed to fail. A trader
-REM  with no internet must still get the ladder they had yesterday, so
-REM  every failure here is a warning and the start continues.
+REM --- 2. Configuration -------------------------------------------------
 REM
-REM  --ff-only on purpose: if this machine somehow has local commits, a
-REM  merge would be started that nobody is here to finish. Better to say
-REM  so and run the code that is already here.
-set "UPDATED=no"
-where git >nul 2>&1
-if errorlevel 1 (
-  echo   [i] Git is not installed - skipping the update.
-) else (
-  git rev-parse --is-inside-work-tree >nul 2>&1
-  if errorlevel 1 (
-    echo   [i] This folder is not a git clone - skipping the update.
-  ) else (
-    echo   Checking for an update...
-    git pull --ff-only >nul 2>&1
-    if errorlevel 1 (
-      echo   [!] Could not update - carrying on with the copy already
-      echo       on this machine. If this keeps happening, tell whoever
-      echo       maintains it; you are not running the latest code.
-    ) else (
-      set "UPDATED=yes"
-      echo   Up to date.
-    )
-  )
-)
-
-REM --- 3. Configuration -------------------------------------------------
+REM  NOTE: this file does NOT update itself. Nothing is pulled here on
+REM  purpose - a desk's version changes when somebody DECIDES it
+REM  changes, not because a commit landed overnight. deploy\UPDATE.BAT
+REM  is that decision, run deliberately on the machine being updated.
+REM
+REM  The cost of the choice, so it is not a surprise: a fix pushed today
+REM  is not on this PC tomorrow. Whoever maintains it visits the machine.
 if not exist config.json (
   echo   [i] First run: creating config.json from the example.
   copy /y config.example.json config.json >nul
@@ -96,7 +76,7 @@ if not exist .env (
   copy /y .env.example .env >nul
 )
 
-REM --- 4. Dependencies --------------------------------------------------
+REM --- 3. Dependencies --------------------------------------------------
 REM  Also allowed to fail. What matters is not whether pip could reach
 REM  the internet, it is whether the imports the engine needs are HERE.
 echo   Checking dependencies...
@@ -114,7 +94,7 @@ if errorlevel 1 (
   echo       installed are complete, so carrying on.
 )
 
-REM --- 5. Can this machine actually connect? ----------------------------
+REM --- 4. Can this machine actually connect? ----------------------------
 REM  Counted, not guessed. An account that names its own MT5 folder is
 REM  OPENED AND SIGNED IN by the engine, so a terminal that is not
 REM  running is not a reason to refuse - preflight.py knows which case
@@ -142,18 +122,17 @@ exit /b 1
 
 :tests
 
-REM --- 6. The safety tests ---------------------------------------------
+REM --- 5. The safety tests ---------------------------------------------
 echo   Running the safety tests (about 20 seconds)...
 %PY% -m pytest tests -q
 if errorlevel 1 (
   echo.
   echo   [X] THE SAFETY TESTS FAILED. The engine has NOT been started.
   echo.
-  if "%UPDATED%"=="yes" (
-    echo       This machine updated itself a moment ago, so the fault
-    echo       most likely arrived with that update.
-    echo.
-  )
+  echo       If this machine was updated recently, the fault most
+  echo       likely arrived with that update - deploy\UPDATE.BAT can
+  echo       put it back on the version it had before.
+  echo.
   echo       Do not trade on this build. Send the lines above to whoever
   echo       maintains it.
   echo.
@@ -161,7 +140,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-REM --- 7. Go ------------------------------------------------------------
+REM --- 6. Go ------------------------------------------------------------
 echo.
 echo   All checks passed. Starting the engine and opening the ladders.
 echo   Leave this window open - closing it stops trading.

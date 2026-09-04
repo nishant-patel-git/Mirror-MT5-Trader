@@ -240,6 +240,84 @@ def test_rerunning_does_not_walk_the_ports_upward(tmp_path):
         again['accounts']['Account B']['endpoint']
 
 
+# --- the presets ---------------------------------------------------------
+
+def test_the_shipped_presets_file_parses_and_is_usable():
+    """It is DATA the office edits, so a stray comma is a real risk -
+    and a broken file must be caught here, not on a trader's PC."""
+    presets = configure.load_presets()
+    assert presets, 'deploy/presets.json produced no pairs'
+    for preset in presets:
+        assert preset['label']
+        assert preset['leg_a'] and preset['leg_b']
+        # Anything unrecognised reads as RELATED, which silently drops
+        # the fair value off a basis. Caught here instead.
+        assert preset['pair_type'] in ('SPOT_FUTURE', 'FUTURE_FUTURE',
+                                       'RELATED')
+
+
+def test_a_broken_presets_file_leaves_the_wizard_usable(tmp_path):
+    """No menu is survivable - the trader types both symbols. A setup
+    that refuses to open over a stray comma is not."""
+    (tmp_path / 'deploy').mkdir()
+    (tmp_path / 'deploy' / 'presets.json').write_text('{ not json',
+                                                      encoding='utf-8')
+    assert configure.load_presets(str(tmp_path)) == []
+
+
+def test_a_dated_leg_is_filled_in_from_the_contract_box():
+    preset = {'label': 'Gold', 'leg_a': 'XAUUSD', 'leg_b': 'GC{contract}',
+              'pair_type': 'SPOT_FUTURE'}
+    assert configure.preset_needs(preset) == (False, True)
+    assert configure.expand_preset(preset, '', 'Z6') == ('XAUUSD', 'GCZ6')
+
+
+def test_a_calendar_spread_dates_both_legs_separately():
+    """Two months of one instrument. One contract box would make the
+    two legs the same symbol, and that spread is always zero."""
+    preset = {'label': 'WTI', 'leg_a': 'USOIL{contract}',
+              'leg_b': 'USOIL{contract}', 'pair_type': 'FUTURE_FUTURE'}
+    assert configure.preset_needs(preset) == (True, True)
+    assert configure.expand_preset(preset, 'X6', 'Z6') == ('USOILX6',
+                                                           'USOILZ6')
+
+
+def test_a_missing_contract_month_is_refused():
+    preset = {'label': 'Gold', 'leg_a': 'XAUUSD', 'leg_b': 'GC{contract}',
+              'pair_type': 'SPOT_FUTURE'}
+    with pytest.raises(configure.SetupError, match='contract month'):
+        configure.expand_preset(preset, '', '')
+
+
+def test_control_a_pair_that_needs_no_contract_asks_for_none():
+    preset = {'label': 'Spot pair', 'leg_a': 'XAUUSD', 'leg_b': 'XAGUSD',
+              'pair_type': 'RELATED'}
+    assert configure.preset_needs(preset) == (False, False)
+    assert configure.expand_preset(preset) == ('XAUUSD', 'XAGUSD')
+
+
+def test_a_calendar_spread_with_one_month_twice_is_refused():
+    """Straight through expand_preset into build_config: both legs come
+    out as USOILZ6, and a spread of an instrument against itself is
+    always zero."""
+    preset = {'label': 'WTI', 'leg_a': 'USOIL{contract}',
+              'leg_b': 'USOIL{contract}', 'pair_type': 'FUTURE_FUTURE'}
+    symbol_a, symbol_b = configure.expand_preset(preset, 'Z6', 'Z6')
+    with pytest.raises(configure.SetupError, match='always zero'):
+        configure.build_config(
+            answers(symbol_a=symbol_a, symbol_b=symbol_b), {})
+
+
+def test_control_two_different_months_go_through():
+    preset = {'label': 'WTI', 'leg_a': 'USOIL{contract}',
+              'leg_b': 'USOIL{contract}', 'pair_type': 'FUTURE_FUTURE'}
+    symbol_a, symbol_b = configure.expand_preset(preset, 'X6', 'Z6')
+    out = configure.build_config(
+        answers(symbol_a=symbol_a, symbol_b=symbol_b,
+                pair_type=preset['pair_type']), {})
+    assert out['pairs']['USOILX6|USOILZ6']['pair_type'] == 'FUTURE_FUTURE'
+
+
 # --- the preflight -------------------------------------------------------
 
 def _configured(tmp_path, **over):

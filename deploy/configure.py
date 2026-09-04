@@ -46,27 +46,70 @@ class SetupError(Exception):
     log', which on a trader's PC means nothing."""
 
 
-#: The instruments the office trades, so the common case is a choice
-#: and not two symbol names typed from memory. `pair_type` matters:
-#: SPOT_FUTURE and FUTURE_FUTURE are the SAME underlying, so the spread
-#: is a basis with a fair value; RELATED has none.
-PRESETS = {
-    'Gold basis (XAUUSD.f vs GCZ6)': {
-        'symbol_a': 'XAUUSD.f', 'symbol_b': 'GCZ6',
-        'pair_type': 'SPOT_FUTURE',
-        'name': 'Gold spot vs future',
-    },
-    'Gold basis (XAUUSD_ vs GC1226)': {
-        'symbol_a': 'XAUUSD_', 'symbol_b': 'GC1226',
-        'pair_type': 'SPOT_FUTURE',
-        'name': 'Gold spot vs Dec future',
-    },
-    'Silver basis (XAGUSD.f vs SIZ6)': {
-        'symbol_a': 'XAGUSD.f', 'symbol_b': 'SIZ6',
-        'pair_type': 'SPOT_FUTURE',
-        'name': 'Silver spot vs future',
-    },
-}
+#: The token a preset leaves for the trader to fill in: the contract
+#: month and year, which changes every roll and so cannot be shipped.
+CONTRACT_TOKEN = '{contract}'
+
+
+def load_presets(root=None):
+    """The pairs the wizard offers, from `deploy/presets.json`.
+
+    A FILE, not a table in this module. The office adds an instrument
+    by editing data on one machine; baking the list in here would make
+    every new pair a code change and a release to every PC.
+
+    A presets file that will not parse gives an EMPTY list, not a
+    crash: the trader can still type both symbols, and a setup that
+    refuses to open over a stray comma is worse than one with no menu.
+    """
+    if root:
+        path = os.path.join(root, 'deploy', 'presets.json')
+    else:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'presets.json')
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    presets = data.get('presets') if isinstance(data, dict) else data
+    return [p for p in (presets or []) if isinstance(p, dict) and p.get('label')]
+
+
+def preset_needs(preset):
+    """(leg A needs a contract code, leg B needs one).
+
+    Driven by where `{contract}` actually appears, so a preset that
+    dates both legs - a calendar spread - asks twice, and one that
+    dates neither asks nothing.
+    """
+    return (CONTRACT_TOKEN in str(preset.get('leg_a') or ''),
+            CONTRACT_TOKEN in str(preset.get('leg_b') or ''))
+
+
+def expand_preset(preset, contract_a='', contract_b=''):
+    """The two symbol names, with the contract codes filled in.
+
+    Refuses a blank code where one is needed rather than writing
+    `GC` and leaving the trader to find out at the first connect that
+    the symbol does not exist.
+    """
+    needs_a, needs_b = preset_needs(preset)
+    contract_a = str(contract_a or '').strip()
+    contract_b = str(contract_b or '').strip()
+    for needed, value, leg in ((needs_a, contract_a, 'Leg A'),
+                               (needs_b, contract_b, 'Leg B')):
+        if needed and not value:
+            raise SetupError(
+                f'{leg} needs a contract month. That is the code your '
+                f'broker puts after the instrument for the month and year '
+                f'- Z6, 1226, Z2026 - and it changes at every roll, which '
+                f'is why it is asked for rather than shipped.')
+    symbol_a = str(preset.get('leg_a') or '').replace(CONTRACT_TOKEN,
+                                                      contract_a)
+    symbol_b = str(preset.get('leg_b') or '').replace(CONTRACT_TOKEN,
+                                                      contract_b)
+    return symbol_a, symbol_b
 
 #: What the wizard calls the two accounts. The name is what
 #: `env_key_for` turns into the `.env` key, so changing it here changes
@@ -315,38 +358,103 @@ def _run_gui(root, terminal_a, terminal_b):          # pragma: no cover
                    ('Password', 'password_b', '*'),
                    ('Server', 'server_b', None)])
 
+    presets = load_presets(root)
+    by_label = {p['label']: p for p in presets}
+    TYPE_MY_OWN = 'Type my own...'
+
     frame_p = ttk.LabelFrame(win, text='What this desk trades')
     frame_p.grid(row=2, column=0, sticky='ew', padx=10, pady=6)
     ttk.Label(frame_p, text='Pair').grid(row=0, column=0, sticky='e', **pad)
-    choice = ttk.Combobox(frame_p, width=30, state='readonly',
-                          values=list(PRESETS) + ['Type my own...'])
+    choice = ttk.Combobox(frame_p, width=38, state='readonly',
+                          values=list(by_label) + [TYPE_MY_OWN])
     choice.current(0)
     choice.grid(row=0, column=1, sticky='w', **pad)
-    ttk.Label(frame_p, text='Leg A symbol').grid(row=1, column=0, sticky='e',
+
+    # The contract month asked for PER LEG, because a calendar spread
+    # dates both and a basis dates only the future.
+    ttk.Label(frame_p, text='Leg A contract').grid(row=1, column=0,
+                                                   sticky='e', **pad)
+    con_a = ttk.Entry(frame_p, width=12)
+    con_a.grid(row=1, column=1, sticky='w', **pad)
+    ttk.Label(frame_p, text='Leg B contract').grid(row=2, column=0,
+                                                   sticky='e', **pad)
+    con_b = ttk.Entry(frame_p, width=12)
+    con_b.grid(row=2, column=1, sticky='w', **pad)
+
+    ttk.Label(frame_p, text='Leg A symbol').grid(row=3, column=0, sticky='e',
                                                  **pad)
     sym_a = ttk.Entry(frame_p, width=30)
-    sym_a.grid(row=1, column=1, sticky='w', **pad)
-    ttk.Label(frame_p, text='Leg B symbol').grid(row=2, column=0, sticky='e',
+    sym_a.grid(row=3, column=1, sticky='w', **pad)
+    ttk.Label(frame_p, text='Leg B symbol').grid(row=4, column=0, sticky='e',
                                                  **pad)
     sym_b = ttk.Entry(frame_p, width=30)
-    sym_b.grid(row=2, column=1, sticky='w', **pad)
+    sym_b.grid(row=4, column=1, sticky='w', **pad)
 
-    def fill(*_):
-        preset = PRESETS.get(choice.get())
+    hint = ttk.Label(frame_p, text='', foreground='#555')
+    hint.grid(row=5, column=0, columnspan=2, sticky='w', **pad)
+
+    def selected():
+        return by_label.get(choice.get())
+
+    def refresh(*_):
+        """Show only the boxes this pair actually needs.
+
+        A greyed box the trader cannot type in says 'not your problem'
+        far more clearly than an enabled one they have to guess about.
+        """
+        preset = selected()
+        if not preset:
+            con_a.configure(state='disabled')
+            con_b.configure(state='disabled')
+            sym_a.configure(state='normal')
+            sym_b.configure(state='normal')
+            hint.configure(text='Type both symbols exactly as your broker '
+                                'spells them.')
+            return
+        needs_a, needs_b = preset_needs(preset)
+        con_a.configure(state='normal' if needs_a else 'disabled')
+        con_b.configure(state='normal' if needs_b else 'disabled')
+        # The symbols are shown, and read-only, so the trader can SEE
+        # what is about to be written without being able to break it.
+        sym_a.configure(state='normal')
+        sym_b.configure(state='normal')
         sym_a.delete(0, 'end')
         sym_b.delete(0, 'end')
-        if preset:
-            sym_a.insert(0, preset['symbol_a'])
-            sym_b.insert(0, preset['symbol_b'])
-    choice.bind('<<ComboboxSelected>>', fill)
-    fill()
+        sym_a.insert(0, str(preset.get('leg_a') or ''))
+        sym_b.insert(0, str(preset.get('leg_b') or ''))
+        sym_a.configure(state='readonly')
+        sym_b.configure(state='readonly')
+        if needs_a or needs_b:
+            hint.configure(text='Contract = the month and year code, e.g. '
+                                'Z6 or 1226.')
+        else:
+            hint.configure(text='')
+
+    choice.bind('<<ComboboxSelected>>', refresh)
+    refresh()
 
     def save():
-        preset = PRESETS.get(choice.get()) or {}
+        preset = selected()
         answers = {key: entry.get() for key, entry in fields.items()}
-        answers.update({'symbol_a': sym_a.get(), 'symbol_b': sym_b.get(),
-                        'pair_type': preset.get('pair_type', 'SPOT_FUTURE'),
-                        'name': preset.get('name'),
+        try:
+            if preset:
+                symbol_a, symbol_b = expand_preset(preset, con_a.get(),
+                                                   con_b.get())
+                pair_type = preset.get('pair_type', 'SPOT_FUTURE')
+                name = preset.get('name')
+            else:
+                symbol_a, symbol_b = sym_a.get(), sym_b.get()
+                # RELATED: the reading with NO fair value, which is the
+                # safe way to be wrong about a pair nobody described.
+                # Calling two unknown symbols a basis GIVES them a fair
+                # value they may not have; the Exchanges page can
+                # correct it in one click once somebody looks.
+                pair_type, name = 'RELATED', None
+        except SetupError as e:
+            messagebox.showerror('Not saved', str(e))
+            return
+        answers.update({'symbol_a': symbol_a, 'symbol_b': symbol_b,
+                        'pair_type': pair_type, 'name': name,
                         'terminal_a': terminal_a, 'terminal_b': terminal_b})
         try:
             config_path, _ = apply_config(answers, root)
