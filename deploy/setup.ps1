@@ -23,10 +23,16 @@
 param(
     # Where the code lands. Short, no spaces, off the profile: a path
     # with a space in it is the thing that breaks a .bat six months later.
-    [string] $Root = 'C:\MT5-Trader',
+    #
+    # These four default to whatever rollout.json says, and rollout.json
+    # is THE place to change the repository and branch for the office.
+    # A blank here means 'take it from the file'; passing one on the
+    # command line overrides the file for this one machine.
+    #
+    [string] $Root = '',
 
-    [string] $RepoUrl = 'https://github.com/nishant-patel-git/Mirror-MT5-Trader.git',
-    [string] $Branch = 'main',
+    [string] $RepoUrl = '',
+    [string] $Branch = '',
 
     # A fine-grained, READ-ONLY token for this one repository. Read-only
     # on purpose: a token that leaks off an office PC then reads code,
@@ -42,8 +48,8 @@ param(
     # TWO folders, never one folder and a shortcut. A terminal holds a
     # single login, so two runners on one installation are one account
     # trading against itself.
-    [string] $TerminalA = 'C:\MT5-A',
-    [string] $TerminalB = 'C:\MT5-B',
+    [string] $TerminalA = '',
+    [string] $TerminalB = '',
 
     # For a re-run on a machine that is already set up: keep its
     # config.json rather than asking the six questions again.
@@ -81,6 +87,55 @@ Write-Host '  =====================================================' -Foreground
 # --- 0. The cheap checks, before anything is downloaded -----------------
 
 Step 'Checking what this setup was given'
+
+<#
+    rollout.json holds the repository, the branch and the folders, so
+    moving the office from the demo repo to the live one is an edit to
+    one file in the rollout kit rather than a flag somebody has to
+    remember on every machine.
+
+    A missing file is not fatal - the defaults below keep a bare
+    SETUP.bat working - but it IS said out loud, because a setup that
+    silently installed from the wrong repository would be found out
+    weeks later.
+#>
+$rolloutPath = Join-Path $here 'rollout.json'
+$rollout = $null
+if (Test-Path $rolloutPath) {
+    try {
+        $rollout = Get-Content -Raw -Path $rolloutPath | ConvertFrom-Json
+        Say ('Rollout settings: ' + $rolloutPath)
+    } catch {
+        Fail ('rollout.json is next to this script but will not parse (' +
+              $_.Exception.Message + '). Fix the file rather than ' +
+              'deleting it - installing from a guessed repository is ' +
+              'worse than not installing.')
+    }
+} else {
+    Warn ('No rollout.json beside this script - using built-in defaults. ' +
+          'Copy the whole deploy folder into the rollout kit so the ' +
+          'repository and branch come from one place.')
+}
+
+function Setting {
+    param([string] $Given, [string] $Key, [string] $Default)
+    if ($Given) { return $Given }
+    if ($rollout -and $rollout.PSObject.Properties.Name -contains $Key) {
+        $value = [string] $rollout.$Key
+        if ($value) { return $value }
+    }
+    return $Default
+}
+
+$RepoUrl   = Setting $RepoUrl   'repo_url' 'https://github.com/nishant-patel-git/Mirror-MT5-Trader.git'
+$Branch    = Setting $Branch    'branch'   'main'
+$Root      = Setting $Root      'root'       'C:\MT5-Trader'
+$TerminalA = Setting $TerminalA 'terminal_a' 'C:\MT5-A'
+$TerminalB = Setting $TerminalB 'terminal_b' 'C:\MT5-B'
+$PyVersion = Setting ''         'python_version' '3.11'
+
+Say ('Repository:        ' + $RepoUrl)
+Say ('Branch:            ' + $Branch)
 
 if (-not $GoldenZip) {
     $candidate = Join-Path $here 'MT5-golden.zip'
@@ -133,6 +188,30 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
 
 Step 'Python'
 
+function Test-Python {
+    <#
+        Is this interpreter one this project can actually run on?
+
+        Two things are checked and NEITHER is negotiable:
+
+        64-BIT. MetaTrader5's IPC handshake fails against a 32-bit
+        Python with an error that says nothing useful, and the symptom
+        on the desk is a leg that never connects.
+
+        THE VERSION. The suite is tested on 3.11. A machine carrying
+        the company's Python 3.9, or a 3.13 that no wheel exists for
+        yet, must be told so - not quietly used, which turns one PC
+        into the one that behaves differently.
+    #>
+    param([string[]] $Command)
+    $probe = 'import sys, struct; print("%d.%d %d" % (sys.version_info[0], sys.version_info[1], struct.calcsize("P") * 8))'
+    $out = Invoke-Python $Command @('-c', $probe) 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $out) { return $null }
+    $parts = ([string] $out).Trim() -split ' '
+    return @{ Version = $parts[0]; Bits = [int] $parts[1];
+              Command = $Command }
+}
+
 function Find-Python {
     <#
         The command that runs Python here, as a list: the program and
@@ -141,16 +220,48 @@ function Find-Python {
         'python' on PATH (what a conda or venv prompt has), or neither.
         Assuming the launcher is why a machine that already had Python
         was told it had none.
+
+        The exact version is asked for FIRST. 'py -3.11' on a box that
+        also has 3.9 on PATH is the good outcome, and looking at PATH
+        first would miss it.
     #>
     if (Get-Command py -ErrorAction SilentlyContinue) {
-        & py -3.11 -c 'import sys' 2>$null
-        if ($LASTEXITCODE -eq 0) { return @('py', '-3.11') }
+        $found = Test-Python @('py', ('-' + $PyVersion))
+        if ($found) { return $found }
     }
     if (Get-Command python -ErrorAction SilentlyContinue) {
-        $v = & python -c 'import sys; print(sys.version_info[0])' 2>$null
-        if ($LASTEXITCODE -eq 0 -and $v -eq '3') { return @('python') }
+        $found = Test-Python @('python')
+        if ($found) { return $found }
     }
     return $null
+}
+
+function Assert-Python {
+    <#
+        The loud refusal. A wrong Python is a machine that will behave
+        differently from every other desk, so it stops the install and
+        names what to do about it.
+    #>
+    param($Found)
+    if ($Found.Bits -ne 64) {
+        Fail ('This machine''s Python is ' + $Found.Bits + '-bit (' +
+              ($Found.Command -join ' ') + ', version ' + $Found.Version +
+              '). MetaTrader 5 will not talk to it: the handshake fails ' +
+              'with an error that says nothing, and the leg simply never ' +
+              'connects. Uninstall it, or install Python ' + $PyVersion +
+              ' 64-bit from python.org alongside it, and run SETUP.bat ' +
+              'again.')
+    }
+    if ($Found.Version -ne $PyVersion) {
+        Fail ('This machine has Python ' + $Found.Version + ' (' +
+              ($Found.Command -join ' ') + '), and this project is tested ' +
+              'on ' + $PyVersion + '. Refusing to install onto it rather ' +
+              'than making this the one PC in the office that behaves ' +
+              'differently. Install Python ' + $PyVersion + ' 64-bit from ' +
+              'python.org - ticking "Add python.exe to PATH" and "py ' +
+              'launcher" - and run SETUP.bat again. The existing Python ' +
+              'can stay; the launcher picks the right one.')
+    }
 }
 
 function Invoke-Python {
@@ -162,10 +273,17 @@ function Invoke-Python {
     & $exe @argv
 }
 
-$python = Find-Python
-if ($null -eq $python) {
+$found = Find-Python
+if ($null -eq $found) {
+    if ($PyVersion -ne '3.11') {
+        Fail ('rollout.json asks for Python ' + $PyVersion + ', and this ' +
+              'machine has none. This script only knows how to fetch ' +
+              '3.11 unattended - install ' + $PyVersion + ' 64-bit by ' +
+              'hand and run SETUP.bat again.')
+    }
     # 64-bit, and it must match the 64-bit terminal: a 32-bit Python
     # fails the MT5 IPC handshake with an error that says nothing.
+    # Include_tcltk: the setup wizard is a tkinter window.
     Say 'Installing Python 3.11, 64-bit...'
     $pyExe = Join-Path $env:TEMP 'python-3.11.exe'
     Invoke-WebRequest -UseBasicParsing -OutFile $pyExe -Uri (
@@ -173,13 +291,16 @@ if ($null -eq $python) {
     Start-Process -Wait -FilePath $pyExe -ArgumentList (
         '/quiet InstallAllUsers=1 PrependPath=1 Include_test=0 Include_tcltk=1')
     Refresh-Path
-    $python = Find-Python
-    if ($null -eq $python) {
+    $found = Find-Python
+    if ($null -eq $found) {
         Fail ('Python installed but is still not on PATH. Close this ' +
               'window, open a new one, and run SETUP.bat again.')
     }
 }
-Say ('Using Python: ' + ($python -join ' '))
+Assert-Python $found
+$python = $found.Command
+Say ('Using Python: ' + ($python -join ' ') + '  (version ' +
+     $found.Version + ', ' + $found.Bits + '-bit)')
 
 # tkinter is what the six-question window is drawn with. Checked here,
 # where it is still fixable, rather than at the moment the wizard opens.

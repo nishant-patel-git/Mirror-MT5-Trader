@@ -64,17 +64,37 @@ Copy-Item -Recurse -Force -Path $Source -Destination $stage
 <#
     What comes out, and why.
 
+    What comes OUT:
+
     logs / Logs      Every one names an account number and a server. A
                      template that carries them ships one trader's
                      account details to every PC in the office.
-    config\*.ini     accounts.ini and the servers cache hold logins and,
-                     on some builds, a saved password. THIS is the file
-                     that must never travel.
+    accounts.dat     The saved logins, and on some builds the saved
+                     password. THIS is the file that must never travel.
     bases, history   Downloaded price history. Gigabytes, and rebuilt
                      from the server on first connect anyway.
     profiles\*       Saved chart layouts. Each chart is a live
                      subscription the terminal re-opens on startup.
     MQL5\Logs        Same as logs, from the expert side.
+
+    What deliberately STAYS, and why stripping it breaks the install:
+
+    servers.dat      The list of brokers the terminal knows. This is
+                     what the 'Open an Account' dialog fills from, and
+                     it is the whole reason the source terminal is
+                     logged in once before being zipped. Remove it and
+                     'MentoMarkets-Server' means nothing on the new PC:
+                     mt5.initialize(server=...) cannot resolve a server
+                     the terminal has never heard of, and the trader is
+                     back to picking Mento Markets Ltd. from a list -
+                     which is exactly the step this setup removes.
+    common.ini,      The Options settings, INCLUDING Allow Algo
+    terminal.ini     Trading. Baking that in is step 6 of the prep
+                     above; deleting these files throws it away and
+                     every PC needs the button pressed by hand.
+
+    Neither holds a password. accounts.dat is the one that does, and it
+    is checked for by name below.
 #>
 $strip = @(
     'logs', 'Logs', 'bases', 'history',
@@ -89,11 +109,13 @@ foreach ($relative in $strip) {
     }
 }
 
-# Credentials, specifically. Named separately from the bulk above
-# because this is the check that has to be right.
+# Credentials, specifically, and ONLY these. Named separately from the
+# bulk above because this is the check that has to be right - in both
+# directions. A file that stays here by mistake ships a login; a file
+# removed by mistake (servers.dat, terminal.ini) ships a terminal that
+# cannot find the broker or has Algo Trading switched off again.
 $secrets = @()
-foreach ($name in @('accounts.dat', 'accounts.ini', 'servers.dat',
-                    'common.ini', 'terminal.ini')) {
+foreach ($name in @('accounts.dat', 'accounts.ini')) {
     $secrets += Get-ChildItem -Path $stage -Filter $name -Recurse -Force `
                               -ErrorAction SilentlyContinue
 }
@@ -114,6 +136,22 @@ if ($left -and -not $Force) {
            '. Refusing to build a template that might carry a login to ' +
            'every PC in the office. Log the terminal out and try again.')
 }
+
+# And the check the other way. A terminal that was never logged in has
+# no servers list, so 'MentoMarkets-Server' will not resolve on any PC
+# this zip is unpacked onto - and the failure appears at the first
+# connect, on a trader's machine, as a login that will not go through.
+$servers = Get-ChildItem -Path $stage -Filter 'servers.dat' -Recurse -Force `
+                         -ErrorAction SilentlyContinue
+if (-not $servers) {
+    Remove-Item -Recurse -Force $stage
+    throw ('This terminal has no servers.dat, which means it was never ' +
+           'logged in. Open it, log into the broker once so the servers ' +
+           'list is filled, log out again, close it, and re-run this. ' +
+           'Without that list the new PCs cannot resolve the server name ' +
+           'and every login fails.')
+}
+Write-Host ('  keeping ' + $servers[0].Name + ' (the broker list)')
 
 if (Test-Path $Output) { Remove-Item -Force $Output }
 Write-Host ('Compressing to ' + $Output + ' ...')

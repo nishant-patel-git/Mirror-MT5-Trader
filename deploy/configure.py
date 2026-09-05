@@ -76,6 +76,27 @@ def load_presets(root=None):
     return [p for p in (presets or []) if isinstance(p, dict) and p.get('label')]
 
 
+def default_server(root=None):
+    """The server name to fill both boxes with, from `presets.json`.
+
+    Filled in, NOT fixed. Both boxes stay editable and they are asked
+    for separately, so a desk whose two legs sit at different brokers
+    types the second one over and nothing else changes.
+    """
+    if root:
+        path = os.path.join(root, 'deploy', 'presets.json')
+    else:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'presets.json')
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return ''
+    return str((data or {}).get('default_server') or '') \
+        if isinstance(data, dict) else ''
+
+
 def preset_needs(preset):
     """(leg A needs a contract code, leg B needs one).
 
@@ -337,6 +358,11 @@ def _run_gui(root, terminal_a, terminal_b):          # pragma: no cover
     pad = {'padx': 8, 'pady': 4}
     fields = {}
 
+    # Filled in for both legs, and editable on both. The two servers are
+    # separate answers on purpose: a desk running one leg at a second
+    # broker types over the second box and nothing else changes.
+    server = default_server(root)
+
     def account_frame(text, grid_row, keys):
         """One account: login, password, server. The grid row is the
         position WITHIN this frame, so the two frames cannot drift."""
@@ -346,6 +372,8 @@ def _run_gui(root, terminal_a, terminal_b):          # pragma: no cover
             ttk.Label(frame, text=label).grid(row=line, column=0,
                                               sticky='e', **pad)
             entry = ttk.Entry(frame, width=32, show=show)
+            if key.startswith('server') and server:
+                entry.insert(0, server)
             entry.grid(row=line, column=1, sticky='w', **pad)
             fields[key] = entry
 
@@ -509,6 +537,12 @@ def main(argv=None):
     # machine, which is better than the built-in default.
     answers.setdefault('terminal_a', args.terminal_a)
     answers.setdefault('terminal_b', args.terminal_b)
+    # Same default the window fills in, so an unattended install and a
+    # watched one produce the same config from the same answers.
+    server = default_server(args.root)
+    if server:
+        answers.setdefault('server_a', server)
+        answers.setdefault('server_b', server)
     try:
         config_path, env_path = apply_config(answers, args.root, args.force)
     except SetupError as e:

@@ -26,6 +26,7 @@ def _load(name):
 
 configure = _load('configure')
 preflight = _load('preflight')
+add_pairs = _load('add_pairs')
 
 PASSWORD_A = 'a-secret-with a space and #hash'
 PASSWORD_B = 'b-secret'
@@ -316,6 +317,183 @@ def test_control_two_different_months_go_through():
         answers(symbol_a=symbol_a, symbol_b=symbol_b,
                 pair_type=preset['pair_type']), {})
     assert out['pairs']['USOILX6|USOILZ6']['pair_type'] == 'FUTURE_FUTURE'
+
+
+# --- the monthly roll ----------------------------------------------------
+
+def _roll(**over):
+    spec = {'leg_a_account': 'Account A', 'leg_b_account': 'Account B',
+            'pairs': [{'name': 'Gold basis', 'leg_a': 'XAUUSD.f',
+                       'leg_b': 'GCZ6', 'pair_type': 'SPOT_FUTURE'}]}
+    spec.update(over)
+    return spec
+
+
+def _configured_raw():
+    return configure.build_config(answers(), {})
+
+
+def test_the_shipped_roll_list_parses_and_matches_the_wizard():
+    """pairs.json names accounts by NAME, and the wizard is what creates
+    them. If those two ever disagree the trader gets a refusal on a
+    machine that is perfectly well set up."""
+    spec = add_pairs.load_list(str(DEPLOY / 'pairs.json'))
+    assert spec['leg_a_account'] == configure.ACCOUNT_A
+    assert spec['leg_b_account'] == configure.ACCOUNT_B
+    for entry in spec['pairs']:
+        assert entry['leg_a'] and entry['leg_b']
+        assert entry['pair_type'] in ('SPOT_FUTURE', 'FUTURE_FUTURE',
+                                      'RELATED')
+
+
+def test_a_new_contract_month_is_added():
+    raw = _configured_raw()
+    to_add, _ = add_pairs.plan(
+        _roll(pairs=[{'name': 'Gold basis', 'leg_a': 'XAUUSD.f',
+                      'leg_b': 'GCH7', 'pair_type': 'SPOT_FUTURE'}]), raw)
+    assert 'XAUUSD.f|GCH7' in to_add
+    added = to_add['XAUUSD.f|GCH7']
+    assert added['leg_a'] == {'account': 'Account A', 'symbol': 'XAUUSD.f'}
+    assert added['enabled'] is True
+    assert added['hedge_ratio_for'] == 'XAUUSD.f|GCH7'
+
+
+def test_a_pair_already_there_is_left_exactly_as_it_is():
+    """The rule the whole script is built around. A trader may be
+    holding a position on it, and re-writing the pair moves the ladder
+    out from under the money."""
+    raw = _configured_raw()
+    raw['pairs']['XAUUSD.f|GCZ6']['enabled'] = False
+    raw['pairs']['XAUUSD.f|GCZ6']['increment'] = 0.05
+    before = dict(raw['pairs']['XAUUSD.f|GCZ6'])
+
+    to_add, notes = add_pairs.plan(_roll(), raw)
+    assert to_add == {}
+    assert any('already here' in note for note in notes)
+    # Not re-enabled, not re-stamped, not touched.
+    assert raw['pairs']['XAUUSD.f|GCZ6'] == before
+
+
+def test_control_a_pair_not_there_yet_is_added(tmp_path):
+    raw = _configured_raw()
+    assert 'XAUUSD.f|GCZ6' in raw['pairs']
+    to_add, _ = add_pairs.plan(
+        _roll(pairs=[{'leg_a': 'XAGUSD.f', 'leg_b': 'SIU6',
+                      'pair_type': 'SPOT_FUTURE'}]), raw)
+    assert list(to_add) == ['XAGUSD.f|SIU6']
+
+
+def test_nothing_is_ever_removed(tmp_path):
+    """The roll list is short and the config is not. Adding this month
+    must not take away last month."""
+    configure.apply_config(answers(), str(tmp_path))
+    spec = _roll(pairs=[{'leg_a': 'XAGUSD.f', 'leg_b': 'SIU6',
+                         'pair_type': 'SPOT_FUTURE'}])
+    add_pairs.apply(spec, str(tmp_path / 'config.json'))
+    now = json.loads((tmp_path / 'config.json').read_text(encoding='utf-8'))
+    assert 'XAUUSD.f|GCZ6' in now['pairs']       # what the wizard wrote
+    assert 'XAGUSD.f|SIU6' in now['pairs']       # what the roll added
+    # And the accounts are untouched.
+    assert set(now['accounts']) == {'Account A', 'Account B'}
+
+
+def test_running_it_twice_changes_nothing_the_second_time(tmp_path):
+    configure.apply_config(answers(), str(tmp_path))
+    config_path = str(tmp_path / 'config.json')
+    spec = _roll(pairs=[{'leg_a': 'XAGUSD.f', 'leg_b': 'SIU6',
+                         'pair_type': 'SPOT_FUTURE'}])
+    add_pairs.apply(spec, config_path)
+    first = json.loads((tmp_path / 'config.json').read_text(encoding='utf-8'))
+    added, _ = add_pairs.apply(spec, config_path)
+    second = json.loads((tmp_path / 'config.json').read_text(encoding='utf-8'))
+    assert added == []
+    assert first == second
+
+
+def test_a_dry_run_writes_nothing(tmp_path):
+    configure.apply_config(answers(), str(tmp_path))
+    config_path = str(tmp_path / 'config.json')
+    before = (tmp_path / 'config.json').read_text(encoding='utf-8')
+    added, _ = add_pairs.apply(
+        _roll(pairs=[{'leg_a': 'XAGUSD.f', 'leg_b': 'SIU6'}]),
+        config_path, dry_run=True)
+    assert added == ['XAGUSD.f|SIU6']
+    assert (tmp_path / 'config.json').read_text(encoding='utf-8') == before
+
+
+def test_a_roll_list_for_another_setup_is_refused():
+    """Account names the machine does not have. Guessing which local
+    account was meant is how a leg ends up on the wrong terminal."""
+    raw = _configured_raw()
+    with pytest.raises(add_pairs.PairsError, match='differently-named'):
+        add_pairs.plan(_roll(leg_a_account='Leg A'), raw)
+
+
+def test_control_the_matching_account_names_go_through():
+    raw = _configured_raw()
+    to_add, _ = add_pairs.plan(
+        _roll(pairs=[{'leg_a': 'XAGUSD.f', 'leg_b': 'SIU6'}]), raw)
+    assert to_add
+
+
+def test_both_legs_on_one_account_is_refused():
+    raw = _configured_raw()
+    with pytest.raises(add_pairs.PairsError, match='against itself'):
+        add_pairs.plan(_roll(leg_b_account='Account A'), raw)
+
+
+def test_a_machine_with_no_accounts_is_refused():
+    with pytest.raises(add_pairs.PairsError, match='no accounts'):
+        add_pairs.plan(_roll(), {})
+
+
+def test_the_same_symbol_on_both_legs_is_skipped_not_added():
+    raw = _configured_raw()
+    to_add, notes = add_pairs.plan(
+        _roll(pairs=[{'leg_a': 'USOILV6', 'leg_b': 'USOILV6'}]), raw)
+    assert to_add == {}
+    assert any('always zero' in note for note in notes)
+
+
+def test_an_unparseable_roll_list_changes_nothing(tmp_path):
+    bad = tmp_path / 'pairs.json'
+    bad.write_text('{ "pairs": [ ,, ] }', encoding='utf-8')
+    with pytest.raises(add_pairs.PairsError, match='not valid JSON'):
+        add_pairs.load_list(str(bad))
+
+
+def test_an_unknown_pair_type_reads_as_related():
+    """RELATED is the reading with NO fair value - the safe way to be
+    wrong about a typo in a hand-edited list."""
+    raw = _configured_raw()
+    to_add, _ = add_pairs.plan(
+        _roll(pairs=[{'leg_a': 'XAGUSD.f', 'leg_b': 'SIU6',
+                      'pair_type': 'SPOTFUTURE'}]), raw)
+    assert to_add['XAGUSD.f|SIU6']['pair_type'] == 'RELATED'
+
+
+def test_control_a_spelled_pair_type_is_kept():
+    raw = _configured_raw()
+    to_add, _ = add_pairs.plan(
+        _roll(pairs=[{'leg_a': 'XAGUSD.f', 'leg_b': 'SIU6',
+                      'pair_type': 'SPOT_FUTURE'}]), raw)
+    assert to_add['XAGUSD.f|SIU6']['pair_type'] == 'SPOT_FUTURE'
+
+
+# --- the default server --------------------------------------------------
+
+def test_the_default_server_is_filled_in_from_presets():
+    assert configure.default_server() == 'MentoMarkets-Server'
+
+
+def test_two_legs_can_sit_at_different_brokers():
+    """Filled in, not fixed. The two servers are separate answers, so a
+    desk running one leg elsewhere types over the second box."""
+    out = configure.build_config(
+        answers(server_a='MentoMarkets-Server',
+                server_b='OtherBroker-Live'), {})
+    assert out['accounts']['Account A']['server'] == 'MentoMarkets-Server'
+    assert out['accounts']['Account B']['server'] == 'OtherBroker-Live'
 
 
 # --- the preflight -------------------------------------------------------

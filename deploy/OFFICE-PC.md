@@ -27,8 +27,18 @@ build. This is the step that makes every PC identical.
 
 Prepare one terminal by hand:
 
-1. Install MetaTrader 5 once, into its own folder.
-2. Log in so the servers list knows your broker, then **log out**.
+1. Install MetaTrader 5 once (the stock MetaQuotes `mt5setup`), into
+   its own folder.
+2. Open an Account → pick **Mento Markets Ltd.** from the company list,
+   log in once, then **log out**.
+
+   This step is the point of the golden zip. Logging in fills
+   `servers.dat`, the terminal's list of known brokers — and that file
+   is kept. Without it, `MentoMarkets-Server` means nothing on a new
+   PC: `mt5.initialize(server=...)` cannot resolve a server the
+   terminal has never heard of, and every trader is back to hunting for
+   Mento Markets in that dialog. The **saved login** is what gets
+   stripped; the **broker list** is what travels.
 3. Market Watch: keep only the symbols this desk trades.
 4. **Close every chart.** Charts are the bulk of the zip, and each one
    is a live subscription the terminal re-opens on startup.
@@ -44,25 +54,62 @@ Then:
 .\deploy\make-golden-terminal.ps1 -Source 'C:\MT5-A'
 ```
 
-It strips logs, price history, chart profiles **and the accounts
-files**, then refuses to build if an accounts file survived — a
-template that carries a login would ship one trader's account to every
-PC in the office. Result: `deploy\MT5-golden.zip`.
+It strips logs, price history, chart profiles **and `accounts.dat`**,
+then refuses to build if an accounts file survived — a template that
+carries a login would ship one trader's account to every PC.
+
+It checks the other way too, and refuses a terminal with **no
+`servers.dat`**: that means step 2 was skipped, and every login on
+every new PC would fail.
+
+Kept on purpose: `servers.dat` (the broker list) and
+`terminal.ini` / `common.ini` (the Options settings, including **Allow
+Algo Trading**). Neither holds a password. Result:
+`deploy\MT5-golden.zip`.
+
+## Changing the repository or branch
+
+**`deploy\rollout.json` — that is the one place.**
+
+```json
+"repo_url": "https://github.com/nishant-patel-git/Mirror-MT5-Trader.git",
+"branch":   "claude/monitoring-positions-market-grid-17nyys",
+```
+
+Edit it in the rollout kit; new PCs are built from that copy. Anything
+passed on the SETUP.bat command line still wins for that one machine.
+
+A PC that is **already installed** does not re-read it — it has a git
+remote of its own. To move one:
+
+```
+cd C:\MT5-Trader
+git remote set-url origin <new url>
+git checkout <new branch>
+```
+
+or delete `C:\MT5-Trader` and run SETUP.bat again. `config.json` and
+`.env` are not in the repo, so a reinstall does not lose the accounts.
 
 ## The rollout kit
 
-Copy these three into one folder — a USB stick or a network share:
+Copy these four into one folder — a USB stick or a network share:
 
 ```
 SETUP.bat
 setup.ps1
+rollout.json
 MT5-golden.zip
 ```
 
 `SETUP.bat` asks for Administrator itself and hands over to
 `setup.ps1`, which:
 
-- installs Git and Python 3.11 64-bit if they are missing
+- installs Git and Python 3.11 64-bit if they are missing, and
+  **refuses loudly** if this PC already has a different version or a
+  32-bit build — MT5's handshake fails against 32-bit with an error
+  that says nothing, and a stray 3.9 makes this the one desk that
+  behaves differently
 - clones the repo to `C:\MT5-Trader`
 - unpacks the golden zip **twice**, to `C:\MT5-A` and `C:\MT5-B`
 - installs the dependencies
@@ -93,6 +140,11 @@ reads code; it cannot push.
 | Account B | login, password, server |
 | Pair | pick a preset, then the contract month(s) — or type both symbols |
 
+Both server boxes come pre-filled with `default_server` from
+`presets.json` (`MentoMarkets-Server`) and both stay editable — they are
+separate answers, so a desk running one leg at a second broker types
+over the second box and nothing else changes.
+
 The two terminal folders are **not** among the questions. SETUP made
 them and passes them in — a trader asked to type a path is a trader who
 can type the same path twice, and two accounts on one installation is
@@ -118,17 +170,50 @@ app reads them from MT5 on the first connect; a number typed at setup
 is a number that can be wrong, and every money figure on the ladder
 runs through it.
 
-## Adding a pair
+## Every month: the roll
 
-`deploy\presets.json` — data, so a new instrument is an edit, not a
-release to every PC. It ships gold and silver bases, WTI and Brent
-calendars, and Brent against WTI.
+**`deploy\pairs.json`** — you edit it when the contract months change,
+hand it out, and the trader double-clicks **`ADD-PAIRS.BAT`**. The new
+ladders appear on their Exchanges page.
+
+```json
+{ "name": "Gold basis", "leg_a": "XAUUSD.f", "leg_b": "GCZ6",
+  "pair_type": "SPOT_FUTURE" }
+```
+
+It **only adds.** A pair already on the machine is reported and left
+*exactly* as it is — not re-written, not re-enabled, not re-stamped —
+because the trader may be holding a position on it and editing a pair
+under a live position moves the ladder out from under the money.
+Nothing is ever deleted or switched off, and accounts are never
+touched. So it is safe to run twice and safe to run mid-session.
+
+`ADD-PAIRS.BAT --dry-run` says what it would do and writes nothing.
+
+If the engine is running it restarts itself within a few seconds when
+the config changes (`mt5trader/config.py`, `restart_required`); if it
+is not, the pairs are there at the next START TRADING.
+
+The two account names in the file must match the machine's — the wizard
+writes `Account A` and `Account B`. A list aimed at a differently-named
+setup is refused rather than guessed at, because guessing which local
+account was meant is how a leg ends up on the wrong terminal.
+
+## Adding an instrument to the setup wizard
+
+`deploy\presets.json` seeds the **first** install only. Data, so a new
+instrument is an edit rather than a release to every PC.
 
 `{contract}` in a leg is the month-and-year code the trader types at
-setup (`Z6`, `1226`, `Z2026` — whatever your broker uses). Put it in
-either leg, both, or neither: a basis dates only the future, a calendar
-spread dates both and gets **two** boxes. One box for a calendar spread
-would make both legs the same symbol, and that spread is always zero.
+setup (`Z6`, `U6`, `V6`, `1226`). Put it in either leg, both, or
+neither: a basis dates only the future, a calendar spread dates both
+and gets **two** boxes. One box for a calendar spread would make both
+legs the same symbol, and that spread is always zero.
+
+Both the suffix and the contract code belong to the **liquidity
+provider**, not to us. The same gold is `XAUUSD.f` on one LP and
+`XAUUSD_` or `GOLD` on the next. When the LP changes, this file and
+`pairs.json` change.
 
 `pair_type` is not cosmetic:
 
@@ -193,15 +278,20 @@ on any PC until somebody walks to it.
 A configured machine with no terminal open is **fine** and starts — the
 engine opens them. The old check refused exactly this case.
 
-## Still to decide
+## When the liquidity provider changes
 
-- **The exact broker spelling of every symbol in `presets.json`.** It
-  ships XAUUSD, XAGUSD, USOIL, UKOIL, GC and SI as bare names. If your
-  broker writes `XAUUSD.f` or `GOLD`, the engine cannot trade what is
-  there now. Check Market Watch, or the Find symbols button on the
-  Exchanges page, and set it once.
-- Who owns `MT5-golden.zip`, and re-strips it when the broker updates
-  MetaTrader 5?
+Symbols belong to the LP, and both parts move — the suffix (`.f`, `_`)
+and the contract code (`GCZ6`, `GC1226`). Two files carry them, and
+nothing else does:
+
+| File | Used for | Reaches a PC by |
+|---|---|---|
+| `deploy\presets.json` | the setup wizard's menu | a fresh SETUP.bat |
+| `deploy\pairs.json` | the monthly roll | ADD-PAIRS.BAT |
+
+Check the spelling in Market Watch, or with **Find symbols** on the
+Exchanges page, before editing either. A symbol the terminal does not
+have cannot trade: the pair sits on the screen reading unknown.
 
 ## One thing this shape is not for
 
