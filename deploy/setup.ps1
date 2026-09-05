@@ -454,7 +454,39 @@ if ($KeepConfig -and (Test-Path (Join-Path $Root 'config.json'))) {
     }
 }
 
-# --- 7. The shortcut -----------------------------------------------------
+# --- 7. Prove it -------------------------------------------------------
+#
+#     The install is not finished when the files are in place. It is
+#     finished when this machine has actually logged both accounts in.
+#
+#     Doing it HERE means a wrong password, a typo'd login or a server
+#     name that does not resolve is found in front of whoever is
+#     installing, with the broker's own words on screen. The alternative
+#     is a trader discovering it at 9am with nobody around.
+#
+#     It also opens both terminals, which is what the Algo Trading step
+#     below needs - so the two are done in one visit rather than two.
+
+Step 'Proving both accounts connect'
+$verified = $false
+if (Test-Path (Join-Path $Root 'config.json')) {
+    Push-Location $Root
+    Invoke-Python $python @('deploy\check_config.py', '--config',
+                            'config.json')
+    $verified = ($LASTEXITCODE -eq 0)
+    Pop-Location
+    if (-not $verified) {
+        Warn ('At least one account did not connect - the reason is above, ' +
+              'in the broker''s own words. Everything is installed; fix the ' +
+              'account on the Exchanges page after starting, or re-run ' +
+              'deploy\configure.py. Do not hand this machine over until ' +
+              'both legs connect.')
+    }
+} else {
+    Warn 'No config.json, so there is nothing to prove yet.'
+}
+
+# --- 8. The shortcut -----------------------------------------------------
 
 Step 'Desktop shortcut'
 $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
@@ -468,12 +500,42 @@ $link.Save()
 Say 'START TRADING is on the Desktop.'
 
 Write-Host ''
-Write-Host '  Done.' -ForegroundColor Green
-Write-Host '  One thing left, once, in each terminal the first time it opens:'
-Write-Host '    press Algo Trading so the button turns green.'
+if ($verified) {
+    Write-Host '  Done - and both accounts logged in from this machine.' `
+               -ForegroundColor Green
+} else {
+    Write-Host '  Installed, but NOT proven - see the account errors above.' `
+               -ForegroundColor Yellow
+}
+
+<#
+    The one manual step in the whole rollout, and it gets its own box
+    because it is the one that produces a silent failure. Algo Trading
+    is a per-INSTALLATION setting living in AppData, so it cannot ride
+    in the golden zip; a fresh terminal has it off, and the symptom is
+    a ladder that shows prices and refuses every order.
+
+    Step 7 left both terminals open, so this is two clicks now rather
+    than a second visit.
+#>
+Write-Host ''
+Write-Host '  ###########################################################'
+Write-Host '  #  ONE THING LEFT, BY HAND, ONCE ON THIS PC:              #'
+Write-Host '  #                                                         #'
+Write-Host '  #  In BOTH MetaTrader 5 windows, press ALGO TRADING so    #'
+Write-Host '  #  the button turns GREEN.                                #'
+Write-Host '  #                                                         #'
+Write-Host '  #  It is stored per installation, so it cannot be shipped #'
+Write-Host '  #  in the template. Left off, the ladder shows prices and #'
+Write-Host '  #  refuses every order.                                   #'
+Write-Host '  ###########################################################'
 Write-Host ''
 Write-Host '  Do NOT run the terminals as Administrator. A terminal started'
 Write-Host '  elevated will not accept a connection from a normally-started'
 Write-Host '  Python, and the leg reads as unknown with no obvious reason.'
 Write-Host ''
+Write-Host '  Then: double-click START TRADING on the Desktop.'
+Write-Host '  Any time later, deploy\VERIFY.bat re-checks this machine.'
+Write-Host ''
+if (-not $verified) { exit 1 }
 exit 0

@@ -113,7 +113,13 @@ MT5-golden.zip
 - **runs the test suite, and stops if it fails** — before anything is
   configured and before a shortcut exists
 - opens the six-question wizard
+- **logs both accounts in and proves it** (`check_config.py`) — a wrong
+  password or a mistyped login is found in front of whoever is
+  installing, in the broker's own words, not by a trader at 9am
 - puts START TRADING on the Desktop
+
+It exits non-zero if either account failed to connect, so a bad install
+cannot look like a good one.
 
 Private repo, so each PC needs read access:
 
@@ -304,6 +310,25 @@ on any PC until somebody walks to it.
 
 A configured machine with no terminal open is **fine** and starts — the
 engine opens them. The old check refused exactly this case.
+
+## The one manual step
+
+**Press Algo Trading in both terminals**, once per PC, so the button
+turns green.
+
+It is stored per installation in AppData, so it cannot ride in the
+golden zip. Left off, the ladder shows prices and refuses every order —
+which looks like a broken feed rather than a switch. SETUP leaves both
+terminals open and says so in a box you cannot miss.
+
+## Checking a machine later
+
+**`deploy\VERIFY.bat`** — double-click. Changes nothing, starts
+nothing, places no order. It runs the preflight (one login, one port or
+one terminal folder on both rows) and then logs each account in and
+reports what the broker said.
+
+That is the first thing to run when a desk says "it will not connect".
 
 ## When the liquidity provider changes
 
