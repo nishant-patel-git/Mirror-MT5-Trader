@@ -29,11 +29,16 @@ Once, and again whenever the broker ships a new build. Three steps:
 2. **Do not log in.** Cancel the Open an Account dialog.
 3. Close the terminal.
 
-```powershell
-.\deploy\make-golden-terminal.ps1 -Source 'C:\MT5-A'
-```
+Then double-click **`deploy\MAKE-GOLDEN.BAT`**.
 
 Result: `deploy\MT5-golden.zip`.
+
+Use the `.BAT`, not the `.ps1` directly. Typing
+`.\deploy\make-golden-terminal.ps1` into a **Command Prompt** does not
+run it — cmd.exe cannot execute PowerShell, so Windows offers to *open*
+the file and you get a "Select an app to open this .ps1 file" dialog
+suggesting Notepad. The `.BAT` is the same script with that trap
+removed, and it checks the terminal is closed before it starts.
 
 That is genuinely all. Everything an earlier version of this page asked
 for — logging in once, tidying Market Watch, closing charts, turning
