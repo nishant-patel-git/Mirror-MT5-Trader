@@ -22,50 +22,46 @@ RUNBOOK.md instead.
 
 ## Before the first PC: build the golden terminal
 
-Once, on your own machine, and again whenever the broker ships a new
-build. This is the step that makes every PC identical.
+Once, and again whenever the broker ships a new build. Three steps:
 
-Prepare one terminal by hand:
-
-1. Install MetaTrader 5 once (the stock MetaQuotes `mt5setup`), into
-   its own folder.
-2. Open an Account → pick **Mento Markets Ltd.** from the company list,
-   log in once, then **log out**.
-
-   This step is the point of the golden zip. Logging in fills
-   `servers.dat`, the terminal's list of known brokers — and that file
-   is kept. Without it, `MentoMarkets-Server` means nothing on a new
-   PC: `mt5.initialize(server=...)` cannot resolve a server the
-   terminal has never heard of, and every trader is back to hunting for
-   Mento Markets in that dialog. The **saved login** is what gets
-   stripped; the **broker list** is what travels.
-3. Market Watch: keep only the symbols this desk trades.
-4. **Close every chart.** Charts are the bulk of the zip, and each one
-   is a live subscription the terminal re-opens on startup.
-5. Tools → Options → Server: News off. Community and Signals too.
-6. Tools → Options → Expert Advisors: tick **Allow Algo Trading**, so
-   nobody has to be told to press the button.
-7. Close the terminal — a zip taken while it runs is a snapshot of
-   half-written files.
-
-Then:
+1. Install MetaTrader 5 with the **broker's own installer**
+   (`mentomarkets5setup.exe`) into its own folder, e.g. `C:\MT5-A`.
+2. **Do not log in.** Cancel the Open an Account dialog.
+3. Close the terminal.
 
 ```powershell
 .\deploy\make-golden-terminal.ps1 -Source 'C:\MT5-A'
 ```
 
-It strips logs, price history, chart profiles **and `accounts.dat`**,
-then refuses to build if an accounts file survived — a template that
-carries a login would ship one trader's account to every PC.
+Result: `deploy\MT5-golden.zip`.
 
-It checks the other way too, and refuses a terminal with **no
-`servers.dat`**: that means step 2 was skipped, and every login on
-every new PC would fail.
+That is genuinely all. Everything an earlier version of this page asked
+for — logging in once, tidying Market Watch, closing charts, turning
+News off, ticking Allow Algo Trading — is stored in
+`%APPDATA%\MetaQuotes\Terminal\<hash>\`, **not** in the program
+folder, so none of it is in the zip and none of it can be prepared
+here.
 
-Kept on purpose: `servers.dat` (the broker list) and
-`terminal.ini` / `common.ini` (the Options settings, including **Allow
-Algo Trading**). Neither holds a password. Result:
-`deploy\MT5-golden.zip`.
+Two things follow, both measured on a clean PC:
+
+- **The broker's installer already knows its own servers.** A copied
+  program folder logs in from `mt5.initialize(path, login, password,
+  server)` with no manual sign-in. Verified: a fresh install connected
+  as 10006, and a plain folder copy of it connected as 10007.
+- **Allow Algo Trading does not travel.** It is per-installation, in
+  AppData. It is pressed once in each terminal the first time it opens
+  — the one manual step in the whole rollout, and SETUP says so.
+
+Do not use `/portable` to pull those settings into the program folder:
+a portable terminal refuses IPC from a normally-started Python
+(`mt5trader/mt5_errors.py`), so the legs would never connect.
+
+The script strips logs and refuses outright if it finds `accounts.dat`
+— which a normal install keeps in AppData, so its presence means the
+folder is not what it should be.
+
+The broker's installer is **not** silent: `/auto` still shows the EULA.
+That is why SETUP unpacks a zip rather than driving the installer.
 
 ## Changing the repository or branch
 
@@ -106,9 +102,10 @@ MT5-golden.zip
 `setup.ps1`, which:
 
 - installs Git and Python 3.11 64-bit if they are missing, and
-  **refuses loudly** if this PC already has a different version or a
-  32-bit build — MT5's handshake fails against 32-bit with an error
-  that says nothing, and a stray 3.9 makes this the one desk that
+  **refuses loudly** if this PC has a version not in `python_versions`
+  (`3.11` and `3.14` — the two the suite has actually passed on) or a
+  32-bit build. MT5's handshake fails against 32-bit with an error that
+  says nothing, and an untested version makes this the one desk that
   behaves differently
 - clones the repo to `C:\MT5-Trader`
 - unpacks the golden zip **twice**, to `C:\MT5-A` and `C:\MT5-B`

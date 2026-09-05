@@ -1,33 +1,48 @@
 <#
-    Build MT5-golden.zip - the stripped MetaTrader 5 folder every office
-    PC gets two copies of.
+    Build MT5-golden.zip - the MetaTrader 5 folder every office PC gets
+    two copies of.
 
-    You run this ONCE, on the machine where you installed and tuned one
-    terminal. SETUP.bat then unpacks the result twice on every PC, which
-    is faster than running the broker's installer twice and - the part
-    that matters - identical every time. No installer dialogs, no
-    'did I tick the same boxes on both'.
+    You run this ONCE, and again whenever the broker ships a new
+    terminal build. SETUP.bat then unpacks the result twice on every PC,
+    which is faster than running the installer twice and - the part that
+    matters - identical every time. No installer dialogs, no 'did I tick
+    the same boxes on both'.
 
-    Before you run it, prepare the source terminal by hand:
+    PREPARE THE SOURCE, and it is three steps, not ten:
 
-      1. Install MetaTrader 5 once, into its own folder.
-      2. Log in, so the servers list knows your broker, then LOG OUT.
-      3. Market Watch: keep only the symbols this desk trades.
-      4. Close every chart. Charts are the bulk of the zip and every
-         one of them is a subscription the terminal maintains.
-      5. Tools > Options > Server: turn off News. Community and
-         Signals too.
-      6. Tools > Options > Expert Advisors: tick Allow Algo Trading.
-         Baked in here, it is one less thing for a trader to be told.
-      7. Close the terminal. A running terminal has files open and the
-         copy below will be a snapshot of a half-written state.
+      1. Install MetaTrader 5 once with the BROKER'S installer
+         (mentomarkets5setup.exe), into its own folder such as C:\MT5-A.
+      2. Do NOT log in. Cancel the Open an Account dialog if it appears.
+      3. Close the terminal.
 
-    Then:
+    That is all. Everything a previous version of this script fussed
+    over - the servers list, Market Watch, closing charts, turning News
+    off, Allow Algo Trading - lives in
+    %APPDATA%\MetaQuotes\Terminal\<hash>\, NOT in the program folder, so
+    none of it is in this zip and none of it can be prepared here.
+
+    Two things follow from that, and both were measured on a clean PC:
+
+      * The broker's installer already knows its own servers, so a copy
+        of the program folder logs in from
+        mt5.initialize(path, login, password, server) with no manual
+        sign-in at all. That is the whole reason this approach works.
+
+      * Allow Algo Trading does NOT travel. It is a per-installation
+        setting in AppData, so it is pressed once in each terminal the
+        first time it opens. SETUP says so at the end.
+
+    Do not reach for /portable to pull those settings into the program
+    folder: a terminal started portable refuses IPC from a normally
+    started Python, so the legs would never connect. mt5_errors.py
+    already records that.
 
         .\deploy\make-golden-terminal.ps1 -Source 'C:\MT5-A'
 
-    Re-run it whenever the broker ships a new terminal build. Whoever
-    owns that decision owns this file.
+    Plain ASCII and single quotes throughout: Windows PowerShell 5.1
+    reads a script with no byte-order mark as ANSI, and one curly quote
+    from a word processor comes back as a parser error on a line that
+    looks perfectly fine.
 #>
 
 [CmdletBinding()]
@@ -37,9 +52,9 @@ param(
 
     [string] $Output = (Join-Path $PSScriptRoot 'MT5-golden.zip'),
 
-    # Belt and braces. The check below refuses to zip a terminal that
-    # still has an account in it; this is the switch for the one case
-    # where you have looked and you are sure.
+    # For the one case where you have looked at the refusal below and
+    # you are sure. It is not a switch to reach for casually: what it
+    # overrides is the check that no account details are in the zip.
     [switch] $Force
 )
 
@@ -47,61 +62,30 @@ $ErrorActionPreference = 'Stop'
 
 if (-not (Test-Path (Join-Path $Source 'terminal64.exe'))) {
     throw ($Source + ' has no terminal64.exe in it. Point -Source at the ' +
-           'MetaTrader 5 FOLDER, not the shortcut and not Program Files.')
+           'MetaTrader 5 FOLDER, not the shortcut and not the installer.')
 }
 if (Get-Process -Name 'terminal64' -ErrorAction SilentlyContinue) {
     throw ('MetaTrader 5 is running. Close it first - a zip taken while ' +
            'the terminal is open is a snapshot of half-written files.')
 }
 
-# Everything is copied to a staging folder and stripped THERE. The
-# source is somebody's working terminal and this script must not be
-# able to delete anything in it.
+# Everything is copied to a staging folder and cleaned THERE. The source
+# is a working terminal and this script must not be able to delete
+# anything in it.
 $stage = Join-Path $env:TEMP ('mt5-golden-' + [Guid]::NewGuid().ToString('N'))
 Write-Host ('Staging in ' + $stage)
 Copy-Item -Recurse -Force -Path $Source -Destination $stage
 
 <#
-    What comes out, and why.
+    A fresh, never-signed-in install has nothing in here worth removing,
+    and that is the point: this is a belt-and-braces pass for the case
+    where somebody builds the zip from a terminal that HAS been used.
 
-    What comes OUT:
-
-    logs / Logs      Every one names an account number and a server. A
-                     template that carries them ships one trader's
-                     account details to every PC in the office.
-    accounts.dat     The saved logins, and on some builds the saved
-                     password. THIS is the file that must never travel.
-    bases, history   Downloaded price history. Gigabytes, and rebuilt
-                     from the server on first connect anyway.
-    profiles\*       Saved chart layouts. Each chart is a live
-                     subscription the terminal re-opens on startup.
-    MQL5\Logs        Same as logs, from the expert side.
-
-    What deliberately STAYS, and why stripping it breaks the install:
-
-    servers.dat      The list of brokers the terminal knows. This is
-                     what the 'Open an Account' dialog fills from, and
-                     it is the whole reason the source terminal is
-                     logged in once before being zipped. Remove it and
-                     'MentoMarkets-Server' means nothing on the new PC:
-                     mt5.initialize(server=...) cannot resolve a server
-                     the terminal has never heard of, and the trader is
-                     back to picking Mento Markets Ltd. from a list -
-                     which is exactly the step this setup removes.
-    common.ini,      The Options settings, INCLUDING Allow Algo
-    terminal.ini     Trading. Baking that in is step 6 of the prep
-                     above; deleting these files throws it away and
-                     every PC needs the button pressed by hand.
-
-    Neither holds a password. accounts.dat is the one that does, and it
-    is checked for by name below.
+    Logs name an account number and a server, so a template carrying
+    them would ship one trader's details to every PC in the office.
 #>
-$strip = @(
-    'logs', 'Logs', 'bases', 'history',
-    'MQL5\Logs', 'MQL5\Files', 'MQL5\Images',
-    'profiles\default\chart01.chr', 'profiles\charts'
-)
-foreach ($relative in $strip) {
+foreach ($relative in @('logs', 'Logs', 'MQL5\Logs', 'MQL5\Files',
+                        'bases', 'history')) {
     $path = Join-Path $stage $relative
     if (Test-Path $path) {
         Write-Host ('  removing ' + $relative)
@@ -109,65 +93,26 @@ foreach ($relative in $strip) {
     }
 }
 
-# Credentials, specifically, and ONLY these. Named separately from the
-# bulk above because this is the check that has to be right - in both
-# directions. A file that stays here by mistake ships a login; a file
-# removed by mistake (servers.dat, terminal.ini) ships a terminal that
-# cannot find the broker or has Algo Trading switched off again.
-$secrets = @()
-foreach ($name in @('accounts.dat', 'accounts.ini')) {
-    $secrets += Get-ChildItem -Path $stage -Filter $name -Recurse -Force `
-                              -ErrorAction SilentlyContinue
+# Credentials, by name. On a normal install these live in AppData and
+# are not here at all - so finding one means this folder is not what it
+# is supposed to be, and that is worth stopping for.
+$secrets = Get-ChildItem -Path $stage -Include 'accounts.dat', 'accounts.ini' `
+                         -Recurse -Force -ErrorAction SilentlyContinue
+if ($secrets -and -not $Force) {
+    $names = ($secrets | ForEach-Object {
+        $_.FullName.Substring($stage.Length + 1) }) -join ', '
+    Remove-Item -Recurse -Force $stage
+    throw ('This folder contains saved account details (' + $names + '), ' +
+           'which a normal installation keeps in AppData and not here. ' +
+           'Something has made this a portable or hand-assembled copy. ' +
+           'Refusing to build a template that would ship one login to ' +
+           'every PC in the office. Start from a fresh install of the ' +
+           "broker's own setup.exe, do not sign in, and try again.")
 }
 foreach ($file in $secrets) {
-    Write-Host ('  removing ' + $file.FullName.Substring($stage.Length + 1))
+    Write-Host ('  removing ' + $file.Name + ' (-Force)')
     Remove-Item -Force $file.FullName
 }
-
-$left = Get-ChildItem -Path $stage -Filter 'accounts.*' -Recurse -Force `
-                      -ErrorAction SilentlyContinue
-if ($left -and -not $Force) {
-    # The join is computed FIRST, on its own line. Inline, '+' binds
-    # tighter than -join and the message comes out as the separator
-    # joining the sentence - which is a refusal nobody can read.
-    $names = ($left | ForEach-Object { $_.Name }) -join ', '
-    Remove-Item -Recurse -Force $stage
-    throw ('An accounts file survived the strip: ' + $names +
-           '. Refusing to build a template that might carry a login to ' +
-           'every PC in the office. Log the terminal out and try again.')
-}
-
-# And the check the other way. A terminal that was never logged in has
-# no servers list, so 'MentoMarkets-Server' will not resolve on any PC
-# this zip is unpacked onto - and the failure appears at the first
-# connect, on a trader's machine, as a login that will not go through.
-$servers = Get-ChildItem -Path $stage -Filter 'servers.dat' -Recurse -Force `
-                         -ErrorAction SilentlyContinue
-if (-not $servers) {
-    Remove-Item -Recurse -Force $stage
-    throw (
-        'There is no servers.dat under ' + $Source + ', so this zip would ' +
-        'carry no broker list. TWO different things cause that, and they ' +
-        'need different answers:' + [Environment]::NewLine +
-        [Environment]::NewLine +
-        '  1. The terminal was never logged in. Open it, pick the broker ' +
-        'in Open an Account, log in once, log out, close it, re-run this.' +
-        [Environment]::NewLine +
-        [Environment]::NewLine +
-        '  2. MORE LIKELY: this is a NORMAL (non-portable) install, and ' +
-        'MetaTrader 5 keeps its settings in ' +
-        '%APPDATA%\MetaQuotes\Terminal\<a long hex folder>\ rather than ' +
-        'in the program folder. Look there: if you find config\servers.dat ' +
-        'in one of those, that is where the settings live and copying the ' +
-        'program folder alone cannot carry them.' +
-        [Environment]::NewLine +
-        [Environment]::NewLine +
-        'Do NOT reach for /portable to force the files into one place: a ' +
-        'terminal started portable refuses IPC from a normally-started ' +
-        'Python, so the legs would never connect. Say which of the two it ' +
-        'is and the setup can be built the right way round.')
-}
-Write-Host ('  keeping ' + $servers[0].Name + ' (the broker list)')
 
 if (Test-Path $Output) { Remove-Item -Force $Output }
 Write-Host ('Compressing to ' + $Output + ' ...')
@@ -180,9 +125,3 @@ $mb = [Math]::Round((Get-Item $Output).Length / 1MB, 1)
 Write-Host ''
 Write-Host ('Done: ' + $Output + '  (' + $mb + ' MB)') -ForegroundColor Green
 Write-Host 'Copy it beside SETUP.bat and setup.ps1.'
-if ($mb -gt 300) {
-    Write-Host ''
-    Write-Host ('  [!] That is large for a stripped terminal. Check the ' +
-                'charts are closed and the history folder is gone.') `
-               -ForegroundColor Yellow
-}
