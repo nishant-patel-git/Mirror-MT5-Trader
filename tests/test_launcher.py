@@ -207,7 +207,22 @@ def test_a_second_launcher_refuses_the_port_instead_of_being_invisible(
     import socket
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(('127.0.0.1', 0))
-    listener.listen(1)
+    # Backlog of 5, not 1, and the number is load-bearing on Windows.
+    #
+    # This stand-in never calls accept(), so every probe stays queued.
+    # `port_in_use` is called TWICE here - once by the assert below and
+    # once inside main() - and Linux quietly allows backlog+1 waiting,
+    # so a backlog of 1 held both and the test passed there.
+    #
+    # Windows holds exactly `backlog`. The second probe could not
+    # complete, port_in_use answered False, and main() went on to start
+    # a REAL engine in the tmp directory: a web child that cannot import
+    # mt5trader, restarted forever on a backoff that caps at 30s. That
+    # is the fourteen minutes the suite appeared to hang for.
+    #
+    # A real second instance is a running server that accepts, so its
+    # backlog never fills. Five keeps the stand-in honest to that.
+    listener.listen(5)
     port = listener.getsockname()[1]
     try:
         assert start.port_in_use('127.0.0.1', port) is True

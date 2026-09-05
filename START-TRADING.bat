@@ -1,17 +1,28 @@
 @echo off
 REM  MT5-Trader - double-click this to start trading.
 REM
-REM  It does the whole start: finds a Python, checks the two terminals
-REM  are open, brings the dependencies up to date, runs the safety
+REM  It does the whole start: finds a Python, brings the dependencies up
+REM  to date, checks the machine can actually connect, runs the safety
 REM  tests, starts the engine and opens the ladders in your browser.
 REM
-REM  If anything is wrong it stops and says what to do, in words. It
-REM  never starts the engine on a failing test suite - that rule is
-REM  what keeps a bad build away from a live account.
+REM  It does NOT change the version of the code on this machine. That is
+REM  deploy\UPDATE.BAT, run deliberately by whoever maintains it.
+REM
+REM  Two rules it will not bend:
+REM
+REM    * It never starts the engine on a failing test suite. That rule
+REM      is what keeps a bad build away from a live account.
+REM
+REM    * It never leaves the trader with a black window. The dependency
+REM      check needs the internet and the office internet goes down, so
+REM      that failure warns and carries on with what is already
+REM      installed. Only a fault that would make trading WRONG stops
+REM      the start.
 REM
 REM  Plain ASCII on purpose: a console running the default code page
 REM  turns anything else into mojibake in the one message that matters.
 
+setlocal
 title MT5-Trader
 cd /d "%~dp0"
 color 0F
@@ -48,20 +59,15 @@ if not defined PY (
 )
 echo   Using Python: %PY%
 
-REM --- 2. The two MetaTrader 5 terminals -------------------------------
-tasklist /fi "imagename eq terminal64.exe" 2>nul | find /i "terminal64.exe" >nul
-if errorlevel 1 (
-  echo   [!] No MetaTrader 5 terminal is running.
-  echo.
-  echo       Open BOTH terminals, log each into its own account, and
-  echo       press the Algo Trading button in each so it turns green.
-  echo       Then run this again.
-  echo.
-  pause
-  exit /b 1
-)
-
-REM --- 3. Configuration -------------------------------------------------
+REM --- 2. Configuration -------------------------------------------------
+REM
+REM  NOTE: this file does NOT update itself. Nothing is pulled here on
+REM  purpose - a desk's version changes when somebody DECIDES it
+REM  changes, not because a commit landed overnight. deploy\UPDATE.BAT
+REM  is that decision, run deliberately on the machine being updated.
+REM
+REM  The cost of the choice, so it is not a surprise: a fix pushed today
+REM  is not on this PC tomorrow. Whoever maintains it visits the machine.
 if not exist config.json (
   echo   [i] First run: creating config.json from the example.
   copy /y config.example.json config.json >nul
@@ -70,15 +76,51 @@ if not exist .env (
   copy /y .env.example .env >nul
 )
 
-REM --- 4. Dependencies --------------------------------------------------
+REM --- 3. Dependencies --------------------------------------------------
+REM  Also allowed to fail. What matters is not whether pip could reach
+REM  the internet, it is whether the imports the engine needs are HERE.
 echo   Checking dependencies...
-%PY% -m pip install --quiet --disable-pip-version-check -r requirements.txt
+%PY% -m pip install --quiet --disable-pip-version-check -r requirements.txt >nul 2>&1
 if errorlevel 1 (
-  echo   [X] The dependencies could not be installed. Check the internet
-  echo       connection on this machine and run this again.
-  pause
-  exit /b 1
+  %PY% -c "import flask, dotenv, MetaTrader5" >nul 2>&1
+  if errorlevel 1 (
+    echo   [X] The dependencies are not installed and could not be
+    echo       fetched. Check this machine's internet connection and
+    echo       run this again.
+    pause
+    exit /b 1
+  )
+  echo   [!] Could not check for newer dependencies - the ones already
+  echo       installed are complete, so carrying on.
 )
+
+REM --- 4. Can this machine actually connect? ----------------------------
+REM  Counted, not guessed. An account that names its own MT5 folder is
+REM  OPENED AND SIGNED IN by the engine, so a terminal that is not
+REM  running is not a reason to refuse - preflight.py knows which case
+REM  this config is and says so in words.
+set "TERMINALS=0"
+for /f %%c in ('tasklist /fi "imagename eq terminal64.exe" /nh 2^>nul ^| find /c /i "terminal64.exe"') do set "TERMINALS=%%c"
+
+REM  An older clone has no preflight.py. Skipping it is right: it is a
+REM  CHECK, and a missing check must not be the thing that stops a
+REM  trader working. The safety tests below are the gate that matters.
+if not exist deploy\preflight.py (
+  echo   [i] No preflight in this copy - skipping the connection check.
+) else (
+  %PY% deploy\preflight.py --config config.json --terminals-running %TERMINALS%
+  if errorlevel 1 goto :refused
+)
+goto :tests
+
+:refused
+echo.
+echo   [X] The engine has NOT been started - see above.
+echo.
+pause
+exit /b 1
+
+:tests
 
 REM --- 5. The safety tests ---------------------------------------------
 echo   Running the safety tests (about 20 seconds)...
@@ -86,6 +128,10 @@ echo   Running the safety tests (about 20 seconds)...
 if errorlevel 1 (
   echo.
   echo   [X] THE SAFETY TESTS FAILED. The engine has NOT been started.
+  echo.
+  echo       If this machine was updated recently, the fault most
+  echo       likely arrived with that update - deploy\UPDATE.BAT can
+  echo       put it back on the version it had before.
   echo.
   echo       Do not trade on this build. Send the lines above to whoever
   echo       maintains it.
