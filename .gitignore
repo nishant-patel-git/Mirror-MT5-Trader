@@ -4,6 +4,14 @@ config.json.bak
 config.json.tmp
 status.json
 status.json.tmp
+
+# The command queue and its replies - runtime, one per machine, and
+# recreated on every start (start.py --commands / --results). status.json
+# was already here; these two were missed, so a trader's `git status`
+# listed them as untracked every single day and invited someone to
+# commit one machine's in-flight orders.
+commands.jsonl
+results.json
 *.log
 __pycache__/
 *.pyc
