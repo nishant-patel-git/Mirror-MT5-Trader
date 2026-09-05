@@ -51,8 +51,8 @@ def answers(**over):
 
 def test_the_wizard_writes_a_config_the_app_can_read():
     out = configure.build_config(answers(), {})
-    account_a = out['accounts']['Account A']
-    account_b = out['accounts']['Account B']
+    account_a = out['accounts'][NAME_A]
+    account_b = out['accounts'][NAME_B]
 
     assert account_a['login'] == 10006
     assert account_b['login'] == 10007
@@ -62,8 +62,8 @@ def test_the_wizard_writes_a_config_the_app_can_read():
     assert account_a['terminal_path'] != account_b['terminal_path']
 
     pair = out['pairs']['XAUUSD.f|GCZ6']
-    assert pair['leg_a'] == {'account': 'Account A', 'symbol': 'XAUUSD.f'}
-    assert pair['leg_b'] == {'account': 'Account B', 'symbol': 'GCZ6'}
+    assert pair['leg_a'] == {'account': NAME_A, 'symbol': 'XAUUSD.f'}
+    assert pair['leg_b'] == {'account': NAME_B, 'symbol': 'GCZ6'}
     assert pair['enabled'] is True
     # Beta stamped with what it was computed FOR, so a stale one from
     # another instrument cannot silently define the spread.
@@ -76,10 +76,10 @@ def test_the_env_key_comes_from_the_app_not_from_the_wizard():
     there."""
     from mt5trader.config import env_key_for
     out = configure.build_config(answers(), {})
-    assert out['accounts']['Account A']['password_env'] == \
-        env_key_for('Account A')
-    assert out['accounts']['Account B']['password_env'] == \
-        env_key_for('Account B')
+    assert out['accounts'][NAME_A]['password_env'] == \
+        env_key_for(NAME_A)
+    assert out['accounts'][NAME_B]['password_env'] == \
+        env_key_for(NAME_B)
 
 
 def test_the_instrument_details_are_left_for_mt5_to_answer():
@@ -101,7 +101,7 @@ def test_one_login_on_both_accounts_is_refused():
 
 def test_control_two_logins_are_accepted():
     out = configure.build_config(answers(login_b='10007'), {})
-    assert out['accounts']['Account B']['login'] == 10007
+    assert out['accounts'][NAME_B]['login'] == 10007
 
 
 def test_one_terminal_folder_for_both_accounts_is_refused():
@@ -113,7 +113,7 @@ def test_one_terminal_folder_for_both_accounts_is_refused():
 def test_control_two_terminal_folders_are_accepted():
     out = configure.build_config(
         answers(terminal_b=r'C:\MT5-B\terminal64.exe'), {})
-    assert out['accounts']['Account B']['terminal_path'] == \
+    assert out['accounts'][NAME_B]['terminal_path'] == \
         r'C:\MT5-B\terminal64.exe'
 
 
@@ -149,7 +149,7 @@ def test_an_email_address_where_the_login_goes_is_refused():
 
 def test_control_the_digits_are_accepted():
     out = configure.build_config(answers(login_a='10006'), {})
-    assert out['accounts']['Account A']['login'] == 10006
+    assert out['accounts'][NAME_A]['login'] == 10006
 
 
 # --- not overwriting a desk that is already trading ----------------------
@@ -171,7 +171,7 @@ def test_control_force_replaces_it_and_keeps_a_backup(tmp_path):
         'pairs': {}}), encoding='utf-8')
     configure.apply_config(answers(), str(tmp_path), force=True)
     now = json.loads((tmp_path / 'config.json').read_text(encoding='utf-8'))
-    assert 'Account A' in now['accounts']
+    assert NAME_A in now['accounts']
     backup = json.loads((tmp_path / 'config.json.bak').read_text(
         encoding='utf-8'))
     assert 'Real Desk' in backup['accounts']
@@ -189,7 +189,7 @@ def test_the_shipped_example_is_replaced_without_being_asked(tmp_path):
                                           encoding='utf-8')
     configure.apply_config(answers(), str(tmp_path))
     now = json.loads((tmp_path / 'config.json').read_text(encoding='utf-8'))
-    assert set(now['accounts']) == {'Account A', 'Account B'}
+    assert set(now['accounts']) == {NAME_A, NAME_B}
     # The example's fictional broker rows are gone, not sitting on the
     # screen as two accounts that can never connect.
     assert 'leg_a' not in now['accounts']
@@ -217,8 +217,12 @@ def test_passwords_reach_env_and_nothing_else(tmp_path):
 
     env = (tmp_path / '.env').read_text(encoding='utf-8')
     # Quoted, so a password with a space or a # survives the read back.
-    assert f'MT5_PASSWORD_ACCOUNT_A="{PASSWORD_A}"' in env
-    assert f'MT5_PASSWORD_ACCOUNT_B="{PASSWORD_B}"' in env
+    # The key is the app's own, off the account name: AC-10006 becomes
+    # MT5_PASSWORD_AC_10006.
+    from mt5trader.config import env_key_for
+    assert f'{env_key_for(NAME_A)}="{PASSWORD_A}"' in env
+    assert f'{env_key_for(NAME_B)}="{PASSWORD_B}"' in env
+    assert 'MT5_PASSWORD_AC_10006' in env
 
 
 def test_a_password_is_not_in_the_refusal_text():
@@ -235,10 +239,10 @@ def test_rerunning_does_not_walk_the_ports_upward(tmp_path):
     first = json.loads((tmp_path / 'config.json').read_text(encoding='utf-8'))
     configure.apply_config(answers(), str(tmp_path), force=True)
     again = json.loads((tmp_path / 'config.json').read_text(encoding='utf-8'))
-    assert first['accounts']['Account A']['endpoint'] == \
-        again['accounts']['Account A']['endpoint']
-    assert first['accounts']['Account B']['endpoint'] == \
-        again['accounts']['Account B']['endpoint']
+    assert first['accounts'][NAME_A]['endpoint'] == \
+        again['accounts'][NAME_A]['endpoint']
+    assert first['accounts'][NAME_B]['endpoint'] == \
+        again['accounts'][NAME_B]['endpoint']
 
 
 # --- the presets ---------------------------------------------------------
@@ -321,9 +325,13 @@ def test_control_two_different_months_go_through():
 
 # --- the monthly roll ----------------------------------------------------
 
+#: The two accounts the wizard writes for the logins in `answers()`.
+NAME_A = configure.account_name(10006)
+NAME_B = configure.account_name(10007)
+
+
 def _roll(**over):
-    spec = {'leg_a_account': 'Account A', 'leg_b_account': 'Account B',
-            'pairs': [{'name': 'Gold basis', 'leg_a': 'XAUUSD.f',
+    spec = {'pairs': [{'name': 'Gold basis', 'leg_a': 'XAUUSD.f',
                        'leg_b': 'GCZ6', 'pair_type': 'SPOT_FUTURE'}]}
     spec.update(over)
     return spec
@@ -338,8 +346,10 @@ def test_the_shipped_roll_list_parses_and_matches_the_wizard():
     them. If those two ever disagree the trader gets a refusal on a
     machine that is perfectly well set up."""
     spec = add_pairs.load_list(str(DEPLOY / 'pairs.json'))
-    assert spec['leg_a_account'] == configure.ACCOUNT_A
-    assert spec['leg_b_account'] == configure.ACCOUNT_B
+    # It must NOT name the accounts: names carry the login, so they
+    # differ on every desk and one file has to serve them all.
+    assert 'leg_a_account' not in spec
+    assert 'leg_b_account' not in spec
     for entry in spec['pairs']:
         assert entry['leg_a'] and entry['leg_b']
         assert entry['pair_type'] in ('SPOT_FUTURE', 'FUTURE_FUTURE',
@@ -353,7 +363,7 @@ def test_a_new_contract_month_is_added():
                       'leg_b': 'GCH7', 'pair_type': 'SPOT_FUTURE'}]), raw)
     assert 'XAUUSD.f|GCH7' in to_add
     added = to_add['XAUUSD.f|GCH7']
-    assert added['leg_a'] == {'account': 'Account A', 'symbol': 'XAUUSD.f'}
+    assert added['leg_a'] == {'account': NAME_A, 'symbol': 'XAUUSD.f'}
     assert added['enabled'] is True
     assert added['hedge_ratio_for'] == 'XAUUSD.f|GCH7'
 
@@ -394,7 +404,7 @@ def test_nothing_is_ever_removed(tmp_path):
     assert 'XAUUSD.f|GCZ6' in now['pairs']       # what the wizard wrote
     assert 'XAGUSD.f|SIU6' in now['pairs']       # what the roll added
     # And the accounts are untouched.
-    assert set(now['accounts']) == {'Account A', 'Account B'}
+    assert set(now['accounts']) == {NAME_A, NAME_B}
 
 
 def test_running_it_twice_changes_nothing_the_second_time(tmp_path):
@@ -426,7 +436,8 @@ def test_a_roll_list_for_another_setup_is_refused():
     account was meant is how a leg ends up on the wrong terminal."""
     raw = _configured_raw()
     with pytest.raises(add_pairs.PairsError, match='differently-named'):
-        add_pairs.plan(_roll(leg_a_account='Leg A'), raw)
+        add_pairs.plan(_roll(leg_a_account='Leg A', leg_b_account=NAME_B),
+                       raw)
 
 
 def test_control_the_matching_account_names_go_through():
@@ -439,7 +450,7 @@ def test_control_the_matching_account_names_go_through():
 def test_both_legs_on_one_account_is_refused():
     raw = _configured_raw()
     with pytest.raises(add_pairs.PairsError, match='against itself'):
-        add_pairs.plan(_roll(leg_b_account='Account A'), raw)
+        add_pairs.plan(_roll(leg_a_account=NAME_A, leg_b_account=NAME_A), raw)
 
 
 def test_a_machine_with_no_accounts_is_refused():
@@ -480,6 +491,107 @@ def test_control_a_spelled_pair_type_is_kept():
     assert to_add['XAGUSD.f|SIU6']['pair_type'] == 'SPOT_FUTURE'
 
 
+# --- one roll list for every desk ---------------------------------------
+
+def test_the_accounts_are_read_off_the_machine_when_the_list_omits_them():
+    """The whole point of not naming them: names carry the login, so
+    they differ on every desk, and one file has to serve them all."""
+    raw = _configured_raw()
+    to_add, _ = add_pairs.plan(
+        {'pairs': [{'leg_a': 'XAGUSD.f', 'leg_b': 'SIZ6'}]}, raw)
+    added = to_add['XAGUSD.f|SIZ6']
+    assert added['leg_a']['account'] == NAME_A
+    assert added['leg_b']['account'] == NAME_B
+
+
+def test_the_same_list_works_on_a_differently_named_machine():
+    """A machine set up by hand, whose accounts are called something
+    else entirely. The list does not change; the reading does."""
+    raw = _configured_raw()
+    raw['accounts'] = {'Account : 10006': raw['accounts'][NAME_A],
+                       'Account : 10007': raw['accounts'][NAME_B]}
+    pair = raw['pairs']['XAUUSD.f|GCZ6']
+    pair['leg_a']['account'] = 'Account : 10006'
+    pair['leg_b']['account'] = 'Account : 10007'
+
+    to_add, _ = add_pairs.plan(
+        {'pairs': [{'leg_a': 'XAGUSD.f', 'leg_b': 'SIZ6'}]}, raw)
+    added = to_add['XAGUSD.f|SIZ6']
+    assert added['leg_a']['account'] == 'Account : 10006'
+    assert added['leg_b']['account'] == 'Account : 10007'
+
+
+def test_control_a_named_list_still_wins():
+    """Naming them is still allowed, and still takes precedence."""
+    raw = _configured_raw()
+    to_add, _ = add_pairs.plan(
+        _roll(leg_a_account=NAME_A, leg_b_account=NAME_B,
+              pairs=[{'leg_a': 'XAGUSD.f', 'leg_b': 'SIZ6'}]), raw)
+    assert to_add['XAGUSD.f|SIZ6']['leg_a']['account'] == NAME_A
+
+
+def test_a_machine_with_no_pairs_yet_is_refused_not_guessed():
+    raw = _configured_raw()
+    raw['pairs'] = {}
+    with pytest.raises(add_pairs.PairsError, match='no pair to read them'):
+        add_pairs.plan({'pairs': [{'leg_a': 'XAGUSD.f', 'leg_b': 'SIZ6'}]},
+                       raw)
+
+
+def test_pairs_that_disagree_about_the_legs_are_refused_not_guessed():
+    """Two pairs routed opposite ways have no single answer, and
+    picking one is how a leg lands on the wrong terminal."""
+    raw = _configured_raw()
+    raw['pairs']['B|A'] = {
+        'leg_a': {'account': NAME_B, 'symbol': 'B'},
+        'leg_b': {'account': NAME_A, 'symbol': 'A'}}
+    with pytest.raises(add_pairs.PairsError, match='disagree'):
+        add_pairs.plan({'pairs': [{'leg_a': 'XAGUSD.f', 'leg_b': 'SIZ6'}]},
+                       raw)
+
+
+# --- the account names --------------------------------------------------
+
+def test_the_account_is_named_for_its_login():
+    """`AC-100015 -> AC-100016` in the ladder header. 'Account A' told a
+    trader looking at two ladders nothing at all."""
+    assert configure.account_name(100015) == 'AC-100015'
+    out = configure.build_config(answers(), {})
+    assert set(out['accounts']) == {'AC-10006', 'AC-10007'}
+
+
+def test_a_re_run_with_a_corrected_login_leaves_no_stale_row(tmp_path):
+    """Names carry the login, so a corrected one writes a NEW name. The
+    row it replaces sits on the same MT5 folder, and one installation
+    holds one login - left behind, it is a terminal clash the trader
+    never caused."""
+    configure.apply_config(answers(), str(tmp_path))
+    configure.apply_config(answers(login_b='10099'), str(tmp_path),
+                           force=True)
+    now = json.loads((tmp_path / 'config.json').read_text(encoding='utf-8'))
+    assert set(now['accounts']) == {'AC-10006', 'AC-10099'}
+    # And the pair that named the row now gone went with it, rather than
+    # pointing at an account that cannot resolve.
+    for pair in now['pairs'].values():
+        assert pair['leg_b']['account'] in now['accounts']
+
+
+def test_control_an_unrelated_account_is_left_alone(tmp_path):
+    """Only rows on the two terminals being written are cleared. A third
+    account on its own installation is somebody else's and stays."""
+    configure.apply_config(answers(), str(tmp_path))
+    raw = json.loads((tmp_path / 'config.json').read_text(encoding='utf-8'))
+    raw['accounts']['AC-77777'] = {
+        'terminal_path': r'C:\MT5-C\terminal64.exe', 'login': 77777,
+        'endpoint': '127.0.0.1:9109'}
+    (tmp_path / 'config.json').write_text(json.dumps(raw), encoding='utf-8')
+
+    configure.apply_config(answers(login_b='10099'), str(tmp_path),
+                           force=True)
+    now = json.loads((tmp_path / 'config.json').read_text(encoding='utf-8'))
+    assert 'AC-77777' in now['accounts']
+
+
 # --- the default server --------------------------------------------------
 
 def test_the_default_server_is_filled_in_from_presets():
@@ -492,8 +604,8 @@ def test_two_legs_can_sit_at_different_brokers():
     out = configure.build_config(
         answers(server_a='MentoMarkets-Server',
                 server_b='OtherBroker-Live'), {})
-    assert out['accounts']['Account A']['server'] == 'MentoMarkets-Server'
-    assert out['accounts']['Account B']['server'] == 'OtherBroker-Live'
+    assert out['accounts'][NAME_A]['server'] == 'MentoMarkets-Server'
+    assert out['accounts'][NAME_B]['server'] == 'OtherBroker-Live'
 
 
 # --- the preflight -------------------------------------------------------
@@ -526,7 +638,7 @@ def test_a_configured_machine_starts_with_no_terminal_open(tmp_path):
 def test_control_an_attaching_account_still_needs_a_terminal(tmp_path):
     """Blank terminal_path means attach to whatever is open. Then
     something must BE open, and refusing is right."""
-    raw = _configured(tmp_path, **{'Account A': {'terminal_path': ''}})
+    raw = _configured(tmp_path, **{NAME_A: {'terminal_path': ''}})
     ok, lines = preflight.check(raw, terminals_running=0)
     assert not ok
     assert 'no MetaTrader 5 folder set' in lines[0]
@@ -537,7 +649,7 @@ def test_control_an_attaching_account_still_needs_a_terminal(tmp_path):
 
 def test_a_terminal_folder_that_is_not_there_is_refused(tmp_path):
     raw = _configured(tmp_path, **{
-        'Account B': {'terminal_path': str(tmp_path / 'gone' / 'terminal64.exe')}})
+        NAME_B: {'terminal_path': str(tmp_path / 'gone' / 'terminal64.exe')}})
     ok, lines = preflight.check(raw, terminals_running=2)
     assert not ok
     assert 'no file there' in lines[0]
@@ -550,7 +662,7 @@ def test_a_terminal_folder_that_is_not_there_is_refused(tmp_path):
 def test_one_account_entered_twice_is_refused(tmp_path, field, value):
     """A hand-edit that puts one login, port or folder on both rows is a
     pair that hedges against itself. Caught before the engine starts."""
-    raw = _configured(tmp_path, **{'Account B': {field: value}})
+    raw = _configured(tmp_path, **{NAME_B: {field: value}})
     ok, lines = preflight.check(raw, terminals_running=2)
     assert not ok
     assert 'hedge against itself' in lines[0]
@@ -558,8 +670,8 @@ def test_one_account_entered_twice_is_refused(tmp_path, field, value):
 
 def test_one_terminal_folder_on_both_rows_is_refused(tmp_path):
     raw = _configured(tmp_path)
-    raw['accounts']['Account B']['terminal_path'] = \
-        raw['accounts']['Account A']['terminal_path']
+    raw['accounts'][NAME_B]['terminal_path'] = \
+        raw['accounts'][NAME_A]['terminal_path']
     ok, lines = preflight.check(raw, terminals_running=2)
     assert not ok
     assert 'hedge against itself' in lines[0]

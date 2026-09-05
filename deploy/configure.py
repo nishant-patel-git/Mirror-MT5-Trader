@@ -142,11 +142,27 @@ def expand_preset(preset, contract_a='', contract_b=''):
     return symbol_a, symbol_b
 
 
-#: What the wizard calls the two accounts. The name is what
-#: `env_key_for` turns into the `.env` key, so changing it here changes
-#: the key - which is exactly why nothing else may guess the key.
-ACCOUNT_A = 'Account A'
-ACCOUNT_B = 'Account B'
+#: How the two accounts are named: `AC-` and the MT5 login.
+#:
+#: The name is what the ladder header prints - `AC-100015 -> AC-100016`
+#: - and what the Positions and Fills tables put in their account
+#: column. 'Account A' told a trader looking at two ladders nothing at
+#: all; the login is the number they see in MetaTrader 5, on the
+#: broker's statement, and in the account panel right beside it.
+#:
+#: The form is the desk's own: the machines set up by hand already read
+#: AC-100015, so nothing new has to be learned.
+#:
+#: It is also what `env_key_for` turns into the `.env` key
+#: (AC-10006 -> MT5_PASSWORD_AC_10006), which is why the key is asked
+#: for rather than spelled anywhere.
+ACCOUNT_PREFIX = 'AC-'
+
+
+def account_name(login):
+    """What this account is called, everywhere it is shown."""
+    return f'{ACCOUNT_PREFIX}{login}'
+
 
 #: Where SETUP.bat unzips the two terminals. Two FOLDERS, never one
 #: folder and a shortcut: a terminal holds one login, so two runners on
@@ -248,37 +264,60 @@ def build_config(answers, raw, example=None):
     # a row on the screen that can never connect.
     settings = raw.get('settings') or example.get('settings') or {}
 
+    name_a, name_b = account_name(login_a), account_name(login_b)
+
     accounts = dict(raw.get('accounts') or {})
     pairs = dict(raw.get('pairs') or {})
     if is_pristine(raw, example):
         accounts, pairs = {}, {}
-    # Drop the two rows we are about to write BEFORE asking for a free
-    # port, or a re-run reads this machine's own endpoints as taken and
-    # walks the pair up to 9103, 9105, 9107 a run at a time.
-    accounts.pop(ACCOUNT_A, None)
-    accounts.pop(ACCOUNT_B, None)
+
+    # Clear the ground the two new rows are about to stand on.
+    #
+    # Their own names go first, so a re-run overwrites rather than
+    # reading this machine's OWN endpoints as taken and walking the
+    # pair up to 9103, 9105, 9107 a run at a time.
+    #
+    # Then any other row on one of these two TERMINALS. Names carry the
+    # login now, so re-running with a corrected login writes new names
+    # and would otherwise leave the old row pointing at the same
+    # folder - and one MT5 installation holds one login, so the pair
+    # would refuse to start with a terminal clash it did not cause.
+    # A pair whose leg named a row removed here goes with it: it names
+    # an account that is no longer there and could never resolve.
+    doomed = {name_a, name_b}
+    ours = {terminal_a.strip().lower(), terminal_b.strip().lower()}
+    for other, acct in list(accounts.items()):
+        if str((acct or {}).get('terminal_path') or '').strip().lower() in ours:
+            doomed.add(other)
+    for name in doomed:
+        accounts.pop(name, None)
+    for key, pair in list(pairs.items()):
+        legs = {(pair or {}).get('leg_a', {}).get('account'),
+                (pair or {}).get('leg_b', {}).get('account')}
+        if legs & doomed:
+            pairs.pop(key, None)
 
     endpoint_a = (answers.get('endpoint_a') or '').strip()
     endpoint_b = (answers.get('endpoint_b') or '').strip()
-    accounts[ACCOUNT_A] = {
+    accounts[name_a] = {
         'terminal_path': terminal_a,
         'login': login_a,
-        'password_env': cfg.env_key_for(ACCOUNT_A),
+        'password_env': cfg.env_key_for(name_a),
         'server': server_a,
         # One port serves ONE leg runner. Asking the config for a free
         # one keeps this right even on a box that already had accounts.
         'endpoint': endpoint_a or cfg.next_free_port({'accounts': accounts}),
     }
-    accounts[ACCOUNT_B] = {
+    accounts[name_b] = {
         'terminal_path': terminal_b,
         'login': login_b,
-        'password_env': cfg.env_key_for(ACCOUNT_B),
+        'password_env': cfg.env_key_for(name_b),
         'server': server_b,
         'endpoint': endpoint_b or cfg.next_free_port({'accounts': accounts}),
     }
 
     staged = {'accounts': accounts}
-    for name in (ACCOUNT_A, ACCOUNT_B):
+    for name in (name_a, name_b):
         acct = accounts[name]
         for clash in (cfg.endpoint_clash(staged, name, acct['endpoint']),
                       cfg.login_clash(staged, name, acct['login']),
@@ -289,8 +328,8 @@ def build_config(answers, raw, example=None):
     key = f'{symbol_a}|{symbol_b}'
     pairs[key] = {
         'name': answers.get('name') or key,
-        'leg_a': {'account': ACCOUNT_A, 'symbol': symbol_a},
-        'leg_b': {'account': ACCOUNT_B, 'symbol': symbol_b},
+        'leg_a': {'account': name_a, 'symbol': symbol_a},
+        'leg_b': {'account': name_b, 'symbol': symbol_b},
         'pair_type': cfg.pair_type_name(answers.get('pair_type')),
         # Beta is stamped with what it was computed FOR, so a stale one
         # from another instrument cannot silently define the spread.
@@ -343,7 +382,10 @@ def apply_config(answers, root=None, force=False):
 
     # LAST, and only here. A password must never reach config.json, a
     # print, or an exception message.
-    for name, field in ((ACCOUNT_A, 'password_a'), (ACCOUNT_B, 'password_b')):
+    for leg, field in (('a', 'password_a'), ('b', 'password_b')):
+        # The same name build_config wrote, from the same login, so the
+        # key here and the key in the config cannot drift apart.
+        name = account_name(_login(answers.get(f'login_{leg}'), 'Account'))
         cfg.write_env_value(env_path, cfg.env_key_for(name),
                             answers.get(field))
     return config_path, env_path

@@ -155,6 +155,20 @@ What it writes, and nothing else:
 - `config.json` — the two accounts and the pair
 - `.env` — the two passwords, quoted, and nowhere else
 
+**The accounts are named for their logins** — `AC-10006`, `AC-10007`.
+That is what the ladder header prints (`AC-10006 → AC-10007`) and what
+the Positions and Fills tables show. `Account A` told a trader looking
+at two ladders nothing; the login is the number they see in MetaTrader
+5 and on the broker's statement. It is also the desk's existing
+convention, so nothing new has to be learned.
+
+Re-running the wizard with a corrected login writes a new name and
+clears the row it replaces — along with any pair that named it. Left
+behind, that old row would sit on the same MT5 folder, and one
+installation holds one login, so the machine would refuse to start with
+a terminal clash the trader never caused. Accounts on *other*
+installations are untouched.
+
 The `.env` key comes from the app's own `env_key_for()`. Nothing guesses
 it: a key the loader does not read is a password that is silently never
 there.
@@ -203,10 +217,17 @@ If the engine is running it restarts itself within a few seconds when
 the config changes (`mt5trader/config.py`, `restart_required`); if it
 is not, the pairs are there at the next START TRADING.
 
-The two account names in the file must match the machine's — the wizard
-writes `Account A` and `Account B`. A list aimed at a differently-named
-setup is refused rather than guessed at, because guessing which local
-account was meant is how a leg ends up on the wrong terminal.
+**One file serves every PC.** It does not name the two accounts —
+names carry the login (`AC-100015`), so they differ on every desk.
+`ADD-PAIRS` reads which account is leg A and which is leg B from the
+pairs the machine already trades. That is not a guess: it is what that
+config does every day.
+
+Name them explicitly (`leg_a_account` / `leg_b_account`) only for a
+machine with no pairs at all, or one whose existing pairs disagree
+about which account is which. Both cases are refused with the reason
+rather than guessed at, because picking one is how a leg ends up on the
+wrong terminal.
 
 ## Adding an instrument to the setup wizard
 

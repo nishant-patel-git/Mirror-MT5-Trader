@@ -65,6 +65,48 @@ def pair_key(symbol_a, symbol_b):
     return f'{str(symbol_a or "").strip()}|{str(symbol_b or "").strip()}'
 
 
+def infer_accounts(raw):
+    """Which account is leg A on THIS machine, and which is leg B.
+
+    Read off the pairs the machine already trades. That is not a guess:
+    it is what this config does every day, and the answer is only used
+    to put a new pair on the same two accounts as the existing ones.
+
+    It exists so ONE roll list serves the whole office. Account names
+    carry the MT5 login now - AC-100015 - so they differ on every
+    desk, and a list that named them would need editing per machine,
+    which is exactly the job ADD-PAIRS is here to remove.
+
+    Ambiguity is refused rather than resolved. A machine whose pairs
+    disagree about which account is leg A has no single answer, and
+    picking one would be the guess that puts a leg on the wrong
+    terminal.
+    """
+    on_a, on_b = set(), set()
+    for pair in (raw.get('pairs') or {}).values():
+        name_a = ((pair or {}).get('leg_a') or {}).get('account')
+        name_b = ((pair or {}).get('leg_b') or {}).get('account')
+        if name_a:
+            on_a.add(name_a)
+        if name_b:
+            on_b.add(name_b)
+
+    if not on_a or not on_b:
+        raise PairsError(
+            'The roll list does not name the two accounts, and this '
+            'machine has no pair to read them from yet. Run the setup '
+            'wizard first (deploy\\configure.py), or add '
+            '"leg_a_account" and "leg_b_account" to the list.')
+    if len(on_a) > 1 or len(on_b) > 1:
+        raise PairsError(
+            f"This machine's pairs disagree about which account is which: "
+            f"leg A is on {', '.join(sorted(on_a))} and leg B on "
+            f"{', '.join(sorted(on_b))}. Refusing to pick one - a leg on "
+            f"the wrong terminal is not something to guess at. Name the "
+            f"two accounts in the roll list instead.")
+    return on_a.pop(), on_b.pop()
+
+
 def plan(spec, raw):
     """(to_add, notes) - what would change, without changing anything.
 
@@ -79,6 +121,9 @@ def plan(spec, raw):
 
     account_a = str(spec.get('leg_a_account') or '').strip()
     account_b = str(spec.get('leg_b_account') or '').strip()
+    if not account_a and not account_b:
+        account_a, account_b = infer_accounts(raw)
+
     for name, which in ((account_a, 'leg_a_account'),
                         (account_b, 'leg_b_account')):
         if not name:
