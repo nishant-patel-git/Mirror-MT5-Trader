@@ -190,9 +190,6 @@ What ships today — four pairs:
 | `USOIL.f` | `UKOIL.f` | RELATED |
 | `USOILX6` | `UKOILX6` | RELATED |
 
-```
-```
-
 It **only adds.** A pair already on the machine is reported and left
 *exactly* as it is — not re-written, not re-enabled, not re-stamped —
 because the trader may be holding a position on it and editing a pair
