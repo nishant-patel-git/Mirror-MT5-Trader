@@ -35,3 +35,8 @@ deploy/MT5-golden.zip
 # Answers for an unattended configure.py run: this file HOLDS THE TWO
 # MT5 PASSWORDS in clear text. Delete it once the machine is set up.
 answers.json
+
+# The assembled USB folder, built by deploy/MAKE-KIT.bat. It contains
+# MT5-golden.zip and is rebuilt in one click, so it never belongs in
+# the repo.
+deploy/ROLLOUT-KIT/
