@@ -181,6 +181,18 @@ ladders appear on their Exchanges page.
   "pair_type": "SPOT_FUTURE" }
 ```
 
+What ships today — four pairs:
+
+| Leg A | Leg B | Type |
+|---|---|---|
+| `XAUUSD.f` | `GCZ6` | SPOT_FUTURE |
+| `XAGUSD.f` | `SIZ6` | SPOT_FUTURE |
+| `USOIL.f` | `UKOIL.f` | RELATED |
+| `USOILX6` | `UKOILX6` | RELATED |
+
+```
+```
+
 It **only adds.** A pair already on the machine is reported and left
 *exactly* as it is — not re-written, not re-enabled, not re-stamped —
 because the trader may be holding a position on it and editing a pair

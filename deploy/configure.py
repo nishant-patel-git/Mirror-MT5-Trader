@@ -51,6 +51,25 @@ class SetupError(Exception):
 CONTRACT_TOKEN = '{contract}'
 
 
+def _presets_path(root=None):
+    """Where presets.json is, preferring the machine being configured.
+
+    Normally these are the same file: `--root` is the clone, and this
+    script lives in its `deploy` folder. They differ when the wizard is
+    pointed at another folder, and then the one beside THIS script is
+    the sensible fallback - losing the whole menu (and the default
+    server with it) because a path was given is worse than reading the
+    copy we were shipped with.
+    """
+    beside = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          'presets.json')
+    if root:
+        in_root = os.path.join(root, 'deploy', 'presets.json')
+        if os.path.exists(in_root):
+            return in_root
+    return beside
+
+
 def load_presets(root=None):
     """The pairs the wizard offers, from `deploy/presets.json`.
 
@@ -62,13 +81,8 @@ def load_presets(root=None):
     crash: the trader can still type both symbols, and a setup that
     refuses to open over a stray comma is worse than one with no menu.
     """
-    if root:
-        path = os.path.join(root, 'deploy', 'presets.json')
-    else:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            'presets.json')
     try:
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(_presets_path(root), 'r', encoding='utf-8') as f:
             data = json.load(f)
     except (OSError, ValueError):
         return []
@@ -83,13 +97,8 @@ def default_server(root=None):
     for separately, so a desk whose two legs sit at different brokers
     types the second one over and nothing else changes.
     """
-    if root:
-        path = os.path.join(root, 'deploy', 'presets.json')
-    else:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            'presets.json')
     try:
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(_presets_path(root), 'r', encoding='utf-8') as f:
             data = json.load(f)
     except (OSError, ValueError):
         return ''
@@ -131,6 +140,7 @@ def expand_preset(preset, contract_a='', contract_b=''):
     symbol_b = str(preset.get('leg_b') or '').replace(CONTRACT_TOKEN,
                                                       contract_b)
     return symbol_a, symbol_b
+
 
 #: What the wizard calls the two accounts. The name is what
 #: `env_key_for` turns into the `.env` key, so changing it here changes

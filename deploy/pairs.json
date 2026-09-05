@@ -25,10 +25,8 @@
     "contract months), RELATED (two different instruments, NO fair",
     "value). Getting it wrong is not cosmetic."
   ],
-
   "leg_a_account": "Account A",
   "leg_b_account": "Account B",
-
   "pairs": [
     {
       "name": "Gold basis",
@@ -39,25 +37,19 @@
     {
       "name": "Silver basis",
       "leg_a": "XAGUSD.f",
-      "leg_b": "SIU6",
+      "leg_b": "SIZ6",
       "pair_type": "SPOT_FUTURE"
     },
     {
-      "name": "WTI basis",
-      "leg_a": "USOIL.f",
-      "leg_b": "USOILV6",
-      "pair_type": "SPOT_FUTURE"
-    },
-    {
-      "name": "Brent basis",
-      "leg_a": "UKOIL.f",
-      "leg_b": "UKOILV6",
-      "pair_type": "SPOT_FUTURE"
-    },
-    {
-      "name": "Brent vs WTI",
+      "name": "Brent vs WTI - spot",
       "leg_a": "USOIL.f",
       "leg_b": "UKOIL.f",
+      "pair_type": "RELATED"
+    },
+    {
+      "name": "Brent vs WTI - futures",
+      "leg_a": "USOILX6",
+      "leg_b": "UKOILX6",
       "pair_type": "RELATED"
     }
   ]

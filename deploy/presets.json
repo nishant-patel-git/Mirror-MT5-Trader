@@ -27,9 +27,7 @@
     "install. Use deploy/pairs.json with ADD-PAIRS.bat, which puts the",
     "new contracts onto machines that are already set up."
   ],
-
   "default_server": "MentoMarkets-Server",
-
   "presets": [
     {
       "label": "Gold basis - XAUUSD.f spot vs GC future",
@@ -46,38 +44,17 @@
       "pair_type": "SPOT_FUTURE"
     },
     {
-      "label": "WTI basis - USOIL.f spot vs USOIL future",
-      "name": "WTI spot vs future",
-      "leg_a": "USOIL.f",
-      "leg_b": "USOIL{contract}",
-      "pair_type": "SPOT_FUTURE"
-    },
-    {
-      "label": "Brent basis - UKOIL.f spot vs UKOIL future",
-      "name": "Brent spot vs future",
-      "leg_a": "UKOIL.f",
-      "leg_b": "UKOIL{contract}",
-      "pair_type": "SPOT_FUTURE"
-    },
-    {
-      "label": "WTI calendar - USOIL, two contract months",
-      "name": "WTI calendar spread",
-      "leg_a": "USOIL{contract}",
-      "leg_b": "USOIL{contract}",
-      "pair_type": "FUTURE_FUTURE"
-    },
-    {
-      "label": "Brent calendar - UKOIL, two contract months",
-      "name": "Brent calendar spread",
-      "leg_a": "UKOIL{contract}",
-      "leg_b": "UKOIL{contract}",
-      "pair_type": "FUTURE_FUTURE"
-    },
-    {
-      "label": "Brent vs WTI - UKOIL.f against USOIL.f",
-      "name": "Brent vs WTI",
+      "label": "Brent vs WTI - spot (USOIL.f / UKOIL.f)",
+      "name": "Brent vs WTI - spot",
       "leg_a": "USOIL.f",
       "leg_b": "UKOIL.f",
+      "pair_type": "RELATED"
+    },
+    {
+      "label": "Brent vs WTI - futures (USOIL / UKOIL, same month)",
+      "name": "Brent vs WTI - futures",
+      "leg_a": "USOIL{contract}",
+      "leg_b": "UKOIL{contract}",
       "pair_type": "RELATED"
     }
   ]
