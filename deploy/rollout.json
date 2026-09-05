@@ -21,18 +21,26 @@
     "the token is deliberately not storable in this file, because this",
     "file travels on a USB stick."
   ],
-
   "repo_url": "https://github.com/nishant-patel-git/Mirror-MT5-Trader.git",
   "branch": "claude/monitoring-positions-market-grid-17nyys",
-
   "root": "C:\\MT5-Trader",
   "terminal_a": "C:\\MT5-A",
   "terminal_b": "C:\\MT5-B",
-
   "_python": [
-    "The interpreter this project is tested on. MetaTrader5's IPC",
-    "handshake fails on a 32-bit Python with an error that says nothing,",
-    "so the bitness is checked and refused, not warned about."
+    "The interpreters this project has actually been run on, green.",
+    "3.11 on Linux and Windows; 3.14 on a Windows office PC (625 passed).",
+    "A LIST because refusing a machine that already has a proven version",
+    "would mean installing a second Python on every desk for nothing.",
+    "Anything not listed here is refused loudly rather than used, so a",
+    "stray 3.9 cannot quietly become the one PC that behaves differently.",
+    "Add a version here only once the whole suite has passed on it.",
+    "",
+    "MetaTrader5's IPC handshake fails on a 32-bit Python with an error",
+    "that says nothing, so the bitness is checked and refused too - and",
+    "that check is not negotiable whatever this list says."
   ],
-  "python_version": "3.11"
+  "python_versions": [
+    "3.11",
+    "3.14"
+  ]
 }

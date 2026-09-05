@@ -132,7 +132,16 @@ $Branch    = Setting $Branch    'branch'   'main'
 $Root      = Setting $Root      'root'       'C:\MT5-Trader'
 $TerminalA = Setting $TerminalA 'terminal_a' 'C:\MT5-A'
 $TerminalB = Setting $TerminalB 'terminal_b' 'C:\MT5-B'
-$PyVersion = Setting ''         'python_version' '3.11'
+# A LIST, not one number: 3.11 and 3.14 have both run the whole suite
+# green, and refusing a machine that already has a proven interpreter
+# would mean installing a second Python on every desk for nothing.
+# Anything not on the list is still refused, so a stray 3.9 cannot
+# quietly become the one PC that behaves differently.
+$PyVersions = @()
+if ($rollout -and $rollout.PSObject.Properties.Name -contains 'python_versions') {
+    $PyVersions = @($rollout.python_versions)
+}
+if (-not $PyVersions) { $PyVersions = @('3.11', '3.14') }
 
 Say ('Repository:        ' + $RepoUrl)
 Say ('Branch:            ' + $Branch)
@@ -225,9 +234,11 @@ function Find-Python {
         also has 3.9 on PATH is the good outcome, and looking at PATH
         first would miss it.
     #>
-    if (Get-Command py -ErrorAction SilentlyContinue) {
-        $found = Test-Python @('py', ('-' + $PyVersion))
-        if ($found) { return $found }
+    foreach ($version in $PyVersions) {
+        if (Get-Command py -ErrorAction SilentlyContinue) {
+            $found = Test-Python @('py', ('-' + $version))
+            if ($found) { return $found }
+        }
     }
     if (Get-Command python -ErrorAction SilentlyContinue) {
         $found = Test-Python @('python')
@@ -248,19 +259,21 @@ function Assert-Python {
               ($Found.Command -join ' ') + ', version ' + $Found.Version +
               '). MetaTrader 5 will not talk to it: the handshake fails ' +
               'with an error that says nothing, and the leg simply never ' +
-              'connects. Uninstall it, or install Python ' + $PyVersion +
-              ' 64-bit from python.org alongside it, and run SETUP.bat ' +
-              'again.')
+              'connects. Uninstall it, or install Python ' +
+              $PyVersions[0] + ' 64-bit from python.org alongside it, and ' +
+              'run SETUP.bat again.')
     }
-    if ($Found.Version -ne $PyVersion) {
+    if ($PyVersions -notcontains $Found.Version) {
         Fail ('This machine has Python ' + $Found.Version + ' (' +
-              ($Found.Command -join ' ') + '), and this project is tested ' +
-              'on ' + $PyVersion + '. Refusing to install onto it rather ' +
-              'than making this the one PC in the office that behaves ' +
-              'differently. Install Python ' + $PyVersion + ' 64-bit from ' +
-              'python.org - ticking "Add python.exe to PATH" and "py ' +
-              'launcher" - and run SETUP.bat again. The existing Python ' +
-              'can stay; the launcher picks the right one.')
+              ($Found.Command -join ' ') + '), and the suite has only been ' +
+              'run on ' + ($PyVersions -join ' and ') + '. Refusing to ' +
+              'install onto an untested one rather than making this the ' +
+              'PC that behaves differently from every other desk. Install ' +
+              $PyVersions[0] + ' 64-bit from python.org - ticking "Add ' +
+              'python.exe to PATH" and "py launcher" - and run SETUP.bat ' +
+              'again. The existing Python can stay; the launcher picks ' +
+              'the right one. If this version HAS been proven, add it to ' +
+              'python_versions in rollout.json.')
     }
 }
 
@@ -275,11 +288,11 @@ function Invoke-Python {
 
 $found = Find-Python
 if ($null -eq $found) {
-    if ($PyVersion -ne '3.11') {
-        Fail ('rollout.json asks for Python ' + $PyVersion + ', and this ' +
-              'machine has none. This script only knows how to fetch ' +
-              '3.11 unattended - install ' + $PyVersion + ' 64-bit by ' +
-              'hand and run SETUP.bat again.')
+    if ($PyVersions -notcontains '3.11') {
+        Fail ('This machine has no Python, and rollout.json does not list ' +
+              '3.11 - the only version this script knows how to fetch ' +
+              'unattended. Install one of ' + ($PyVersions -join ', ') +
+              ' 64-bit by hand and run SETUP.bat again.')
     }
     # 64-bit, and it must match the 64-bit terminal: a 32-bit Python
     # fails the MT5 IPC handshake with an error that says nothing.
