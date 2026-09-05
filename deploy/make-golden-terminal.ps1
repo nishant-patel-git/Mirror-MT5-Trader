@@ -145,11 +145,27 @@ $servers = Get-ChildItem -Path $stage -Filter 'servers.dat' -Recurse -Force `
                          -ErrorAction SilentlyContinue
 if (-not $servers) {
     Remove-Item -Recurse -Force $stage
-    throw ('This terminal has no servers.dat, which means it was never ' +
-           'logged in. Open it, log into the broker once so the servers ' +
-           'list is filled, log out again, close it, and re-run this. ' +
-           'Without that list the new PCs cannot resolve the server name ' +
-           'and every login fails.')
+    throw (
+        'There is no servers.dat under ' + $Source + ', so this zip would ' +
+        'carry no broker list. TWO different things cause that, and they ' +
+        'need different answers:' + [Environment]::NewLine +
+        [Environment]::NewLine +
+        '  1. The terminal was never logged in. Open it, pick the broker ' +
+        'in Open an Account, log in once, log out, close it, re-run this.' +
+        [Environment]::NewLine +
+        [Environment]::NewLine +
+        '  2. MORE LIKELY: this is a NORMAL (non-portable) install, and ' +
+        'MetaTrader 5 keeps its settings in ' +
+        '%APPDATA%\MetaQuotes\Terminal\<a long hex folder>\ rather than ' +
+        'in the program folder. Look there: if you find config\servers.dat ' +
+        'in one of those, that is where the settings live and copying the ' +
+        'program folder alone cannot carry them.' +
+        [Environment]::NewLine +
+        [Environment]::NewLine +
+        'Do NOT reach for /portable to force the files into one place: a ' +
+        'terminal started portable refuses IPC from a normally-started ' +
+        'Python, so the legs would never connect. Say which of the two it ' +
+        'is and the setup can be built the right way round.')
 }
 Write-Host ('  keeping ' + $servers[0].Name + ' (the broker list)')
 
