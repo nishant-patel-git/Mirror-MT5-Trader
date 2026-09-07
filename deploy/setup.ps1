@@ -741,8 +741,15 @@ if (Test-Path (Join-Path $Root '.git')) {
 
 Step 'Dependencies'
 Push-Location $Root
-Invoke-Python $python @('-m', 'pip', 'install', '--upgrade', '--quiet', 'pip')
-Invoke-Python $python @('-m', 'pip', 'install', '--quiet', '-r',
+# --no-warn-script-location: pip prints a yellow paragraph per console
+# script when Scripts\ is not on PATH, and on a per-user Python that is
+# a dozen of them. Nothing here ever runs pytest, flask or playwright by
+# name - every call in this repo goes through -m - so the warning is
+# noise that reads like a failure to the person watching the install.
+Invoke-Python $python @('-m', 'pip', 'install', '--upgrade', '--quiet',
+                        '--no-warn-script-location', 'pip')
+Invoke-Python $python @('-m', 'pip', 'install', '--quiet',
+                        '--no-warn-script-location', '-r',
                         'requirements.txt')
 if ($LASTEXITCODE -ne 0) { Pop-Location; Fail 'The dependencies could not be installed.' }
 Pop-Location

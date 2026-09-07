@@ -1001,3 +1001,118 @@ def test_control_a_bad_icon_name_is_cleaned_rather_than_refused():
     assert r"""$safeName = ($ShortcutName -replace '[\\/:*?"<>|]', '-')""" \
         in SETUP_PS1
     assert "if (-not $safeName) { $safeName = 'NEXUS Terminal' }" in SETUP_PS1
+
+
+# --- The four .bat files a desk runs after the install ------------------
+#
+#     setup.ps1 runs once. These run every day, on the trader's own PC,
+#     with nobody watching - so the same Windows facts that bit the
+#     installer are checked here too.
+
+DAILY_BATS = {
+    name: (DEPLOY.parent / name if name == 'START-TRADING.bat'
+           else DEPLOY / name).read_text(encoding='utf-8')
+    for name in ('START-TRADING.bat', 'UPDATE.bat', 'VERIFY.bat',
+                 'ADD-PAIRS.bat')
+}
+
+
+def test_every_daily_script_is_plain_ascii():
+    """A console on the default code page turns anything else into
+    mojibake in the one message that matters."""
+    for name, text in DAILY_BATS.items():
+        assert text.isascii(), name
+
+
+def test_a_3_14_desk_is_not_told_it_has_no_python():
+    """rollout.json allows 3.14 and the suite has passed on it, so a PC
+    set up that way is normal. Asking the launcher only for 3.11 sent
+    such a machine down the 'no Python at all' path."""
+    for name, text in DAILY_BATS.items():
+        assert 'py -3.14 -c' in text, name
+        assert 'py -3 -c' in text, name
+        assert text.index('py -3.11 -c') < text.index('py -3.14 -c') \
+            < text.index('py -3 -c') < text.index('python -c'), name
+
+
+def test_control_the_launcher_is_still_asked_first():
+    """The control: PATH must not win. py -3.11 on a machine that also
+    has 3.9 on PATH is the good outcome."""
+    for name, text in DAILY_BATS.items():
+        assert text.index('set "PY="') < text.index('py -3.11 -c'), name
+
+
+def test_a_32_bit_python_stops_every_daily_script():
+    """MT5's handshake fails against 32-bit with an error that says
+    nothing. Starting looks like it worked, which is worse."""
+    for name, text in DAILY_BATS.items():
+        assert 'struct.calcsize(chr(80))*8==64' in text, name
+        assert "This machine's Python is 32-bit" in text, name
+
+
+def test_control_an_untested_version_only_warns(caplog=None):
+    """The control, and it is the point of the pair: the bitness guard
+    must not become a blanket refusal. A version the suite has not run
+    on may well be fine, and stopping a trader at 9am over a version
+    number is the wrong trade-off."""
+    for name, text in DAILY_BATS.items():
+        after = text[text.index('sys.version_info[:2] in ((3,11),(3,14))'):]
+        # The parenthesised block that reacts to it, and nothing beyond.
+        block = after[after.index('if errorlevel 1 ('):]
+        block = block[:block.index('\n)')]
+        assert '[!]' in block, name
+        assert 'exit /b' not in block, name
+        assert 'pause' not in block, name
+
+
+def test_no_quote_character_inside_a_cmd_python_one_liner():
+    """cmd ends a quoted argument on the first inner quote, exactly as
+    PowerShell mangled the installer's probe. chr(80) is why these read
+    the way they do."""
+    import re as _re
+    for name, text in DAILY_BATS.items():
+        for arg in _re.findall(r'-c "([^"]*)"', text):
+            assert '"' not in arg, (name, arg)
+
+
+def test_pip_does_not_print_a_wall_of_yellow_it_cannot_act_on():
+    """On a per-user Python, Scripts\\ is not on PATH and pip warns once
+    per console script. Nothing in this repo runs pytest, flask or
+    playwright BY NAME, so the warning is noise that reads like a
+    failure to whoever is watching."""
+    for name, text in DAILY_BATS.items():
+        for call in [l for l in text.split('\n') if '-m pip install' in l]:
+            assert '--no-warn-script-location' in call, (name, call)
+    assert "'--no-warn-script-location'" in SETUP_PS1
+
+
+def test_control_nothing_is_ever_run_by_bare_script_name():
+    """The control that makes the suppression safe. If anything called
+    pytest, pip, flask or playwright DIRECTLY, Scripts\\ would have to
+    be on PATH and silencing the warning would hide a real fault.
+
+    Checked per call site rather than per line: setup.ps1 wraps its
+    argument lists, so the '-m' can sit on the line above the tool."""
+    import re as _re
+    for name, text in DAILY_BATS.items():
+        for line in text.split('\n'):
+            if line.strip().startswith('REM'):
+                continue
+            for tool in ('pytest', 'flask', 'playwright', 'pip'):
+                if _re.search(r'%PY%\s+' + tool + r'\b', line):
+                    raise AssertionError((name, line.strip()))
+    # setup.ps1: every quoted tool argument must have '-m' just before
+    # it, whatever the line breaks look like.
+    flat = ' '.join(SETUP_PS1.split())
+    for tool in ('pytest', 'pip'):
+        for hit in _re.finditer(r"'" + tool + r"'", flat):
+            before = flat[max(0, hit.start() - 120):hit.start()]
+            assert "'-m'" in before, (tool, before[-60:])
+
+
+def test_declining_the_update_prompt_does_not_slam_the_window_shut():
+    """'It never leaves the trader with a black window' is a rule this
+    file states and then broke on its own prompt."""
+    text = DAILY_BATS['UPDATE.bat']
+    block = text[text.index('if /i not "%GOON%"=="YES"'):][:200]
+    assert 'pause' in block
