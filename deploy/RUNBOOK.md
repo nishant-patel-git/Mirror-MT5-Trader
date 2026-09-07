@@ -54,7 +54,7 @@ first (or end its `python.exe` in Task Manager).
 
 **Restart after a pull.** The engine reads its code when it starts, so
 a pull into a running instance leaves the old one working. Close the
-black window and double-click START TRADING again (or Ctrl-C and
+black window and double-click NEXUS Terminal again (or Ctrl-C and
 `python start.py`). The browser needs nothing: the page stamps its own
 CSS and JS, and the HTML is re-read per request.
 
@@ -64,7 +64,7 @@ CSS and JS, and the HTML is re-read per request.
 2. Check **both MetaTrader 5 terminals** are open and logged in, and
    that the **Algo Trading** button in each is green. If a terminal is
    closed, open it — it logs itself in.
-3. Double-click **START TRADING** on the desktop. (Or, in a terminal:
+3. Double-click **NEXUS Terminal** on the desktop. (Or, in a terminal:
    `python start.py` — same thing, one file, no arguments. Where the
    python.org launcher is installed, `py -3.11 start.py` does the same;
    in a conda prompt there is usually no launcher, and `python` is the

@@ -142,4 +142,4 @@ Remove-Item -Recurse -Force $stage
 $mb = [Math]::Round((Get-Item $Output).Length / 1MB, 1)
 Write-Host ''
 Write-Host ('Done: ' + $Output + '  (' + $mb + ' MB)') -ForegroundColor Green
-Write-Host 'Copy it beside SETUP.bat and setup.ps1.'
+Write-Host 'Run MAKE-KIT.BAT to build the rollout kit around it.'

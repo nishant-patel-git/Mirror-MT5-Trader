@@ -5,9 +5,10 @@ shared EC2 box; this is the other shape.
 
 What the trader sees:
 
-1. Double-click **SETUP.bat** — installs everything, about ten minutes
+1. Double-click **Start-Setup.bat** — the only thing in the kit folder;
+   installs everything, about ten minutes
 2. A window asks **six questions** — two logins, two passwords, two servers, and which pair
-3. Double-click **START TRADING** on the Desktop — the ladder opens
+3. Double-click **NEXUS Terminal** on the Desktop — the ladder opens
 
 They never open MetaTrader 5, never edit a file, never see a port
 number. `terminal_path` is set for both accounts, so the engine opens
@@ -78,7 +79,7 @@ That is why SETUP unpacks a zip rather than driving the installer.
 ```
 
 Edit it in the rollout kit; new PCs are built from that copy. Anything
-passed on the SETUP.bat command line still wins for that one machine.
+passed on the Start-Setup.bat command line still wins for that one machine.
 
 A PC that is **already installed** does not re-read it — it has a git
 remote of its own. To move one:
@@ -89,21 +90,31 @@ git remote set-url origin <new url>
 git checkout <new branch>
 ```
 
-or delete `C:\MT5-Trader` and run SETUP.bat again. `config.json` and
+or delete `C:\MT5-Trader` and run Start-Setup.bat again. `config.json` and
 `.env` are not in the repo, so a reinstall does not lose the accounts.
 
 ## The rollout kit
 
-Copy these four into one folder — a USB stick or a network share:
+`MAKE-KIT.BAT` builds it. Copy the whole `ROLLOUT-KIT` folder onto a USB
+stick or a share, and it looks like this:
 
 ```
-SETUP.bat
-setup.ps1
-rollout.json
-MT5-golden.zip
+ROLLOUT-KIT\
+    Start-Setup.bat          <- the only thing to double-click
+    setup-files\
+        setup.ps1
+        rollout.json
+        MT5-golden.zip
 ```
 
-`SETUP.bat` asks for Administrator itself and hands over to
+**One file at the top level, on purpose.** A folder showing
+`Start-Setup.bat` next to `setup.ps1` is a folder where somebody
+double-clicks the `.ps1`, Windows offers to open it in Notepad, and the
+install never starts. The three files that are not the entry point are
+out of reach — and they stay together, because `setup.ps1` looks for
+`rollout.json` and `MT5-golden.zip` beside itself.
+
+`Start-Setup.bat` asks for Administrator itself and hands over to
 `setup.ps1`, which:
 
 - installs Git and Python 3.11 64-bit if they are missing, and
@@ -121,7 +132,8 @@ MT5-golden.zip
 - **logs both accounts in and proves it** (`check_config.py`) — a wrong
   password or a mistyped login is found in front of whoever is
   installing, in the broker's own words, not by a trader at 9am
-- puts START TRADING on the Desktop
+- puts **NEXUS Terminal** on the Desktop (rename it with
+  `shortcut_name` in `rollout.json`, or `-ShortcutName`)
 
 It exits non-zero if either account failed to connect, so a bad install
 cannot look like a good one.
@@ -129,7 +141,7 @@ cannot look like a good one.
 Private repo, so each PC needs read access:
 
 ```
-SETUP.bat -Token github_pat_xxx
+Start-Setup.bat -Token github_pat_xxx
 ```
 
 Use a **fine-grained, read-only token scoped to this one repository**.
@@ -137,6 +149,51 @@ It goes into the Windows Credential Manager, never into the clone URL —
 a token in the URL is written to `.git\config` in plain text and is
 then in every screenshot of that file forever. A leaked read-only token
 reads code; it cannot push.
+
+## One PC, two shifts
+
+A machine shared by two traders on different shifts — say 10001/10002 in
+the morning and 10003/10004 in the evening, four MT5 terminals in all —
+is **two installs, not one install with four accounts.**
+
+That is not a preference. `config.json` keys a pair by its two symbols
+(`XAUUSD.f|GCZ6`), so two desks trading the same instruments would be
+one row, not two; and `ADD-PAIRS` reads which account is leg A off the
+pairs already there and **refuses** a config whose pairs disagree,
+rather than guessing a leg onto the wrong terminal.
+
+Nothing in the rollout kit changes. Run the same `Start-Setup.bat`
+twice, naming the second desk's folders on the command line:
+
+```
+Start-Setup.bat
+```
+
+then, for the second trader:
+
+```
+Start-Setup.bat -Root C:\MT5-Trader-2 -TerminalA C:\MT5-C -TerminalB C:\MT5-D -ShortcutName "NEXUS Terminal - Evening"
+```
+
+Four flags, one line, and each desk gets its own clone, its own
+`config.json`, its own `.env`, its own two terminals and its own icon.
+`-ShortcutName` is the one that is easy to forget: without it the second
+run would rewrite the first desk's Desktop icon to point at the second
+desk's install.
+
+Two things to know:
+
+- **Ports.** Both installs default to `9101`/`9102` and web `8000`. On
+  true shifts — one trader at a time — that is fine and there is
+  nothing to change. If the two ever run **at the same time**, give the
+  second desk `9103`/`9104` on the Exchanges page and start it with
+  `START-TRADING.bat` edited to `--port 8001`.
+- **The roll list.** `ADD-PAIRS.BAT` works per install. Run it in
+  `C:\MT5-Trader` and again in `C:\MT5-Trader-2`; the same
+  `deploy\pairs.json` serves both, because each config has exactly one
+  account on each leg.
+
+---
 
 ## The six questions
 
@@ -223,7 +280,7 @@ touched. So it is safe to run twice and safe to run mid-session.
 
 If the engine is running it restarts itself within a few seconds when
 the config changes (`mt5trader/config.py`, `restart_required`); if it
-is not, the pairs are there at the next START TRADING.
+is not, the pairs are there at the next NEXUS Terminal start.
 
 **One file serves every PC.** It does not name the two accounts —
 names carry the login (`AC-100015`), so they differ on every desk.
@@ -270,7 +327,7 @@ not a crash: the trader can still type both symbols.
 
 ## Every morning
 
-START TRADING does the whole start:
+NEXUS Terminal does the whole start:
 
 1. finds a Python
 2. installs any new dependencies
@@ -343,7 +400,7 @@ nothing else does:
 
 | File | Used for | Reaches a PC by |
 |---|---|---|
-| `deploy\presets.json` | the setup wizard's menu | a fresh SETUP.bat |
+| `deploy\presets.json` | the setup wizard's menu | a fresh Start-Setup.bat |
 | `deploy\pairs.json` | the monthly roll | ADD-PAIRS.BAT |
 
 Check the spelling in Market Watch, or with **Find symbols** on the

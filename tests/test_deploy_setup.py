@@ -755,3 +755,102 @@ def test_no_python_one_liner_in_setup_carries_a_double_quote():
     """Every -c in the script, not only the one that broke."""
     for argument in re.findall(r"@\('-c', '([^']*)'\)", SETUP_PS1):
         assert '"' not in argument, argument
+
+
+# --- The rollout kit's shape -------------------------------------------
+#
+#     A trader is handed one folder and told to double-click. Everything
+#     below is about what they see when they open it, and about a PC
+#     that is set up TWICE because two shifts share it.
+
+SETUP_BAT = (DEPLOY / 'SETUP.bat').read_text(encoding='utf-8')
+MAKE_KIT = (DEPLOY / 'MAKE-KIT.bat').read_text(encoding='utf-8')
+ROLLOUT = json.loads((DEPLOY / 'rollout.json').read_text(encoding='utf-8'))
+
+
+def test_the_kit_puts_one_clickable_thing_at_the_top_level():
+    """Start-Setup.bat alone; the .ps1 a trader must not click is
+    tucked into setup-files with the two files it reads."""
+    assert '"%KIT%\\Start-Setup.bat"' in MAKE_KIT
+    for name in ('setup.ps1', 'rollout.json', 'MT5-golden.zip'):
+        assert f'copy /y "%~dp0{name}"' in MAKE_KIT
+        assert f'"%KIT%\\setup-files\\" >nul' in MAKE_KIT
+    assert 'mkdir "%KIT%\\setup-files"' in MAKE_KIT
+    assert '"%KIT%\\setup-files\\%%F"' in MAKE_KIT
+    # And an older, flat kit rebuilt in place is cleaned up, or the
+    # trader still sees four files and picks the wrong one.
+    for stale in ('SETUP.bat', 'setup.ps1', 'rollout.json',
+                  'MT5-golden.zip'):
+        assert f'del /q "%KIT%\\{stale}"' in MAKE_KIT
+
+
+def test_the_shim_finds_the_script_in_the_kit_layout():
+    assert 'set "PS1=%~dp0setup-files\\setup.ps1"' in SETUP_BAT
+
+
+def test_control_the_shim_still_finds_it_beside_itself():
+    """The repository layout, where setup.ps1 IS beside SETUP.bat. A
+    kit-only lookup would break every run from the clone."""
+    assert 'set "PS1=%~dp0setup.ps1"' in SETUP_BAT
+    assert SETUP_BAT.index('set "PS1=%~dp0setup.ps1"') < \
+        SETUP_BAT.index('set "PS1=%~dp0setup-files\\setup.ps1"')
+
+
+def test_a_refusal_names_the_file_that_was_actually_clicked():
+    """Start-Setup.bat on a kit, SETUP.bat in the clone. A refusal
+    telling a trader to re-run a file that is not in front of them is a
+    refusal they cannot act on."""
+    assert 'set "MT5_SETUP_NAME=%~nx0"' in SETUP_BAT
+    assert '$SetupName = $env:MT5_SETUP_NAME' in SETUP_PS1
+    assert "$SetupName = 'SETUP.bat'" in SETUP_PS1   # the control: a
+    # direct run of setup.ps1 still names something real.
+    body = SETUP_PS1[SETUP_PS1.index('$SetupName = $env:'):]
+    assert "run ' + $SetupName + ' again" in body
+
+
+def test_the_desktop_icon_is_named_not_hardcoded():
+    """One PC running two shifts is set up twice, with two -Root
+    folders. A literal name would mean the second run repointed the
+    first desk's icon at the second desk's install."""
+    assert "(Join-Path $desktop ($ShortcutName + '.lnk'))" in SETUP_PS1
+    assert "'START TRADING.lnk'" not in SETUP_PS1
+    assert '[string] $ShortcutName' in SETUP_PS1
+
+
+def test_control_the_icon_has_a_default_so_nobody_must_pass_one():
+    assert ROLLOUT['shortcut_name'] == 'NEXUS Terminal'
+    assert "'shortcut_name' 'NEXUS Terminal'" in SETUP_PS1
+
+
+def test_two_desks_on_one_pc_are_two_configs_not_four_accounts(tmp_path):
+    """The reason `OFFICE-PC.md` says two installs.
+
+    A pair is keyed by its two SYMBOLS, so the evening desk trading the
+    same instruments as the morning desk would overwrite its row rather
+    than sit beside it - and the second desk's accounts would be the
+    ones left holding it."""
+    raw = _configured(tmp_path)
+    first = dict(raw['pairs'])
+    second = configure.build_config(
+        answers(login_a='10003', login_b='10004',
+                terminal_a='C:\\MT5-C', terminal_b='C:\\MT5-D'),
+        raw, example={})
+    # Four accounts do coexist...
+    assert len(second['accounts']) == 4
+    # ...but the pair did not: same symbols, same key, one row.
+    assert set(second['pairs']) == set(first)
+    legs = {leg['account'] for pair in second['pairs'].values()
+            for leg in (pair['leg_a'], pair['leg_b'])}
+    assert legs == {'AC-10003', 'AC-10004'}
+
+
+def test_control_different_symbols_on_the_second_desk_do_sit_beside(tmp_path):
+    """The control: the collision is the SYMBOLS, not the accounts."""
+    raw = _configured(tmp_path)
+    before = set(raw['pairs'])
+    second = configure.build_config(
+        answers(login_a='10003', login_b='10004',
+                terminal_a='C:\\MT5-C', terminal_b='C:\\MT5-D',
+                symbol_a='XAGUSD.f', symbol_b='SIZ6'),
+        raw, example={})
+    assert set(second['pairs']) > before

@@ -1,4 +1,4 @@
-"""What START TRADING checks before it starts anything.
+"""What NEXUS Terminal (START-TRADING.bat) checks before it starts.
 
 It exists because the batch file cannot read `config.json`, and the one
 question that decides whether a start can work is IN that file: does

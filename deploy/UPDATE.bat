@@ -2,7 +2,7 @@
 REM  MT5-Trader - put a new version on this PC.
 REM
 REM  Run BY WHOEVER MAINTAINS IT, deliberately, on the machine being
-REM  updated. START TRADING does not do this: a desk's version changes
+REM  updated. NEXUS Terminal does not do this: a desk's version changes
 REM  when somebody decides it changes, not because a commit landed
 REM  overnight.
 REM
@@ -150,7 +150,7 @@ if errorlevel 1 (
 
 echo.
 echo   Updated, and the safety tests pass.
-echo   Nothing else to do - START TRADING as usual.
+echo   Nothing else to do - NEXUS Terminal as usual.
 echo.
 echo   If this version misbehaves, deploy\UPDATE.BAT --rollback puts
 echo   this PC back on %WAS%.
