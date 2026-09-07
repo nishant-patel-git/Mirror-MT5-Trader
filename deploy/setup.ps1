@@ -214,11 +214,49 @@ function Test-Python {
     #>
     param([string[]] $Command)
     $probe = 'import sys, struct; print("%d.%d %d" % (sys.version_info[0], sys.version_info[1], struct.calcsize("P") * 8))'
-    $out = Invoke-Python $Command @('-c', $probe) 2>$null
+    <#
+        Run it with errors NOT fatal, and swallow stderr.
+
+        A fresh Windows ships zero-byte python.exe and python3.exe
+        stubs in %LOCALAPPDATA%\Microsoft\WindowsApps that open the
+        Microsoft Store. Running one prints "Python was not found; run
+        without arguments to install from the Microsoft Store" to
+        STDERR - and PowerShell 7 turns a native command's stderr into
+        a TERMINATING error while $ErrorActionPreference is 'Stop'.
+
+        So on a genuinely bare PC this probe killed the whole install
+        at the exact moment it had established that Python was missing
+        and was about to go and install it.
+    #>
+    $out = $null
+    $previous = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $out = Invoke-Python $Command @('-c', $probe) 2>$null
+    } catch {
+        return $null
+    } finally {
+        $ErrorActionPreference = $previous
+    }
     if ($LASTEXITCODE -ne 0 -or -not $out) { return $null }
     $parts = ([string] $out).Trim() -split ' '
+    if ($parts.Count -lt 2) { return $null }
     return @{ Version = $parts[0]; Bits = [int] $parts[1];
               Command = $Command }
+}
+
+function Test-StoreStub {
+    <#
+        Is this command one of Windows' Microsoft Store aliases rather
+        than a real interpreter? They live under WindowsApps, are zero
+        bytes, and exist on every fresh install - so Get-Command finds
+        a 'python' that is not Python.
+    #>
+    param([string] $Name)
+    $command = Get-Command $Name -ErrorAction SilentlyContinue
+    if (-not $command) { return $false }
+    $source = [string] $command.Source
+    return $source -and ($source -like '*\WindowsApps\*')
 }
 
 function Find-Python {
@@ -240,7 +278,8 @@ function Find-Python {
             if ($found) { return $found }
         }
     }
-    if (Get-Command python -ErrorAction SilentlyContinue) {
+    if ((Get-Command python -ErrorAction SilentlyContinue) -and
+        -not (Test-StoreStub 'python')) {
         $found = Test-Python @('python')
         if ($found) { return $found }
     }
@@ -306,8 +345,14 @@ if ($null -eq $found) {
     Refresh-Path
     $found = Find-Python
     if ($null -eq $found) {
-        Fail ('Python installed but is still not on PATH. Close this ' +
-              'window, open a new one, and run SETUP.bat again.')
+        Fail ('Python installed but this window still cannot find it. ' +
+              'Close this window, open a new one, and run SETUP.bat ' +
+              'again - a PATH set by an installer does not reach a ' +
+              'console that was already open. If it still fails, turn ' +
+              'OFF the python.exe and python3.exe App execution aliases ' +
+              'in Settings > Apps > Advanced app settings > App ' +
+              'execution aliases: those are Microsoft Store shortcuts ' +
+              'that shadow a real Python.')
     }
 }
 Assert-Python $found
