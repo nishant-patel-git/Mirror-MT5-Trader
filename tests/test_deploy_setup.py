@@ -697,3 +697,61 @@ def test_no_enabled_pair_is_said_but_not_refused(tmp_path):
     ok, lines = preflight.check(raw, terminals_running=2)
     assert ok
     assert any('No pair is enabled' in line for line in lines)
+
+
+# --- The Python probe inside setup.ps1 ---------------------------------
+#
+#     setup.ps1 decides whether a machine has a usable Python by running
+#     one line of Python and reading what comes back. Windows PowerShell
+#     5.1 - what SETUP.bat starts on every office PC - rebuilds a native
+#     command line by quoting any argument that contains a space, and it
+#     does NOT escape the double quotes already inside it. A probe
+#     containing a quote therefore reached python.exe torn into pieces,
+#     died of SyntaxError, and a perfectly good Python 3.11 was reported
+#     as "installed but this window still cannot find it".
+#
+#     The interpreter cannot be run from Linux CI, so what is checked
+#     here is the property that made it break: the text of the probe.
+
+import re
+import subprocess
+import sys
+
+SETUP_PS1 = (DEPLOY / 'setup.ps1').read_text(encoding='utf-8')
+
+
+def _probe_line():
+    match = re.search(r"^\s*\$probe = '(.*)'\s*$", SETUP_PS1, re.MULTILINE)
+    assert match, 'setup.ps1 no longer assigns $probe on one line'
+    return match.group(1)
+
+
+def test_the_version_probe_survives_windows_powershell_quoting():
+    probe = _probe_line()
+    assert '"' not in probe, (
+        'a double quote in the probe is re-split by Windows PowerShell '
+        '5.1 and python.exe never sees the whole line')
+    assert probe.isascii(), 'a console on the default code page mangles it'
+    assert probe.count(' ') <= 1, (
+        'keep the probe to the one unavoidable space after "import": '
+        'the fewer spaces, the less PowerShell has to quote')
+
+
+def test_control_the_probe_answers_what_the_script_parses():
+    """The control: quote-free is worthless if the line does not run.
+
+    This runs the REAL probe on the interpreter running the suite and
+    asserts it produces exactly the three numbers setup.ps1 splits into
+    major, minor and bits."""
+    out = subprocess.run([sys.executable, '-c', _probe_line()],
+                         capture_output=True, text=True, check=True).stdout
+    parts = out.strip().split()
+    assert len(parts) == 3
+    assert (int(parts[0]), int(parts[1])) == sys.version_info[:2]
+    assert int(parts[2]) in (32, 64)
+
+
+def test_no_python_one_liner_in_setup_carries_a_double_quote():
+    """Every -c in the script, not only the one that broke."""
+    for argument in re.findall(r"@\('-c', '([^']*)'\)", SETUP_PS1):
+        assert '"' not in argument, argument
