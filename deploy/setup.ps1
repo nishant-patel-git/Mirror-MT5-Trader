@@ -213,7 +213,40 @@ function Test-Python {
         into the one that behaves differently.
     #>
     param([string[]] $Command)
-    $probe = 'import sys, struct; print("%d.%d %d" % (sys.version_info[0], sys.version_info[1], struct.calcsize("P") * 8))'
+    <#
+        NO DOUBLE QUOTE ANYWHERE IN THIS PROBE, and that is not a
+        style choice.
+
+        Windows PowerShell 5.1 - which is what SETUP.bat starts, and
+        what every one of these office PCs has - rebuilds the command
+        line for a native program by wrapping any argument containing a
+        space in double quotes, and it does NOT escape the double
+        quotes already inside it. So the old probe,
+
+            'import sys, struct; print("%d.%d %d" % (...))'
+
+        reached python.exe as
+
+            -c "import sys, struct; print(%d.%d %d" % (...))"
+
+        which Windows then split at those quotes into several
+        arguments. Python got a fragment, raised SyntaxError, exited
+        non-zero, and its complaint went to the stderr this function
+        deliberately swallows. Test-Python therefore returned $null for
+        a PERFECTLY GOOD Python 3.11 - on every machine, every time.
+
+        That is the whole bug behind 'Python installed but this window
+        still cannot find it': the interpreter was found, run, and then
+        judged missing because it could not parse a mangled one-liner.
+        Installing Python again could never fix it.
+
+        Written with no quote character anywhere in it, the argument
+        survives whatever quoting a host puts around it, so 5.1, 7.x
+        and cmd.exe all deliver it whole. chr(80) is 'P'; three numbers
+        come back separated by spaces - major, minor, bits - and the
+        version is put back together on this side.
+    #>
+    $probe = 'import sys,struct;print(sys.version_info[0],sys.version_info[1],struct.calcsize(chr(80))*8)'
     <#
         Run it with errors NOT fatal, and swallow stderr.
 
@@ -239,9 +272,12 @@ function Test-Python {
         $ErrorActionPreference = $previous
     }
     if ($LASTEXITCODE -ne 0 -or -not $out) { return $null }
-    $parts = ([string] $out).Trim() -split ' '
-    if ($parts.Count -lt 2) { return $null }
-    return @{ Version = $parts[0]; Bits = [int] $parts[1];
+    # 'MAJOR MINOR BITS' - three numbers, so the version is put back
+    # together here rather than formatted inside a probe that is not
+    # allowed a quote character.
+    $parts = @(([string] $out).Trim() -split '\s+')
+    if ($parts.Count -lt 3) { return $null }
+    return @{ Version = ($parts[0] + '.' + $parts[1]); Bits = [int] $parts[2];
               Command = $Command }
 }
 
@@ -428,6 +464,23 @@ if ($null -eq $found) {
                              'C:\Python311\python.exe')) {
             $mark = if (Test-Path $probe) { 'PRESENT' } else { 'missing' }
             Write-Host ('    ' + $mark.PadRight(8) + ' ' + $probe)
+            # What the interpreter ACTUALLY says when asked. A file that
+            # is PRESENT and still not used means the probe below it
+            # failed, and its answer is the only thing that says why.
+            if (Test-Path $probe) {
+                $answer = $null
+                $previous = $ErrorActionPreference
+                try {
+                    $ErrorActionPreference = 'Continue'
+                    $answer = & $probe '-c' 'import sys,struct;print(sys.version_info[0],sys.version_info[1],struct.calcsize(chr(80))*8)' 2>&1
+                } catch {
+                    $answer = $_.Exception.Message
+                } finally {
+                    $ErrorActionPreference = $previous
+                }
+                Write-Host ('             it answers: ' +
+                            (([string] $answer).Trim()))
+            }
         }
         foreach ($name in @('py', 'python')) {
             $cmd = Get-Command $name -ErrorAction SilentlyContinue
