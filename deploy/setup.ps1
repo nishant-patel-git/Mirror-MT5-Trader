@@ -51,6 +51,12 @@ param(
     [string] $TerminalA = '',
     [string] $TerminalB = '',
 
+    # What the Desktop icon is called. A NAME, and a parameter, because
+    # a PC that runs two desks gets SETUP twice with two -Root folders,
+    # and a fixed name would mean the second run silently repointed the
+    # first desk's icon at the second desk's install.
+    [string] $ShortcutName = '',
+
     # For a re-run on a machine that is already set up: keep its
     # config.json rather than asking the six questions again.
     [switch] $KeepConfig
@@ -132,6 +138,14 @@ $Branch    = Setting $Branch    'branch'   'main'
 $Root      = Setting $Root      'root'       'C:\MT5-Trader'
 $TerminalA = Setting $TerminalA 'terminal_a' 'C:\MT5-A'
 $TerminalB = Setting $TerminalB 'terminal_b' 'C:\MT5-B'
+$ShortcutName = Setting $ShortcutName 'shortcut_name' 'NEXUS Terminal'
+# What the person actually double-clicked. The repository calls the
+# shim SETUP.bat; the rollout kit hands it over as Start-Setup.bat,
+# and a refusal that names the wrong file is a refusal a trader
+# cannot act on. The shim passes its own name in; the default is for
+# the case where this script is run directly.
+$SetupName = $env:MT5_SETUP_NAME
+if (-not $SetupName) { $SetupName = 'SETUP.bat' }
 # A LIST, not one number: 3.11 and 3.14 have both run the whole suite
 # green, and refusing a machine that already has a proven interpreter
 # would mean installing a second Python on every desk for nothing.
@@ -188,7 +202,7 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
     Refresh-Path
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
         Fail ('Git installed but is still not on PATH. Close this window, ' +
-              'open a new one, and run SETUP.bat again.')
+              'open a new one, and run ' + $SetupName + ' again.')
     }
     Say ('Installed: ' + (git --version))
 }
@@ -383,7 +397,7 @@ function Assert-Python {
               'with an error that says nothing, and the leg simply never ' +
               'connects. Uninstall it, or install Python ' +
               $PyVersions[0] + ' 64-bit from python.org alongside it, and ' +
-              'run SETUP.bat again.')
+              'run ' + $SetupName + ' again.')
     }
     if ($PyVersions -notcontains $Found.Version) {
         Fail ('This machine has Python ' + $Found.Version + ' (' +
@@ -392,7 +406,7 @@ function Assert-Python {
               'install onto an untested one rather than making this the ' +
               'PC that behaves differently from every other desk. Install ' +
               $PyVersions[0] + ' 64-bit from python.org - ticking "Add ' +
-              'python.exe to PATH" and "py launcher" - and run SETUP.bat ' +
+              'python.exe to PATH" and "py launcher" - and run ' + $SetupName + ' ' +
               'again. The existing Python can stay; the launcher picks ' +
               'the right one. If this version HAS been proven, add it to ' +
               'python_versions in rollout.json.')
@@ -414,7 +428,7 @@ if ($null -eq $found) {
         Fail ('This machine has no Python, and rollout.json does not list ' +
               '3.11 - the only version this script knows how to fetch ' +
               'unattended. Install one of ' + ($PyVersions -join ', ') +
-              ' 64-bit by hand and run SETUP.bat again.')
+              ' 64-bit by hand and run ' + $SetupName + ' again.')
     }
     # 64-bit, and it must match the 64-bit terminal: a 32-bit Python
     # fails the MT5 IPC handshake with an error that says nothing.
@@ -436,14 +450,14 @@ if ($null -eq $found) {
     if ($run.ExitCode -eq 1618) {
         Fail ('Another Windows installer is running, so Python could not ' +
               'be installed (exit 1618). Wait for it to finish - Windows ' +
-              'Update is the usual one - and run SETUP.bat again.')
+              'Update is the usual one - and run ' + $SetupName + ' again.')
     }
     if ($run.ExitCode -ne 0 -and $run.ExitCode -ne 3010) {
         Fail ('The Python installer failed with exit code ' +
               $run.ExitCode + '. Nothing else has been changed. Install ' +
               'Python ' + $PyVersions[0] + ' 64-bit from python.org by ' +
               'hand - tick "Add python.exe to PATH" and "py launcher" - ' +
-              'and run SETUP.bat again.')
+              'and run ' + $SetupName + ' again.')
     }
     if ($run.ExitCode -eq 3010) {
         Warn 'Python installed and asked for a reboot; carrying on.'
@@ -489,7 +503,7 @@ if ($null -eq $found) {
         }
         Write-Host ''
         Fail ('Python installed but this window still cannot find it. ' +
-              'Close this window, open a new one, and run SETUP.bat ' +
+              'Close this window, open a new one, and run ' + $SetupName + ' ' +
               'again - a PATH set by an installer does not reach a ' +
               'console that was already open. If it still fails, turn ' +
               'OFF the python.exe and python3.exe App execution aliases ' +
@@ -548,7 +562,7 @@ if (Test-Path (Join-Path $Root '.git')) {
         $existing = Get-ChildItem -Force $Root
         if ($existing) {
             Fail ($Root + ' already exists and is not a clone. Move it ' +
-                  'aside and run SETUP.bat again - overwriting it might ' +
+                  'aside and run ' + $SetupName + ' again - overwriting it might ' +
                   'destroy a config or a book this desk still needs.')
         }
     }
@@ -556,7 +570,7 @@ if (Test-Path (Join-Path $Root '.git')) {
     git clone --quiet --branch $Branch $RepoUrl $Root
     if ($LASTEXITCODE -ne 0) {
         Fail ('The clone failed. If the repository is private, re-run ' +
-              'SETUP.bat with -Token followed by a fine-grained ' +
+              $SetupName + ' with -Token followed by a fine-grained ' +
               'read-only token for it.')
     }
 }
@@ -679,13 +693,13 @@ if (Test-Path (Join-Path $Root 'config.json')) {
 Step 'Desktop shortcut'
 $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
 $link = (New-Object -ComObject WScript.Shell).CreateShortcut(
-    (Join-Path $desktop 'START TRADING.lnk'))
+    (Join-Path $desktop ($ShortcutName + '.lnk')))
 $link.TargetPath = Join-Path $Root 'START-TRADING.bat'
 $link.WorkingDirectory = $Root
 $link.Description = 'Start MT5-Trader and open the ladders'
 $link.IconLocation = (Join-Path $TerminalA 'terminal64.exe') + ',0'
 $link.Save()
-Say 'START TRADING is on the Desktop.'
+Say ($ShortcutName + ' is on the Desktop.')
 
 Write-Host ''
 if ($verified) {
@@ -722,7 +736,7 @@ Write-Host '  Do NOT run the terminals as Administrator. A terminal started'
 Write-Host '  elevated will not accept a connection from a normally-started'
 Write-Host '  Python, and the leg reads as unknown with no obvious reason.'
 Write-Host ''
-Write-Host '  Then: double-click START TRADING on the Desktop.'
+Write-Host ('  Then: double-click ' + $ShortcutName + ' on the Desktop.')
 Write-Host '  Any time later, deploy\VERIFY.bat re-checks this machine.'
 Write-Host ''
 if (-not $verified) { exit 1 }

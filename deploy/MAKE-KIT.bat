@@ -8,7 +8,7 @@ REM  There are only ever TWO jobs in this rollout, and this is the first:
 REM
 REM    THIS PC   ->  run MAKE-KIT.BAT once, copy the ROLLOUT-KIT folder
 REM                  onto a USB stick.
-REM    EVERY PC  ->  plug the stick in, double-click SETUP.bat.
+REM    EVERY PC  ->  plug the stick in, double-click Start-Setup.bat.
 REM
 REM  Before running this, prepare the terminal - three steps:
 REM
@@ -90,14 +90,40 @@ REM  is a stick with three of the four on it, and SETUP then refuses on
 REM  a machine somebody has already walked to.
 echo.
 echo   Gathering the kit...
+REM  ONE thing at the top level, and it is the thing to double-click.
+REM
+REM  The other three go into setup-files\ together. Not tidiness: a
+REM  folder showing Start-Setup.bat beside setup.ps1 is a folder where
+REM  somebody double-clicks the .ps1, Windows offers to open it in
+REM  Notepad, and the install never starts. setup.ps1 looks for
+REM  rollout.json and MT5-golden.zip BESIDE ITSELF, so all three move
+REM  together or none of them do.
 if not exist "%KIT%" mkdir "%KIT%"
-copy /y "%~dp0SETUP.bat"       "%KIT%\" >nul
-copy /y "%~dp0setup.ps1"       "%KIT%\" >nul
-copy /y "%~dp0rollout.json"    "%KIT%\" >nul
-copy /y "%~dp0MT5-golden.zip"  "%KIT%\" >nul
+if not exist "%KIT%\setup-files" mkdir "%KIT%\setup-files"
 
-for %%F in (SETUP.bat setup.ps1 rollout.json MT5-golden.zip) do (
-  if not exist "%KIT%\%%F" (
+REM  Renamed on the way in. "Start-Setup" is what it is; "SETUP.bat" is
+REM  what the repository calls the same shim.
+copy /y "%~dp0SETUP.bat"       "%KIT%\Start-Setup.bat"     >nul
+copy /y "%~dp0setup.ps1"       "%KIT%\setup-files\" >nul
+copy /y "%~dp0rollout.json"    "%KIT%\setup-files\" >nul
+copy /y "%~dp0MT5-golden.zip"  "%KIT%\setup-files\" >nul
+
+REM  A kit built on top of an older one would otherwise keep the old
+REM  flat copies, and a trader handed four files at the top level is a
+REM  trader who double-clicks the wrong one.
+if exist "%KIT%\SETUP.bat"      del /q "%KIT%\SETUP.bat"
+if exist "%KIT%\setup.ps1"      del /q "%KIT%\setup.ps1"
+if exist "%KIT%\rollout.json"   del /q "%KIT%\rollout.json"
+if exist "%KIT%\MT5-golden.zip" del /q "%KIT%\MT5-golden.zip"
+
+if not exist "%KIT%\Start-Setup.bat" (
+  echo   [X] Start-Setup.bat did not make it into the kit.
+  echo.
+  pause
+  exit /b 1
+)
+for %%F in (setup.ps1 rollout.json MT5-golden.zip) do (
+  if not exist "%KIT%\setup-files\%%F" (
     echo   [X] %%F did not make it into the kit.
     echo.
     pause
@@ -114,7 +140,8 @@ echo.
 echo     Copy that WHOLE FOLDER onto a USB stick.
 echo.
 echo     On each fresh PC: plug the stick in, open the folder,
-echo     double-click SETUP.bat. That is the whole install.
+echo     double-click Start-Setup.bat - the only thing in there.
+echo     That is the whole install.
 echo   =====================================================
 echo.
 echo   Check rollout.json first if the repository or branch has

@@ -547,7 +547,7 @@ def _run_gui(root, terminal_a, terminal_b):          # pragma: no cover
         messagebox.showinfo(
             'Saved',
             f'This machine is configured.\n\n{config_path}\n\n'
-            f'Double-click START TRADING on the Desktop to begin.')
+            f'Double-click NEXUS Terminal on the Desktop to begin.')
         win.destroy()
 
     ttk.Button(win, text='Save and finish', command=save).grid(

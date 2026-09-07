@@ -102,7 +102,7 @@ Pop-Location
 # --- A desktop shortcut, because the operator should never have to
 #     find a folder or type a command.
 $shortcut = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) `
-    'START TRADING.lnk'
+    'NEXUS Terminal.lnk'
 $shell = New-Object -ComObject WScript.Shell
 $link = $shell.CreateShortcut($shortcut)
 $link.TargetPath = Join-Path $root 'START-TRADING.bat'
@@ -119,5 +119,5 @@ Write-Host '  2. Press Algo Trading in each terminal so it turns green.'
 Write-Host '  3. Do NOT run the terminals as Administrator. A terminal'
 Write-Host '     started elevated will not accept a connection from a'
 Write-Host '     normally-started Python.'
-Write-Host '  4. Double-click START TRADING on the desktop, then fill in'
+Write-Host '  4. Double-click NEXUS Terminal on the desktop, then fill in'
 Write-Host '     the two accounts on the Exchanges page.'

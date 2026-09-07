@@ -238,7 +238,7 @@ def main(argv=None):
         print(f'  {len(added)} pair(s) added. If the engine is running it '
               f'restarts itself within a few seconds and the new ladders '
               f'appear; if it is not, they are there next time you press '
-              f'START TRADING.')
+              f'NEXUS Terminal.')
     return 0
 
 

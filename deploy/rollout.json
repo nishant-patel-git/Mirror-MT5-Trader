@@ -26,6 +26,19 @@
   "root": "C:\\MT5-Trader",
   "terminal_a": "C:\\MT5-A",
   "terminal_b": "C:\\MT5-B",
+  "_shortcut_name": [
+    "What the Desktop icon is called. 'NEXUS Terminal' by default.",
+    "",
+    "It is here, and it is also a -ShortcutName flag, because ONE PC",
+    "running TWO shifts is set up twice - once per desk, each with its",
+    "own -Root and its own two terminal folders - and a fixed icon name",
+    "would mean the second run quietly repointed the first desk's icon",
+    "at the second desk's install. Two desks, two names.",
+    "",
+    "The icon points at START-TRADING.bat inside -Root. That file's",
+    "name does not change; this is the label on the Desktop."
+  ],
+  "shortcut_name": "NEXUS Terminal",
   "_python": [
     "The interpreters this project has actually been run on, green.",
     "3.11 on Linux and Windows; 3.14 on a Windows office PC (625 passed).",
