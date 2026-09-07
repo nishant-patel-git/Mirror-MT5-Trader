@@ -50,7 +50,12 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Source,
 
-    [string] $Output = (Join-Path $PSScriptRoot 'MT5-golden.zip'),
+    # Blank, and worked out AFTER the param block. $PSScriptRoot is
+    # EMPTY while a param default is being evaluated under -File, so
+    # (Join-Path $PSScriptRoot '...') here threw before a single line of
+    # this script ran: "Cannot bind argument to parameter 'Path'
+    # because it is an empty string."
+    [string] $Output = '',
 
     # For the one case where you have looked at the refusal below and
     # you are sure. It is not a switch to reach for casually: what it
@@ -59,6 +64,19 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+if (-not $Output) {
+    # $PSScriptRoot is set by the time the body runs. The fallback is
+    # for the hosts where it is not - dot-sourcing, and some ISE and
+    # remoting cases - because a default that can be empty is what
+    # broke this script in the first place.
+    $here = $PSScriptRoot
+    if (-not $here) {
+        $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+    }
+    if (-not $here) { $here = (Get-Location).Path }
+    $Output = Join-Path $here 'MT5-golden.zip'
+}
 
 if (-not (Test-Path (Join-Path $Source 'terminal64.exe'))) {
     throw ($Source + ' has no terminal64.exe in it. Point -Source at the ' +
