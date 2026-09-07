@@ -286,12 +286,44 @@ function Test-Python {
         $ErrorActionPreference = $previous
     }
     if ($LASTEXITCODE -ne 0 -or -not $out) { return $null }
-    # 'MAJOR MINOR BITS' - three numbers, so the version is put back
-    # together here rather than formatted inside a probe that is not
-    # allowed a quote character.
-    $parts = @(([string] $out).Trim() -split '\s+')
-    if ($parts.Count -lt 3) { return $null }
-    return @{ Version = ($parts[0] + '.' + $parts[1]); Bits = [int] $parts[2];
+    <#
+        THE LAST LINE, and it must be three plain numbers.
+
+        Two things were wrong with reading this as 'whatever came back,
+        split on spaces'.
+
+        A wrapper gets to speak first. Plenty of things that answer to
+        'python' on an office PC are not python.exe - a shim, a
+        launcher, an antivirus or endpoint agent wrapping the
+        executable - and they print a line of their own before the
+        program runs. One PC answered with a line beginning
+        'Extracting:', and the version came out as that word.
+
+        And the cast was outside the try. [int] on a word is a
+        TERMINATING error, so instead of 'this is not a Python I can
+        use', the whole install died on the spot with a .NET conversion
+        message and nothing about Python in it.
+
+        So: take the last non-empty line, and accept it only if it is
+        exactly three integers. Anything else is not an interpreter
+        this script can trust - it is SAID, so the next person sees
+        what the machine actually answered, and looking continues
+        elsewhere.
+    #>
+    $text = (@($out) | ForEach-Object { [string] $_ }) -join "`n"
+    $lines = @($text -split "`r?`n" | Where-Object { $_.Trim() })
+    if (-not $lines) { return $null }
+    $last = $lines[-1].Trim()
+    $match = [regex]::Match($last, '^(\d+)\s+(\d+)\s+(\d+)$')
+    if (-not $match.Success) {
+        Warn ('Ignoring ' + ($Command -join ' ') + ': asked for its version ' +
+              'and it answered ' + $last + ' - that is not a Python this ' +
+              'script can use.')
+        return $null
+    }
+    return @{ Version = ($match.Groups[1].Value + '.' +
+                         $match.Groups[2].Value);
+              Bits = [int] $match.Groups[3].Value;
               Command = $Command }
 }
 

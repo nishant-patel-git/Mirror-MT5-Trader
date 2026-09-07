@@ -854,3 +854,48 @@ def test_control_different_symbols_on_the_second_desk_do_sit_beside(tmp_path):
                 symbol_a='XAGUSD.f', symbol_b='SIZ6'),
         raw, example={})
     assert set(second['pairs']) > before
+
+
+# --- What the version probe is allowed to believe -----------------------
+#
+#     An office PC answered the probe with a line beginning
+#     'Extracting:' - a wrapper around python.exe speaking before the
+#     program did - and the install died with
+#
+#         Cannot convert value "Extracting:" to type "System.Int32"
+#
+#     Two defects in one line: the answer was read as "whatever came
+#     back", and the [int] cast sat OUTSIDE the try that makes a bad
+#     interpreter a skip rather than a crash.
+
+
+def test_the_probe_answer_must_be_three_plain_numbers():
+    assert r"'^(\d+)\s+(\d+)\s+(\d+)$'" in SETUP_PS1, (
+        'the answer must be matched whole and anchored, or a wrapper '
+        'that prints its own line gets read as a version')
+    # And the cast that killed the install is gone from the raw output.
+    assert '[int] $parts[2]' not in SETUP_PS1
+    assert '$parts = @(([string] $out)' not in SETUP_PS1
+
+
+def test_control_a_bad_answer_is_said_and_skipped_not_fatal():
+    """The control: it must keep LOOKING, not stop. A machine whose
+    'python' is a wrapper still has a real interpreter to find, or one
+    to install."""
+    body = SETUP_PS1[SETUP_PS1.index('function Test-Python'):
+                     SETUP_PS1.index('function Test-StoreStub')]
+    assert 'Warn (' in body, 'a skipped interpreter is named out loud'
+    assert body.count('return $null') >= 3
+    assert 'Fail (' not in body, 'a wrapper must never end the install'
+
+
+def test_only_the_matched_digits_are_ever_cast():
+    """Every [int] in the script now runs on something already proven
+    to be digits. Block comments are stripped first - the explanation
+    of the bug names [int] too."""
+    import re as _re
+    code = _re.sub(r'<#.*?#>', '', SETUP_PS1, flags=_re.S)
+    casts = _re.findall(r'\[int\]\s*(\S+)', code)
+    assert casts, 'the cast disappeared entirely - has the probe changed?'
+    for cast in casts:
+        assert 'Groups[' in cast, cast
