@@ -1888,6 +1888,14 @@ class Coordinator:
                 'quoting_leg_effective': quoting_leg(pair),
                 'leg_a_width': (pair.meta_a or {}).get('width'),
                 'leg_b_width': (pair.meta_b or {}).get('width'),
+                # WHICH ACCOUNT each leg trades. Published so the
+                # Reconciler tab can offer the right tickets when a
+                # position has to be adopted back into this pair: a
+                # ticket belongs to one account, and a screen that let
+                # the operator pick leg A's ticket from leg B's account
+                # would be a screen that invites the refusal.
+                'leg_a_account': pair.account_a,
+                'leg_b_account': pair.account_b,
                 'working_buys': buys, 'working_sells': sells,
                 # What is actually RESTING at the broker for this pair,
                 # beside what our book thinks is working. They should

@@ -39,6 +39,11 @@
     centringAgain: {},   // pair key -> a centring is waiting on layout
     filtered: {},        // pair key -> hide rows with nothing on them
     monitorTab: 'positions',
+    // What the Reconciler tab's adopt form has selected. IN STATE, not
+    // in the DOM: that pane is re-rendered from innerHTML on every
+    // snapshot, so a half-filled form left in the markup would be
+    // cleared under the operator's hands twice a second.
+    adopt: {pair: '', a: '', b: ''},
     // Clicks that have been sent but are not in a snapshot yet. The
     // round trip is ~25ms plus the broker, but the ladder must show the
     // order the INSTANT it is clicked: a trader who cannot see their
@@ -2704,6 +2709,21 @@
           state.slippageAll = e.target.checked;
           loadSlippage(true);
         }
+        // Changing the PAIR clears the two tickets: they belong to that
+        // pair's accounts, and carrying them over would leave a choice
+        // on screen that the engine is about to refuse.
+        if (e.target.classList.contains('adopt-pair')) {
+          state.adopt = {pair: e.target.value, a: '', b: ''};
+          render();
+        }
+        if (e.target.classList.contains('adopt-a')) {
+          state.adopt.a = e.target.value;
+          render();
+        }
+        if (e.target.classList.contains('adopt-b')) {
+          state.adopt.b = e.target.value;
+          render();
+        }
       });
       el('desktop').appendChild(node);
     }
@@ -3279,6 +3299,69 @@
     return html;
   }
 
+
+  function adoptRowLabel(row) {
+    return row.account + ':' + row.ticket + '  ' + row.symbol + ' ' +
+      row.side + ' ' + fmt(row.volume, 2);
+  }
+
+  function adoptOptions(rows, account, chosen) {
+    // Only the tickets on THAT leg's account. A ticket belongs to one
+    // account, and offering leg B's on leg A is offering a refusal.
+    var html = '<option value="">-- ticket --</option>';
+    rows.forEach(function (row) {
+      if (account && row.account !== account) { return; }
+      html += '<option value="' + row.ticket + '"' +
+        (String(row.ticket) === String(chosen) ? ' selected' : '') + '>' +
+        adoptRowLabel(row) + '</option>';
+    });
+    return html;
+  }
+
+  function adoptForm(unclaimed) {
+    /*
+        Put a position BACK into a pair, so the ladder, the marks and
+        Flatten work on it again.
+
+        Two tickets, never one: a spread is a hedge, and half of one
+        adopted as a pair would be a naked leg the screen calls hedged.
+        The engine refuses anything that is not a hedge - leg B's side
+        decides the spread's side and leg A must be its opposite - so
+        this form's job is only to make the RIGHT choice easy, not to
+        judge it.
+    */
+    var pairs = state.snapshot.pairs || {};
+    var keys = Object.keys(pairs);
+    if (!keys.length) { return ''; }
+    var chosen = state.adopt.pair || '';
+    var pair = pairs[chosen];
+    var html = '<div class="note">Adopt two of these back into a pair - ' +
+      'the ladder, the marks and Flatten then work on it like any other ' +
+      'position. Both legs are needed: half a hedge is a naked leg.</div>';
+    html += '<div class="adopt-form"><label>Pair ' +
+      '<select class="adopt-pair"><option value="">-- pair --</option>';
+    keys.forEach(function (key) {
+      html += '<option value="' + key + '"' +
+        (key === chosen ? ' selected' : '') + '>' +
+        (pairs[key].name || key) + '</option>';
+    });
+    html += '</select></label>';
+    html += '<label>Leg A' + (pair && pair.leg_a_account
+                              ? ' (' + pair.leg_a_account + ')' : '') +
+      ' <select class="adopt-a"' + (pair ? '' : ' disabled') + '>' +
+      adoptOptions(unclaimed, pair && pair.leg_a_account, state.adopt.a) +
+      '</select></label>';
+    html += '<label>Leg B' + (pair && pair.leg_b_account
+                              ? ' (' + pair.leg_b_account + ')' : '') +
+      ' <select class="adopt-b"' + (pair ? '' : ' disabled') + '>' +
+      adoptOptions(unclaimed, pair && pair.leg_b_account, state.adopt.b) +
+      '</select></label>';
+    var ready = chosen && state.adopt.a && state.adopt.b;
+    html += '<button class="btn adopt-go"' + (ready ? '' : ' disabled') +
+      '>Adopt into pair</button></div>';
+    return html;
+  }
+
   function reconcileTable() {
     var reconciler = state.snapshot.reconciler || {};
     var html = '';
@@ -3302,6 +3385,7 @@
           '">Close it</button></td></tr>';
       });
       html += '</tbody></table>';
+      html += adoptForm(unclaimed);
     }
     html += '<table><thead><tr><th>When</th><th>Symbol</th><th>Ticket</th>' +
       '<th>Volume</th><th>Contract</th><th>P&amp;L</th><th>Note</th>' +
@@ -3343,6 +3427,21 @@
                    send('close_unclaimed',
                         {account: button.dataset.account,
                          ticket: button.dataset.ticket});
+                 });
+    }
+    if (button.classList.contains('adopt-go')) {
+      var want = state.adopt;
+      if (!want.pair || !want.a || !want.b) { return; }
+      return ask('Adopt ' + want.a + ' and ' + want.b + '?',
+                 'These two tickets are taken into ' + want.pair + ' as ONE ' +
+                 'position. Nothing is bought or sold. The engine refuses ' +
+                 'them if they are not a hedge of each other.', 'Adopt',
+                 function () {
+                   send('adopt_unclaimed',
+                        {pair: want.pair, ticket_a: want.a, ticket_b: want.b},
+                        function () {
+                          state.adopt = {pair: '', a: '', b: ''};
+                        });
                  });
     }
     if (button.classList.contains('close-position')) {
