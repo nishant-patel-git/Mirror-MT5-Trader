@@ -2,6 +2,8 @@
 when the engine is cleaning up after itself.
 """
 
+from pathlib import Path
+
 import pytest
 
 from mt5trader.coordinator import Coordinator
@@ -385,3 +387,96 @@ def test_a_genuine_orphan_is_still_closed(engine, legs):
         closed += coordinator.reconciler.run()['closed']
 
     assert closed, 'a real orphan was left at the broker'
+
+
+def test_an_adopted_position_appears_on_the_dashboard(config, pair, legs,
+                                                      tmp_path):
+    """The whole point of adopting, stated as the trader sees it.
+
+    Until it is adopted the position is only on the Reconciler tab -
+    real money the screen cannot mark, ladder or Flatten. Afterwards it
+    is in the pair's own row, which is what the Positions tab renders."""
+    from mt5trader.database import Store
+    from mt5trader.models import OrderSide
+    ticket_b = an_orphan(legs, 'GC1226', OrderSide.SELL, 0.1, 'acct_b')
+    ticket_a = an_orphan(legs, 'XAUUSD_', OrderSide.BUY, 0.1, 'acct_a')
+    coordinator = Coordinator(config, legs, sleep=lambda s: None,
+                              store=Store(str(tmp_path / 'test.db')))
+    coordinator.start()
+    coordinator.poll_once()
+
+    # Before: on the Reconciler tab, and nowhere else.
+    before = coordinator.snapshot()
+    assert before['pairs'][pair.key]['positions'] == []
+    assert len(before['reconciler']['unclaimed']) == 2
+
+    assert coordinator.adopt_unclaimed(pair.key, ticket_a, ticket_b)['ok']
+
+    after = coordinator.snapshot()
+    assert len(after['pairs'][pair.key]['positions']) == 1
+    assert after['reconciler']['unclaimed'] == []
+    # And it is a POSITION, not a note: the things the tab draws from.
+    row = after['pairs'][pair.key]['positions'][0]
+    assert row['position_id'] and row['side'] and row['leg_a'] and row['leg_b']
+
+
+def test_control_a_refused_adopt_leaves_the_dashboard_alone(config, pair,
+                                                            legs, tmp_path):
+    """The control. A refusal must not half-adopt: the position stays
+    on the Reconciler tab, where a person can still close it."""
+    from mt5trader.database import Store
+    from mt5trader.models import OrderSide
+    ticket_b = an_orphan(legs, 'GC1226', OrderSide.SELL, 0.1, 'acct_b')
+    ticket_a = an_orphan(legs, 'XAUUSD_', OrderSide.SELL, 0.1, 'acct_a')
+    coordinator = Coordinator(config, legs, sleep=lambda s: None,
+                              store=Store(str(tmp_path / 'test.db')))
+    coordinator.start()
+    coordinator.poll_once()
+
+    assert not coordinator.adopt_unclaimed(pair.key, ticket_a, ticket_b)['ok']
+
+    after = coordinator.snapshot()
+    assert after['pairs'][pair.key]['positions'] == []
+    assert len(after['reconciler']['unclaimed']) == 2
+
+
+def test_the_snapshot_says_which_account_each_leg_trades(config, pair, legs):
+    """The adopt form offers tickets per leg, and a ticket belongs to
+    one account. Without this the screen would offer leg B's tickets on
+    leg A - a choice the engine is bound to refuse."""
+    coordinator = Coordinator(config, legs, sleep=lambda s: None)
+    coordinator.start()
+    row = coordinator.snapshot()['pairs'][pair.key]
+    assert row['leg_a_account'] == pair.account_a
+    assert row['leg_b_account'] == pair.account_b
+
+
+# --- The screen the operator actually uses ------------------------------
+
+APP_JS = (Path(__file__).resolve().parent.parent /
+          'mt5trader' / 'static' / 'app.js').read_text(encoding='utf-8')
+
+
+def test_the_reconciler_tab_offers_both_things_it_tells_you_to_do():
+    """The pane's own words were 'adopt one into a pair, or close it by
+    hand', and for a long time only Close existed. A screen that names
+    an action it does not offer is worse than one that stays quiet."""
+    assert 'adopt one into a pair' in APP_JS
+    assert 'close-unclaimed' in APP_JS
+    assert 'adopt-go' in APP_JS
+    assert "send('adopt_unclaimed'" in APP_JS
+
+
+def test_control_the_adopt_button_needs_both_legs_before_it_will_send():
+    """The control: half a hedge adopted as a pair is a naked leg the
+    screen would then call hedged."""
+    assert '!want.pair || !want.a || !want.b' in APP_JS
+    assert "var ready = chosen && state.adopt.a && state.adopt.b;" in APP_JS
+
+
+def test_the_half_filled_form_survives_a_snapshot():
+    """That pane is rebuilt from innerHTML on every snapshot, twice a
+    second. A selection kept only in the DOM would be cleared under the
+    operator's hands."""
+    assert "adopt: {pair: '', a: '', b: ''}" in APP_JS
+    assert "state.adopt.a = e.target.value" in APP_JS

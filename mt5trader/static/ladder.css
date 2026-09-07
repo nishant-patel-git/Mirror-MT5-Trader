@@ -1136,6 +1136,27 @@ table.unclaimed th, table.unclaimed td {
   color: var(--text);
 }
 
+/* Putting an unclaimed position back into a pair. One row, because the
+   three choices are one decision - pair, leg A ticket, leg B ticket -
+   and a stacked form reads like three separate things to do. */
+.adopt-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.adopt-form label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font: 11px var(--mono);
+  color: var(--text);
+}
+.adopt-form select { font: 11px var(--mono); }
+.adopt-form select:disabled,
+.adopt-form .btn:disabled { opacity: 0.5; }
+
 /* -- taskbar -------------------------------------------------------- */
 
 #taskbar {
