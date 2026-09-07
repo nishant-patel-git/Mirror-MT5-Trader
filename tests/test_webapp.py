@@ -6,6 +6,7 @@ carries its own words.
 """
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -724,40 +725,48 @@ def test_the_page_stamps_its_css_and_js_so_a_stale_cache_cannot_mix(client):
     assert 'no-store' in client.get('/').headers.get('Cache-Control', '')
 
 
-def test_the_snapshot_is_only_re_read_when_it_has_actually_changed(client,
-                                                                   paths):
+def test_the_snapshot_is_only_re_read_when_it_has_actually_changed(
+        client, paths, monkeypatch):
     """Every open of the status file on Windows is a moment the
     coordinator's own os.replace cannot land — and that collision
     failed its whole poll. Asking "has it changed?" costs nothing;
-    opening it does."""
+    opening it does.
+
+    Counted at `atomicfile.read_text`, which is where a read of this
+    file actually happens on BOTH platforms. Counting `builtins.open`
+    only worked on POSIX: on Windows `read_text` goes through
+    CreateFileW and msvcrt.open_osfhandle to get FILE_SHARE_DELETE, so
+    `open` is never called, the count stayed at nought, and the test
+    failed on the one operating system it is about.
+    """
     import time as clock
+    from mt5trader import atomicfile
     write_status(paths)
     first = client.get('/api/status').get_json()
 
-    opened = {'n': 0}
-    real_open = open
+    reads = {'n': 0}
+    real_read_text = atomicfile.read_text
+    wanted = os.path.normcase(os.path.abspath(paths['status']))
 
-    def counting_open(path, *args, **kwargs):
-        mode = kwargs.get('mode', args[0] if args else 'r')
-        if str(path) == paths['status'] and 'r' in mode:
-            opened['n'] += 1          # READS only; the test writes too
-        return real_open(path, *args, **kwargs)
+    def counting_read_text(path, *args, **kwargs):
+        if os.path.normcase(os.path.abspath(str(path))) == wanted:
+            reads['n'] += 1
+        return real_read_text(path, *args, **kwargs)
 
-    import builtins
-    builtins.open = counting_open
-    try:
-        for _ in range(5):
-            client.get('/api/status')
-        assert opened['n'] == 0, 'an unchanged snapshot was re-read'
+    monkeypatch.setattr(atomicfile, 'read_text', counting_read_text)
 
-        # ...and a NEW snapshot is picked up at once, not on a timer.
-        clock.sleep(0.01)
-        write_status(paths, loop_interval_sec=0.9)
-        body = client.get('/api/status').get_json()
-        assert body['loop_interval_sec'] == 0.9
-        assert opened['n'] == 1
-    finally:
-        builtins.open = real_open
+    for _ in range(5):
+        client.get('/api/status')
+    assert reads['n'] == 0, 'an unchanged snapshot was re-read'
+
+    # ...and a NEW snapshot is picked up at once, not on a timer.
+    # The sleep is for Windows: its file timestamps move in ~15ms steps,
+    # so two writes inside one tick can share an mtime.
+    clock.sleep(0.05)
+    write_status(paths, loop_interval_sec=0.9)
+    body = client.get('/api/status').get_json()
+    assert body['loop_interval_sec'] == 0.9
+    assert reads['n'] == 1
     assert first['pairs']
 
 

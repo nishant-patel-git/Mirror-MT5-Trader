@@ -4,6 +4,14 @@ config.json.bak
 config.json.tmp
 status.json
 status.json.tmp
+
+# The command queue and its replies - runtime, one per machine, and
+# recreated on every start (start.py --commands / --results). status.json
+# was already here; these two were missed, so a trader's `git status`
+# listed them as untracked every single day and invited someone to
+# commit one machine's in-flight orders.
+commands.jsonl
+results.json
 *.log
 __pycache__/
 *.pyc
@@ -17,3 +25,18 @@ MT5_TRADER_LADDER_PROMPT.md
 *.db
 *.db-wal
 *.db-shm
+
+# The MetaTrader 5 template, built by deploy/make-golden-terminal.ps1.
+# Hundreds of megabytes, and a mis-stripped one carries an accounts
+# file - so it travels on a USB stick or a share, never in the repo.
+MT5-golden.zip
+deploy/MT5-golden.zip
+
+# Answers for an unattended configure.py run: this file HOLDS THE TWO
+# MT5 PASSWORDS in clear text. Delete it once the machine is set up.
+answers.json
+
+# The assembled USB folder, built by deploy/MAKE-KIT.bat. It contains
+# MT5-golden.zip and is rebuilt in one click, so it never belongs in
+# the repo.
+deploy/ROLLOUT-KIT/
