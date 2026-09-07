@@ -415,6 +415,26 @@ if ($null -eq $found) {
     Refresh-Path
     $found = Find-Python
     if ($null -eq $found) {
+        # Say WHAT WAS LOOKED AT before refusing. Two rounds of this
+        # failure were diagnosed by guessing, and both guesses were
+        # wrong; a refusal that lists the evidence ends that.
+        Write-Host ''
+        Write-Host '  Where this looked, and what it found:' -ForegroundColor Yellow
+        Write-Host ('    installer exit code : ' + $run.ExitCode)
+        foreach ($probe in @((Join-Path $env:WINDIR 'py.exe'),
+                             'C:\Program Files\Python311\python.exe',
+                             'C:\Program Files\Python314\python.exe',
+                             (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python311\python.exe'),
+                             'C:\Python311\python.exe')) {
+            $mark = if (Test-Path $probe) { 'PRESENT' } else { 'missing' }
+            Write-Host ('    ' + $mark.PadRight(8) + ' ' + $probe)
+        }
+        foreach ($name in @('py', 'python')) {
+            $cmd = Get-Command $name -ErrorAction SilentlyContinue
+            $where = if ($cmd) { [string] $cmd.Source } else { '(not on PATH)' }
+            Write-Host ('    ' + $name.PadRight(8) + ' ' + $where)
+        }
+        Write-Host ''
         Fail ('Python installed but this window still cannot find it. ' +
               'Close this window, open a new one, and run SETUP.bat ' +
               'again - a PATH set by an installer does not reach a ' +
