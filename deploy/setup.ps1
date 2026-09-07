@@ -66,6 +66,53 @@ $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 
 <#
+    THE HOST THIS IS ABOUT TO RUN ON, made safe before anything else.
+
+    Four settings, and every one of them is a bare-PC failure somebody
+    else has already had.
+
+    TLS. Windows PowerShell 5.1 on Windows 10 negotiates whatever
+    .NET's default is, and on a machine that has not had its .NET
+    defaults changed that can still be TLS 1.0/1.1. python.org and
+    github.com both refuse those now, so the download dies with
+    'Could not create SSL/TLS secure channel' - a message that says
+    nothing about Python and sends the installer hunting for a
+    firewall. Named protocols are OR-ed in rather than assigned, so a
+    host that already has TLS 1.3 keeps it.
+
+    THE PROGRESS BAR. Invoke-WebRequest renders one by default, and in
+    5.1 that rewrite costs more time than the download: a 25 MB
+    installer can take minutes instead of seconds. Off.
+
+    NATIVE COMMANDS IN POWERSHELL 7.4+. There, a native program's
+    non-zero exit code becomes a TERMINATING error whenever
+    $ErrorActionPreference is 'Stop'. This script deliberately reads
+    exit codes and decides - a failed login is a warning, a
+    non-fast-forward is a warning, a cancelled wizard is a warning -
+    and under 7.4 the first of them would kill the install instead.
+    SETUP.bat starts Windows PowerShell, where this does not arise, so
+    this line is for the day somebody runs the script by hand.
+
+    THE PROXY. An office PC behind an authenticating proxy needs the
+    signed-in user's credentials to fetch anything at all.
+#>
+try {
+    [Net.ServicePointManager]::SecurityProtocol =
+        [Net.ServicePointManager]::SecurityProtocol -bor
+        [Net.SecurityProtocolType]::Tls12
+} catch { }
+$ProgressPreference = 'SilentlyContinue'
+if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
+try {
+    if ([Net.WebRequest]::DefaultWebProxy) {
+        [Net.WebRequest]::DefaultWebProxy.Credentials =
+            [Net.CredentialCache]::DefaultCredentials
+    }
+} catch { }
+
+<#
     Anything that throws lands here: the REASON in red, and exit 1 so
     SETUP.bat knows it failed.
 
@@ -179,6 +226,49 @@ if ($TerminalA.TrimEnd('\') -ieq $TerminalB.TrimEnd('\')) {
 Say ('Terminal template: ' + $GoldenZip)
 Say ('Code folder:       ' + $Root)
 
+<#
+    64-BIT WINDOWS, refused here rather than three downloads later.
+
+    Everything this script fetches is 64-bit by necessity: the terminal
+    is terminal64.exe, and MetaTrader5's IPC handshake fails against a
+    32-bit Python with an error that says nothing. On 32-bit Windows
+    the Git installer refuses, the Python installer refuses, and the
+    operator is left reading two unrelated complaints instead of the
+    one fact that matters.
+#>
+if (-not [Environment]::Is64BitOperatingSystem) {
+    Fail ('This is 32-bit Windows. The terminal is terminal64.exe and ' +
+          'MetaTrader 5 will not talk to a 32-bit Python, so this PC ' +
+          'cannot run a leg. Nothing has been downloaded or changed.')
+}
+
+<#
+    ROOM ON THE DISK, for the same reason.
+
+    Two MetaTrader 5 folders, Git, Python and the dependencies come to
+    a little over 1.5 GB. Running out halfway leaves a half-unpacked
+    terminal and an error from Expand-Archive about a file, which reads
+    like a corrupt zip and is not.
+
+    Measured on the drive the CODE goes to; the terminals normally sit
+    on the same one. A drive that cannot be measured is NOT treated as
+    full - unmeasured is not zero - it is simply not checked.
+#>
+$needGb = 3
+$driveLetter = (Split-Path -Qualifier $Root).TrimEnd(':')
+$drive = Get-PSDrive -Name $driveLetter -ErrorAction SilentlyContinue
+if ($drive -and $null -ne $drive.Free) {
+    $freeGb = [Math]::Round($drive.Free / 1GB, 1)
+    if ($drive.Free -lt ($needGb * 1GB)) {
+        Fail ('Only ' + $freeGb + ' GB free on ' + $driveLetter + ': and ' +
+              'this install needs about ' + $needGb + ' GB - two ' +
+              'MetaTrader 5 folders, Git, Python and the dependencies. ' +
+              'Free some space and run ' + $SetupName + ' again. Nothing ' +
+              'has been downloaded or changed.')
+    }
+    Say ('Free on ' + $driveLetter + ':      ' + $freeGb + ' GB')
+}
+
 # --- 1. Git --------------------------------------------------------------
 
 Step 'Git'
@@ -188,23 +278,65 @@ function Refresh-Path {
                 ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
 }
 
-if (Get-Command git -ErrorAction SilentlyContinue) {
-    Say ('Already installed: ' + (git --version))
+function Find-Git {
+    <#
+        git, as a command if PATH has it and as a FILE if it does not.
+
+        The second half is not belt-and-braces, it is the lesson Python
+        taught this script over three separate rounds: $env:Path in a
+        console that was ALREADY OPEN does not learn about an install,
+        and rebuilding it from the registry does not always reach
+        PowerShell's command lookup either. A path on disk has neither
+        problem, and Git for Windows only ever installs to one of these.
+    #>
+    if (Get-Command git -ErrorAction SilentlyContinue) { return 'git' }
+    foreach ($candidate in @(
+            (Join-Path $env:ProgramFiles 'Git\cmd\git.exe'),
+            (Join-Path ${env:ProgramFiles(x86)} 'Git\cmd\git.exe'),
+            (Join-Path $env:LOCALAPPDATA 'Programs\Git\cmd\git.exe'))) {
+        if ($candidate -and (Test-Path $candidate)) { return $candidate }
+    }
+    return $null
+}
+
+$git = Find-Git
+if ($git) {
+    Say ('Already installed: ' + (& $git --version))
 } else {
     Say 'Installing Git for Windows...'
     $gitExe = Join-Path $env:TEMP 'git-setup.exe'
     Invoke-WebRequest -UseBasicParsing -OutFile $gitExe -Uri (
         'https://github.com/git-for-windows/git/releases/download/' +
         'v2.45.2.windows.1/Git-2.45.2-64-bit.exe')
-    Start-Process -Wait -FilePath $gitExe -ArgumentList (
+    # -PassThru, so the installer's OWN exit code is read rather than
+    # discarded. Without it a refused install looked exactly like a
+    # successful one that could not be found, and the message sent the
+    # operator hunting through PATH for a Git that was never there.
+    #   0    installed        3010 installed, wants a reboot
+    #   1602 cancelled        1603 fatal        1618 another install running
+    $run = Start-Process -Wait -PassThru -FilePath $gitExe -ArgumentList (
         '/VERYSILENT /NORESTART /NOCANCEL /SP- /SUPPRESSMSGBOXES ' +
         '/COMPONENTS="icons,ext\shellhere,assoc,assoc_sh"')
+    if ($run.ExitCode -eq 1618) {
+        Fail ('Another Windows installer is running, so Git could not be ' +
+              'installed (exit 1618). Wait for it to finish - Windows ' +
+              'Update is the usual one - and run ' + $SetupName + ' again.')
+    }
+    if ($run.ExitCode -ne 0 -and $run.ExitCode -ne 3010) {
+        Fail ('The Git installer failed with exit code ' + $run.ExitCode +
+              '. Nothing else has been changed. Install Git for Windows ' +
+              'by hand from https://git-scm.com/download/win - the ' +
+              'defaults are right - and run ' + $SetupName + ' again.')
+    }
     Refresh-Path
-    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        Fail ('Git installed but is still not on PATH. Close this window, ' +
+    $git = Find-Git
+    if (-not $git) {
+        Fail ('Git installed - the installer returned ' + $run.ExitCode +
+              ' - but this window still cannot find it, and it is not in ' +
+              'any folder Git for Windows installs to. Close this window, ' +
               'open a new one, and run ' + $SetupName + ' again.')
     }
-    Say ('Installed: ' + (git --version))
+    Say ('Installed: ' + (& $git --version))
 }
 
 # --- 2. Python -----------------------------------------------------------
@@ -572,18 +704,18 @@ if ($Token) {
     $uri = [Uri] $RepoUrl
     $blob = ("protocol=" + $uri.Scheme + "`nhost=" + $uri.Host +
              "`nusername=" + $TokenUser + "`npassword=" + $Token + "`n`n")
-    git config --global credential.helper manager | Out-Null
-    $blob | git credential approve
+    & $git config --global credential.helper manager | Out-Null
+    $blob | & $git credential approve
     Say 'Repository token stored in Windows Credential Manager.'
 }
 
 if (Test-Path (Join-Path $Root '.git')) {
     Say 'Already cloned - fetching the latest instead.'
     Push-Location $Root
-    git fetch --quiet origin $Branch
+    & $git fetch --quiet origin $Branch
     # --ff-only: if this machine somehow has local commits, say so
     # rather than starting a merge nobody is here to finish.
-    git merge --ff-only ('origin/' + $Branch)
+    & $git merge --ff-only ('origin/' + $Branch)
     if ($LASTEXITCODE -ne 0) {
         Warn ('This clone has local changes that cannot fast-forward. ' +
               'Carrying on with the code already here.')
@@ -599,7 +731,7 @@ if (Test-Path (Join-Path $Root '.git')) {
         }
     }
     Say ('Cloning into ' + $Root + ' ...')
-    git clone --quiet --branch $Branch $RepoUrl $Root
+    & $git clone --quiet --branch $Branch $RepoUrl $Root
     if ($LASTEXITCODE -ne 0) {
         Fail ('The clone failed. If the repository is private, re-run ' +
               $SetupName + ' with -Token followed by a fine-grained ' +
@@ -723,15 +855,48 @@ if (Test-Path (Join-Path $Root 'config.json')) {
 # --- 8. The shortcut -----------------------------------------------------
 
 Step 'Desktop shortcut'
-$desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
-$link = (New-Object -ComObject WScript.Shell).CreateShortcut(
-    (Join-Path $desktop ($ShortcutName + '.lnk')))
-$link.TargetPath = Join-Path $Root 'START-TRADING.bat'
-$link.WorkingDirectory = $Root
-$link.Description = 'Start MT5-Trader and open the ladders'
-$link.IconLocation = (Join-Path $TerminalA 'terminal64.exe') + ',0'
-$link.Save()
-Say ($ShortcutName + ' is on the Desktop.')
+<#
+    A WARNING IF IT FAILS, NEVER A FAILURE.
+
+    By this point the code is cloned, both terminals are unpacked, the
+    suite has passed and both accounts have logged in. Killing that
+    over an icon would be absurd - and there are two ordinary Windows
+    reasons it can happen:
+
+      * Controlled folder access (Windows Security > Ransomware
+        protection) blocks writes to Desktop folders by programs it
+        does not recognise.
+      * A name with a character Windows forbids in a filename, from a
+        -ShortcutName somebody typed.
+
+    The name is cleaned first, and anything still wrong is said with
+    what to double-click instead.
+#>
+$safeName = ($ShortcutName -replace '[\\/:*?"<>|]', '-').Trim()
+if (-not $safeName) { $safeName = 'NEXUS Terminal' }
+if ($safeName -ne $ShortcutName) {
+    Warn ('The icon name had characters Windows does not allow in a file ' +
+          'name; using "' + $safeName + '".')
+    $ShortcutName = $safeName
+}
+$target = Join-Path $Root 'START-TRADING.bat'
+try {
+    $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+    $link = (New-Object -ComObject WScript.Shell).CreateShortcut(
+        (Join-Path $desktop ($ShortcutName + '.lnk')))
+    $link.TargetPath = $target
+    $link.WorkingDirectory = $Root
+    $link.Description = 'Start MT5-Trader and open the ladders'
+    $link.IconLocation = (Join-Path $TerminalA 'terminal64.exe') + ',0'
+    $link.Save()
+    Say ($ShortcutName + ' is on the Desktop.')
+} catch {
+    Warn ('The Desktop icon could not be created (' + $_.Exception.Message +
+          '). Everything else IS installed. Start the app by ' +
+          'double-clicking ' + $target + ', and make a shortcut to it by ' +
+          'hand. If this keeps happening, check Windows Security > ' +
+          'Ransomware protection > Controlled folder access.')
+}
 
 Write-Host ''
 if ($verified) {
