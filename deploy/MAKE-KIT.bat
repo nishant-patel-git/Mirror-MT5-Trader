@@ -75,7 +75,7 @@ for %%F in (SETUP.bat setup.ps1 rollout.json) do (
 REM --- 1. The terminal template ----------------------------------------
 echo   Building the terminal template - this takes a minute...
 echo.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0make-golden-terminal.ps1" -Source "%SOURCE%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0make-golden-terminal.ps1" -Source "%SOURCE%" -Output "%~dp0MT5-golden.zip"
 if errorlevel 1 (
   echo.
   echo   [X] The template was not built - the reason is above.

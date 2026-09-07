@@ -65,7 +65,7 @@ if not errorlevel 1 (
   exit /b 1
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0make-golden-terminal.ps1" -Source "%SOURCE%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0make-golden-terminal.ps1" -Source "%SOURCE%" -Output "%~dp0MT5-golden.zip"
 set "RC=%ERRORLEVEL%"
 
 echo.
