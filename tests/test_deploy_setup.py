@@ -894,8 +894,110 @@ def test_only_the_matched_digits_are_ever_cast():
     to be digits. Block comments are stripped first - the explanation
     of the bug names [int] too."""
     import re as _re
-    code = _re.sub(r'<#.*?#>', '', SETUP_PS1, flags=_re.S)
-    casts = _re.findall(r'\[int\]\s*(\S+)', code)
+    casts = _re.findall(r'\[int\]\s*(\S+)', _ps_code())
     assert casts, 'the cast disappeared entirely - has the probe changed?'
     for cast in casts:
         assert 'Groups[' in cast, cast
+
+
+# --- The bare Windows 10/11 PC ------------------------------------------
+#
+#     Everything below is a failure somebody has already had on a fresh
+#     office machine, checked here because none of it can be exercised
+#     from Linux. Each guard is paired with the control that proves it
+#     is a guard and not a blanket refusal.
+
+
+def _ps_code(text=None):
+    """setup.ps1 with its comments removed.
+
+    Every ordering check below has to compare against the line that
+    RUNS. The block comments name Invoke-WebRequest while explaining
+    why the progress bar is turned off, and an index found there is
+    earlier than every guard in the file."""
+    import re as _re
+    code = _re.sub(r'<#.*?#>', '', text if text is not None else SETUP_PS1,
+                   flags=_re.S)
+    return '\n'.join(l for l in code.split('\n')
+                     if not l.strip().startswith('#'))
+
+
+def test_tls_12_is_forced_before_anything_is_downloaded():
+    """Windows PowerShell 5.1 on Windows 10 can still default to TLS
+    1.0/1.1. python.org and github.com refuse those, and the failure
+    reads as a firewall problem rather than a protocol one."""
+    assert 'SecurityProtocolType]::Tls12' in SETUP_PS1
+    code = _ps_code()
+    assert code.index('Tls12') < code.index('Invoke-WebRequest')
+
+
+def test_control_tls_is_added_to_what_the_host_already_has():
+    """The control: -bor, not assignment. A host that negotiates TLS
+    1.3 must keep it."""
+    assert '-bor' in SETUP_PS1
+    assert 'SecurityProtocol =\n        [Net.ServicePointManager]' \
+        '::SecurityProtocol -bor' in SETUP_PS1
+
+
+def test_native_exit_codes_stay_readable_on_powershell_7_4():
+    """There a non-zero exit becomes TERMINATING under
+    ErrorActionPreference Stop. This script reads exit codes and
+    DECIDES - a failed login is a warning, not the end of the install."""
+    assert '$PSNativeCommandUseErrorActionPreference = $false' in SETUP_PS1
+    assert 'Test-Path variable:PSNativeCommandUseErrorActionPreference' \
+        in SETUP_PS1
+
+
+def test_git_is_found_on_disk_when_path_has_not_caught_up():
+    """The lesson Python taught this script three times: PATH in a
+    console that was already open does not learn about an install."""
+    assert 'function Find-Git' in SETUP_PS1
+    assert "'Git\\cmd\\git.exe'" in SETUP_PS1
+    # And every later git call goes through what Find-Git returned, or
+    # the fallback buys nothing.
+    for line in _ps_code().split('\n'):
+        stripped = line.strip()
+        if stripped.startswith('git ') or ' | git ' in stripped:
+            raise AssertionError('bare git call: ' + stripped)
+
+
+def test_control_the_git_installers_own_exit_code_is_read():
+    """The control: a refused install must not be reported as a PATH
+    problem - that is what sent the operator hunting last time."""
+    assert SETUP_PS1.count('-Wait -PassThru') >= 2      # Git and Python
+    assert 'The Git installer failed with exit code' in SETUP_PS1
+    assert 'so Git could not be' in SETUP_PS1           # 1618
+
+
+def test_a_32_bit_pc_is_refused_before_any_download():
+    assert '[Environment]::Is64BitOperatingSystem' in SETUP_PS1
+    code = _ps_code()
+    assert code.index('Is64BitOperatingSystem') < code.index('Invoke-WebRequest')
+
+
+def test_a_full_disk_is_refused_before_any_download():
+    assert '$needGb = 3' in SETUP_PS1
+    code = _ps_code()
+    assert code.index('$needGb') < code.index('Invoke-WebRequest')
+
+
+def test_control_an_unmeasurable_drive_is_not_treated_as_full():
+    """Unmeasured is not zero - the same rule the engine follows for a
+    leg it could not read."""
+    assert 'if ($drive -and $null -ne $drive.Free) {' in SETUP_PS1
+
+
+def test_the_desktop_icon_can_never_fail_the_install():
+    """By then the code is cloned, both terminals are unpacked, the
+    suite has passed and both accounts have logged in. Controlled
+    folder access must not undo that."""
+    tail = SETUP_PS1[SETUP_PS1.index("Step 'Desktop shortcut'"):]
+    assert 'try {' in tail and '} catch {' in tail
+    assert 'Controlled folder access' in tail
+    assert 'Fail (' not in tail
+
+
+def test_control_a_bad_icon_name_is_cleaned_rather_than_refused():
+    assert r"""$safeName = ($ShortcutName -replace '[\\/:*?"<>|]', '-')""" \
+        in SETUP_PS1
+    assert "if (-not $safeName) { $safeName = 'NEXUS Terminal' }" in SETUP_PS1
