@@ -272,16 +272,63 @@ function Find-Python {
         also has 3.9 on PATH is the good outcome, and looking at PATH
         first would miss it.
     #>
-    foreach ($version in $PyVersions) {
-        if (Get-Command py -ErrorAction SilentlyContinue) {
-            $found = Test-Python @('py', ('-' + $version))
+    # 1. The launcher, by name and then by its known home. py.exe goes
+    #    to C:\Windows, which is always on PATH - but only for a
+    #    console started AFTER the install, which this one was not.
+    $launchers = @()
+    if (Get-Command py -ErrorAction SilentlyContinue) { $launchers += 'py' }
+    $inWindows = Join-Path $env:WINDIR 'py.exe'
+    if (Test-Path $inWindows) { $launchers += $inWindows }
+    foreach ($launcher in $launchers) {
+        foreach ($version in $PyVersions) {
+            $found = Test-Python @($launcher, ('-' + $version))
             if ($found) { return $found }
         }
     }
+
+    # 2. Where the installer actually puts it, looked up as a FILE.
+    #    This is the step that matters: $env:Path in a console that was
+    #    already open does not learn about an install, and refreshing it
+    #    from the registry does not always reach PowerShell's command
+    #    lookup either. A path on disk has neither problem.
+    $found = Find-PythonInFolders
+    if ($found) { return $found }
+
+    # 3. Whatever 'python' means here - a conda prompt, a venv - as long
+    #    as it is not the Microsoft Store stub.
     if ((Get-Command python -ErrorAction SilentlyContinue) -and
         -not (Test-StoreStub 'python')) {
         $found = Test-Python @('python')
         if ($found) { return $found }
+    }
+    return $null
+}
+
+function Find-PythonInFolders {
+    <#
+        The places python.org's installer puts an interpreter, checked
+        as files rather than through PATH.
+
+        3.11 lands in Python311, so the dots come out of the version to
+        make the folder name.
+    #>
+    $candidates = @()
+    foreach ($version in $PyVersions) {
+        $tag = 'Python' + ($version -replace '\.', '')
+        foreach ($base in @($env:ProgramFiles,
+                            ${env:ProgramFiles(x86)},
+                            (Join-Path $env:LOCALAPPDATA 'Programs\Python'),
+                            'C:\')) {
+            if ($base) {
+                $candidates += (Join-Path $base (Join-Path $tag 'python.exe'))
+            }
+        }
+    }
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            $found = Test-Python @($candidate)
+            if ($found) { return $found }
+        }
     }
     return $null
 }
@@ -340,8 +387,31 @@ if ($null -eq $found) {
     $pyExe = Join-Path $env:TEMP 'python-3.11.exe'
     Invoke-WebRequest -UseBasicParsing -OutFile $pyExe -Uri (
         'https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe')
-    Start-Process -Wait -FilePath $pyExe -ArgumentList (
-        '/quiet InstallAllUsers=1 PrependPath=1 Include_test=0 Include_tcltk=1')
+    # -PassThru, so the installer's own exit code is READ rather than
+    # discarded. Without it a failed install looked exactly like a
+    # successful one that could not be found, and the message sent the
+    # operator hunting through PATH for a Python that was never there.
+    #   0    installed
+    #   3010 installed, wants a reboot
+    #   1602 cancelled   1603 fatal   1618 another install is running
+    $run = Start-Process -Wait -PassThru -FilePath $pyExe -ArgumentList (
+        '/quiet InstallAllUsers=1 PrependPath=1 Include_test=0 ' +
+        'Include_tcltk=1 Include_launcher=1 InstallLauncherAllUsers=1')
+    if ($run.ExitCode -eq 1618) {
+        Fail ('Another Windows installer is running, so Python could not ' +
+              'be installed (exit 1618). Wait for it to finish - Windows ' +
+              'Update is the usual one - and run SETUP.bat again.')
+    }
+    if ($run.ExitCode -ne 0 -and $run.ExitCode -ne 3010) {
+        Fail ('The Python installer failed with exit code ' +
+              $run.ExitCode + '. Nothing else has been changed. Install ' +
+              'Python ' + $PyVersions[0] + ' 64-bit from python.org by ' +
+              'hand - tick "Add python.exe to PATH" and "py launcher" - ' +
+              'and run SETUP.bat again.')
+    }
+    if ($run.ExitCode -eq 3010) {
+        Warn 'Python installed and asked for a reboot; carrying on.'
+    }
     Refresh-Path
     $found = Find-Python
     if ($null -eq $found) {
