@@ -989,12 +989,17 @@
      * the B/S keys name their side outright and never come through
      * here.
      */
-    // Absent means TOUCH, matching the engine's own default. The
-    // fallback has to be the conservative one: a snapshot from before
-    // this setting existed, or one that arrives without it, must send
-    // exactly the side it always did rather than silently inverting
-    // every click on the screen.
-    var tt = state.snapshot.click_convention === 'TT';
+    // Absent means TT, matching the engine's own default, the
+    // snapshot's fallback and the Settings pane. This line said TOUCH
+    // while all three of those said TT, so a snapshot arriving without
+    // the key produced a ladder that CROSSED THE OPPOSITE WAY to the
+    // convention its own Settings pane was displaying.
+    //
+    // The fallback's job is not to be timid, it is to AGREE. A default
+    // that differs from the one the rest of the system uses is not
+    // conservative - it is a second convention nobody chose, reachable
+    // whenever a snapshot is missing the field.
+    var tt = state.snapshot.click_convention !== 'TOUCH';
     if (column === 'ask') { return tt ? 'SELL' : 'BUY'; }
     return tt ? 'BUY' : 'SELL';
   }
@@ -2208,11 +2213,14 @@
         direction.
     */
     html += '<tr class="spread-hint"><th></th><td class="sym"></td>' +
-      '<td class="c-bid hint-down" title="Selling the spread here. A ' +
+      '<td class="c-bid hint-down" title="The BID is where a sale ' +
+      'executes, whichever column your desk clicks to get there. A ' +
       'short is in profit as the spread falls: High to Low.">' +
       'H &rarr; L</td>' +
-      '<td class="c-ask hint-up" title="Buying the spread here. A long ' +
-      'is in profit as the spread rises: Low to High.">L &rarr; H</td>' +
+      '<td class="c-ask hint-up" title="The ASK is where a purchase ' +
+      'executes, whichever column your desk clicks to get there. A ' +
+      'long is in profit as the spread rises: Low to High.">' +
+      'L &rarr; H</td>' +
       '<td class="c-width"></td><td class="c-age"></td></tr>';
     html += '<tr class="spread"><th></th><td class="sym">spread</td>' +
       cell(market.short_spread, 'c-bid') +
@@ -2612,11 +2620,19 @@
         key + '">';
       html += '<td class="contract" title="Open this ladder">' +
         (row.name || key) + '</td>';
-      // Bid = the SHORT spread (where you can sell it); Ask = the LONG.
-      html += '<td class="bid" title="Click: SELL the spread here">' +
-        fmt(row.short_spread, digitsFor(row.increment)) + '</td>';
-      html += '<td class="ask" title="Click: BUY the spread here">' +
-        fmt(row.long_spread, digitsFor(row.increment)) + '</td>';
+      // Bid = the SHORT spread (where it can be sold); Ask = the LONG.
+      //
+      // The TOOLTIPS come from the same mapping the click uses, and
+      // they did not before: they were written out by hand as 'Click:
+      // SELL' on the bid and 'Click: BUY' on the ask, which is the
+      // hit-and-lift reading. On a TT desk both were exactly backwards
+      // - the cell said SELL and the click bought. The click itself
+      // was right the whole time, which is what made it dangerous: the
+      // only thing disagreeing was the words the trader reads.
+      html += '<td class="bid" title="' + clickHint('bid', row.short_spread) +
+        '">' + fmt(row.short_spread, digitsFor(row.increment)) + '</td>';
+      html += '<td class="ask" title="' + clickHint('ask', row.long_spread) +
+        '">' + fmt(row.long_spread, digitsFor(row.increment)) + '</td>';
       html += '<td>' + fmt((row.last_print || {}).level,
                            digitsFor(row.increment)) + '</td>';
       html += '<td>' + fmt(market.net_change, 4) + '</td>';
