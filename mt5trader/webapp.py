@@ -54,6 +54,104 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
     app.jinja_env.auto_reload = True
     commands = CommandLog(command_path)
 
+    # --- the screen lock ---------------------------------------------
+    #
+    #     Enforced HERE, in the process that queues the orders. A lock
+    #     drawn only in the browser is one that a refresh, a second tab
+    #     or the developer console walks straight through - and what is
+    #     on the other side of it places live trades.
+    #
+    #     The overlay in app.js is the courtesy; this is the guard.
+    from . import screenlock as lockmod
+    lock = lockmod.ScreenLock()
+    env_path = os.path.join(os.path.dirname(os.path.abspath(config_path)),
+                            '.env')
+
+    def auto_lock_seconds():
+        raw = cfg.load_raw(config_path)
+        settings = dict(cfg.DEFAULT_SETTINGS)
+        settings.update(raw.get('settings') or {})
+        try:
+            return float(settings.get('AUTO_LOCK_MINUTES') or 0) * 60.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    @app.before_request
+    def refuse_while_locked():
+        """THE GUARD ITSELF. Every state-changing request, in one place.
+
+        Not a decorator on each route: a route added later would
+        silently not be covered, and the one it would not cover is
+        whichever one somebody adds in a hurry. A list of what is
+        ALLOWED while locked is a list somebody has to defend.
+
+        The idle check rides here too, on the polling the screen does
+        anyway - so a browser that was closed without unlocking still
+        finds the machine locked when it comes back.
+        """
+        if request.method == 'GET':
+            # Reading is not trading. The ladder goes on ticking behind
+            # the overlay, exactly as it does behind TT's.
+            lock.lock_if_idle(auto_lock_seconds())
+            return None
+        if request.path in ('/api/unlock', '/api/lock', '/api/pin'):
+            return None
+        if lock.locked:
+            return jsonify({
+                'ok': False, 'locked': True,
+                'error': 'The screen is locked. Enter the PIN to trade.'
+            }), 423
+        lock.touch()
+        return None
+
+    @app.get('/api/lock')
+    def api_lock_state():
+        return jsonify({'locked': lock.locked,
+                        'pin_set': lock.pin_is_set(),
+                        'auto_lock_sec': auto_lock_seconds(),
+                        'idle_sec': lock.idle_seconds()})
+
+    @app.post('/api/lock')
+    def api_lock():
+        lock.lock()
+        return jsonify({'ok': True, 'locked': True})
+
+    @app.post('/api/unlock')
+    def api_unlock():
+        payload = request.get_json(silent=True) or {}
+        ok, reason = lock.unlock(payload.get('pin'))
+        return (jsonify({'ok': True, 'locked': False}) if ok
+                else (jsonify({'ok': False, 'error': reason}), 403))
+
+    @app.post('/api/pin')
+    def api_set_pin():
+        """Set or change the PIN.
+
+        Changing it needs the CURRENT one. Setting the first one does
+        not - there is nothing to prove yet, and a machine that has to
+        be unlocked before it can be given a lock is a machine nobody
+        can start using.
+        """
+        payload = request.get_json(silent=True) or {}
+        if lock.pin_is_set():
+            if lock.locked:
+                return jsonify({'ok': False, 'error': 'Unlock the screen '
+                                'before changing its PIN.'}), 423
+            if not lockmod.verify_pin(payload.get('current'),
+                                      lockmod.stored_hash()):
+                return jsonify({'ok': False,
+                                'error': 'The current PIN is wrong.'}), 403
+        problem = lockmod.check_new_pin(payload.get('pin'),
+                                        payload.get('again'))
+        if problem:
+            return jsonify({'ok': False, 'error': problem}), 400
+        # The HASH, into .env, beside the account passwords. The PIN
+        # itself is not written anywhere and is not in this response.
+        cfg.write_env_value(env_path, lockmod.PIN_ENV_KEY,
+                            lockmod.hash_pin(payload.get('pin')))
+        lock.touch()
+        return jsonify({'ok': True, 'pin_set': True})
+
     def store():
         """A read-only view of the coordinator's database.
 
@@ -148,7 +246,15 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
 
     @app.get('/api/status')
     def api_status():
-        return jsonify(status())
+        # The lock rides on the poll the screen already makes, rather
+        # than a second one of its own. The overlay has to appear the
+        # instant the auto-lock fires, and a screen that learns it is
+        # locked one poll late is a screen somebody clicked on.
+        snapshot = status()
+        snapshot['lock'] = {'locked': lock.locked,
+                            'pin_set': lock.pin_is_set(),
+                            'auto_lock_sec': auto_lock_seconds()}
+        return jsonify(snapshot)
 
     @app.get('/api/config')
     def api_config():

@@ -1181,6 +1181,55 @@ table.legbook tr.spread-hint td.hint-up {
   background: #fdeaea;
 }
 
+/* -- the screen lock ------------------------------------------------ */
+/* Above everything, including the modal and the toasts: a dialog that
+   could be reached from under the lock is a way round it. */
+.lock-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Translucent, not opaque. The market stays readable behind it -
+     a trader coming back wants to see where the spread went before
+     they type anything. */
+  background: rgba(20, 24, 30, 0.82);
+  backdrop-filter: blur(2px);
+}
+.lock-box {
+  background: var(--chrome, #d4d0c8);
+  border: 2px solid #6b7280;
+  border-radius: 4px;
+  padding: 22px 28px;
+  text-align: center;
+  min-width: 280px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+}
+.lock-icon { font-size: 30px; line-height: 1; }
+.lock-box h2 { margin: 8px 0 4px; font: bold 16px var(--mono); }
+.lock-box p { margin: 0 0 10px; font: 11px var(--mono); color: #333; }
+#lock-form { display: flex; gap: 6px; justify-content: center; }
+#lock-pin {
+  font: 16px var(--mono);
+  text-align: center;
+  letter-spacing: 6px;
+  width: 130px;
+  padding: 4px;
+}
+.lock-error { color: #b3261e; font: bold 11px var(--mono); min-height: 14px; }
+
+/* The one control that is always reachable, so locking is never a
+   hunt through a menu. */
+#lock-now {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 6px;
+  line-height: 1;
+}
+
 /* -- taskbar -------------------------------------------------------- */
 
 #taskbar {

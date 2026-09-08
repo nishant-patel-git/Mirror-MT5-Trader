@@ -28,6 +28,13 @@
   </svg>
   <span class="brand-name">NEXUS</span>
   <span class="brand-note">spread terminal</span>
+  <!-- The padlock, in the one place that is always on screen. TT puts
+       it in the corner of the workspace for the same reason: a lock
+       you have to go and find is a lock nobody uses on the way out.
+       Hidden until a PIN exists - locking a screen with no way back in
+       is an outage, not a safety feature. -->
+  <button id="lock-now" type="button" hidden
+          aria-label="Lock the screen">&#128274;</button>
 </div>
 
 <!-- The engine banner. A dead coordinator must never be mistaken for a
@@ -69,6 +76,31 @@
     <span id="loop-stat" class="stat" title="The coordinator's achieved loop interval, and how old this snapshot is">—</span>
     <button id="help" class="tab" title="Keyboard shortcuts (?)">?</button>
     <button id="kill" class="kill">KILL ALL</button>
+  </div>
+</div>
+
+<!-- THE SCREEN LOCK. Covers everything, takes every click and every
+     key, and is the last thing in the document so nothing can sit on
+     top of it. The ladder goes on ticking behind it, exactly as it
+     does behind TT's - a locked screen still shows the market, it just
+     will not trade it.
+
+     The real guard is in webapp.py, which refuses every state-changing
+     request while the server says locked. This is what the trader
+     sees; it is not what stops the order. -->
+<div id="lock-overlay" class="lock-overlay hidden" role="dialog"
+     aria-modal="true" aria-label="Screen locked">
+  <div class="lock-box">
+    <div class="lock-icon">&#128274;</div>
+    <h2 id="lock-title">Screen Locked</h2>
+    <p id="lock-why">Nothing on this screen will trade until it is
+      unlocked.</p>
+    <form id="lock-form" autocomplete="off">
+      <input id="lock-pin" type="password" inputmode="numeric"
+             autocomplete="off" placeholder="PIN" aria-label="PIN">
+      <button id="lock-go" class="btn" type="submit">Unlock</button>
+    </form>
+    <p id="lock-error" class="lock-error"></p>
   </div>
 </div>
 

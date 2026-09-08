@@ -69,7 +69,8 @@
 
   function refresh() {
     return Promise.all([
-      api('/api/accounts'), api('/api/pairs'), api('/api/settings')
+      api('/api/accounts'), api('/api/pairs'), api('/api/settings'),
+      api('/api/lock')
     ]).then(function (results) {
       local.accounts = results[0].body.accounts || [];
       local.nextPort = results[0].body.next_free_port || local.nextPort;
@@ -77,6 +78,10 @@
       local.settings = results[2].body.settings || {};
       local.defaults = results[2].body.defaults || {};
       local.hot = results[2].body.hot || [];
+      // Whether a PIN EXISTS, never the PIN or its hash. The pane needs
+      // it to decide between 'Set PIN' and 'Change PIN', and that is
+      // the entire question it is allowed to ask.
+      local.settings.__pin_set = !!(results[3].body || {}).pin_set;
       render();
     });
   }
@@ -340,6 +345,41 @@
         : 'OFF: every click purely OPENS. On a hedging account that ' +
           'stacks a second, opposite ticket beside what you already ' +
           'have — both live, both paying carry.') + '</div>');
+    // -- the screen lock --------------------------------------------
+    //
+    //     Set here rather than at install time on purpose: the PIN
+    //     belongs to the TRADER, and one typed by whoever set the
+    //     machine up is one the whole office knows.
+    html += field('Screen lock PIN',
+      '<div class="pinset">' +
+      '<input class="s-pin-current" type="password" autocomplete="off" ' +
+      'placeholder="current PIN"' +
+      (settings.__pin_set ? '' : ' disabled') + '>' +
+      '<input class="s-pin-new" type="password" autocomplete="off" ' +
+      'placeholder="new PIN">' +
+      '<input class="s-pin-again" type="password" autocomplete="off" ' +
+      'placeholder="again">' +
+      '<button class="btn s-pin-save" type="button">' +
+      (settings.__pin_set ? 'Change PIN' : 'Set PIN') + '</button>' +
+      '</div>' +
+      '<div class="hint pin-note">' + (settings.__pin_set
+        ? 'A PIN is set on this PC. The padlock beside NEXUS locks the ' +
+          'screen, Ctrl+L does the same, and it locks itself after the ' +
+          'idle time below. Changing it needs the current one.'
+        : 'No PIN on this PC, so the lock is off. Set one and the ' +
+          'screen locks when you ask it to and when it is left alone - ' +
+          'nothing on a locked screen can trade.') +
+      ' It is stored as a one-way hash in .env, never as the PIN. ' +
+      'It does NOT stop somebody at this keyboard opening MetaTrader 5 ' +
+      'directly: a Windows account per trader is what does that.' +
+      '</div>');
+    html += field('Lock itself after (minutes)',
+      '<input class="s-autolock" type="number" min="0" step="1" ' +
+      'value="' + escape(settings.AUTO_LOCK_MINUTES) + '">' +
+      '<div class="hint">Minutes with nobody touching the screen ' +
+      'before it locks. 15 is long enough to watch a ladder without ' +
+      'clicking. 0 turns it off and leaves only the padlock. It does ' +
+      'nothing until a PIN is set.</div>');
     html += field('Slippage protection (ticks)',
       '<input class="s-protection" type="number" min="0" step="0.5" ' +
       'value="' + escape(settings.MARKET_PROTECTION_TICKS) + '">' +
@@ -791,6 +831,30 @@
     if (e.target.closest('.pair-form')) { readDraft(); }
   }
 
+  function savePin(panel) {
+    /* The PIN goes to the server and NOWHERE else - not into
+     * local.settings, not into the settings POST, not into a toast.
+     * `.env` holds the hash; this function holds the PIN for as long
+     * as one fetch takes and then clears the boxes. */
+    var current = panel.querySelector('.s-pin-current');
+    var fresh = panel.querySelector('.s-pin-new');
+    var again = panel.querySelector('.s-pin-again');
+    return api('/api/pin', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({current: current.value, pin: fresh.value,
+                            again: again.value})
+    }).then(function (result) {
+      current.value = fresh.value = again.value = '';
+      if (result.body && result.body.ok) {
+        UI.toast('PIN set. The screen locks from now on.');
+        return refresh();
+      }
+      UI.toast((result.body && result.body.error) ||
+               'the PIN was not changed');
+    });
+  }
+
   function onClick(e) {
     /* Every click on this page goes through here, and one that throws
      * used to do nothing and SAY nothing — indistinguishable, from the
@@ -808,6 +872,9 @@
     if (!button) { return; }
     var row = button.closest('tr');
 
+    if (button.classList.contains('s-pin-save')) {
+      return savePin(button.closest('.window'));
+    }
     if (button.classList.contains('save-settings')) {
       return saveSettings();
     }
@@ -952,6 +1019,7 @@
     var fields = {
       CONFIRM_MARKET_CLICKS: panel.querySelector('.s-confirm').checked,
       CLICK_CONVENTION: panel.querySelector('.s-click').value,
+      AUTO_LOCK_MINUTES: panel.querySelector('.s-autolock').value,
       CLOSE_FIRST: panel.querySelector('.s-closefirst').checked,
       MARKET_PROTECTION_TICKS: number('.s-protection'),
       ROW_HEIGHT_PX: number('.s-rowheight'),
