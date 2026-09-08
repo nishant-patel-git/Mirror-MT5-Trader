@@ -189,6 +189,21 @@ DEFAULT_SETTINGS = {
     #: its own value here and is not moved by this line at all.
     'CLICK_CONVENTION': 'TT',
 
+    #: Minutes of nobody touching the screen before it locks itself.
+    #:
+    #: The case it is for: a trader leaves for the day and the next
+    #: person to sit down finds a live account one click from a trade.
+    #: A manual lock only helps the trader who remembers, and the whole
+    #: problem is the evening they did not.
+    #:
+    #: 15 is long enough that watching a ladder without clicking does
+    #: not lock it, short enough to catch somebody who walked away. 0
+    #: turns it off, for a desk that wants only the button.
+    #:
+    #: It does NOTHING until a PIN is set: a screen that locks with no
+    #: way in is an outage, not a safety feature.
+    'AUTO_LOCK_MINUTES': 15,
+
     #: Does a click the OPPOSITE way close what is open, or stack a
     #: second position beside it?
     #:

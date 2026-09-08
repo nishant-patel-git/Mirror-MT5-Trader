@@ -3621,6 +3621,73 @@
       : DASH;
   }
 
+
+  // -- the screen lock ---------------------------------------------------
+  //
+  //     Two things, one mechanism: a trader who left for the day and a
+  //     stray click on a live ladder.
+  //
+  //     WHAT IS ON SCREEN IS NOT THE GUARD. webapp.py refuses every
+  //     state-changing request while the server says locked, so a
+  //     refresh, a second tab or the console gets a 423 and nothing
+  //     else. This overlay exists so the trader knows why, and so the
+  //     clicks never leave the page in the first place.
+
+  function showLock(state_) {
+    var overlay = el('lock-overlay');
+    if (!overlay) { return; }
+    var locked = !!state_.locked;
+    var was = !overlay.classList.contains('hidden');
+    overlay.classList.toggle('hidden', !locked);
+    var button = el('lock-now');
+    if (button) {
+      // Nothing to lock until there is a way back in.
+      button.hidden = !state_.pin_set;
+      button.title = state_.pin_set
+        ? 'Lock the screen (Ctrl+L)'
+        : 'Set a PIN in Settings to use the lock';
+    }
+    if (locked && !was) {
+      el('lock-error').textContent = '';
+      el('lock-pin').value = '';
+      // Focus AFTER the browser has drawn it, or the field that gets
+      // the first keystroke is whatever had focus before.
+      requestAnimationFrame(function () { el('lock-pin').focus(); });
+    }
+  }
+
+  function screenIsLocked() {
+    var overlay = el('lock-overlay');
+    return !!overlay && !overlay.classList.contains('hidden');
+  }
+
+  function lockNow() {
+    fetch('/api/lock', {method: 'POST'}).then(function () {
+      showLock({locked: true, pin_set: true});
+    });
+  }
+
+  function tryUnlock() {
+    var pin = el('lock-pin').value;
+    fetch('/api/unlock', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({pin: pin})
+    }).then(function (r) { return r.json(); }).then(function (data) {
+      el('lock-pin').value = '';
+      if (data && data.ok) {
+        el('lock-error').textContent = '';
+        showLock({locked: false, pin_set: true});
+        return;
+      }
+      // The server's own words - including how many tries are left and
+      // the lockout. Never 'wrong PIN' invented here.
+      el('lock-error').textContent = (data && data.error) ||
+        'The screen would not unlock.';
+      el('lock-pin').focus();
+    });
+  }
+
   function render() {
     // Not while a window is being dragged. The whole screen is rebuilt
     // three times a second, and doing that under the pointer is what
@@ -3830,6 +3897,18 @@
   var QUANTITY_KEYS = {'1': 1, '2': 5, '3': 10, '4': 50, '5': 100};
 
   function onKey(e) {
+    // Ctrl+L, the shortcut every Windows user already has in their
+    // fingers for locking something. Before the modifier check below,
+    // which exists to keep the single-letter ORDER keys away from
+    // shortcuts - and this one is deliberately not a single letter.
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'l' || e.key === 'L')) {
+      var button = el('lock-now');
+      if (button && !button.hidden) {
+        e.preventDefault();
+        lockNow();
+      }
+      return;
+    }
     if (e.key === 'Escape') {
       closeModal();
       el('help-overlay').classList.add('hidden');
@@ -3906,6 +3985,11 @@
     fetch('/api/status').then(function (r) { return r.json(); })
       .then(function (snapshot) {
         state.snapshot = snapshot;
+        // The server is the authority on this. The overlay follows what
+        // it says and never decides for itself - a browser that thought
+        // it was unlocked would only be lying to the person in front of
+        // it, because every order still goes through the guard.
+        showLock(snapshot.lock || {});
         // A ghost whose order is now in the book has done its job.
         state.pending.forEach(function (ghost) {
           var pair = snapshot.pairs[ghost.pair_key] || {};
@@ -4117,6 +4201,28 @@
       closeModal();
       if (handler) { handler(); }
     });
+    // FIRST, and in the CAPTURE phase, so nothing downstream ever sees
+    // the event: the ladder's own handlers, the shortcut keys and the
+    // window manager all hang off listeners added below this one.
+    ['click', 'pointerdown', 'dblclick', 'keydown', 'wheel'].forEach(
+      function (kind) {
+        document.addEventListener(kind, function (e) {
+          if (!screenIsLocked()) { return; }
+          // Everything inside the lock box is how you get OUT, so it
+          // is the one place that goes through.
+          if (e.target.closest && e.target.closest('#lock-overlay')) {
+            return;
+          }
+          e.stopPropagation();
+          e.preventDefault();
+        }, true);
+      });
+    el('lock-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      tryUnlock();
+    });
+    var lockButton = el('lock-now');
+    if (lockButton) { lockButton.addEventListener('click', lockNow); }
     document.addEventListener('keydown', onKey);
     window.addEventListener('click', function (e) {
       var window_ = e.target.closest('.window');
