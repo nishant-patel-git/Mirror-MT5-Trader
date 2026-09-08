@@ -28,31 +28,24 @@
     "",
     "pair_type: SPOT_FUTURE (spot vs its own future), FUTURE_FUTURE (two",
     "contract months), RELATED (two different instruments, NO fair",
-    "value). Getting it wrong is not cosmetic."
+    "value). Getting it wrong is not cosmetic.",
+    "",
+    "TWO PAIRS, and the suffixes are not a typo. Leg A is spelled .c and",
+    "leg B .s because the two legs sit on DIFFERENT accounts with",
+    "different symbol suffixes - copy each one from the Market Watch of",
+    "the terminal that leg actually trades on, not from the other."
   ],
   "pairs": [
     {
-      "name": "Gold basis",
-      "leg_a": "XAUUSD.f",
-      "leg_b": "GCZ6",
+      "name": "XAUUSD | GCZ6",
+      "leg_a": "XAUUSD.c",
+      "leg_b": "GCZ6.s",
       "pair_type": "SPOT_FUTURE"
     },
     {
-      "name": "Silver basis",
-      "leg_a": "XAGUSD.f",
-      "leg_b": "SIZ6",
-      "pair_type": "SPOT_FUTURE"
-    },
-    {
-      "name": "Brent vs WTI - spot",
-      "leg_a": "USOIL.f",
-      "leg_b": "UKOIL.f",
-      "pair_type": "RELATED"
-    },
-    {
-      "name": "Brent vs WTI - futures",
-      "leg_a": "USOILX6",
-      "leg_b": "UKOILX6",
+      "name": "USOILX6 | UKOILX6",
+      "leg_a": "USOILX6.c",
+      "leg_b": "UKOILX6.s",
       "pair_type": "RELATED"
     }
   ]

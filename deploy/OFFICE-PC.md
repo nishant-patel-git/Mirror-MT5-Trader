@@ -150,6 +150,41 @@ a token in the URL is written to `.git\config` in plain text and is
 then in every screenshot of that file forever. A leaked read-only token
 reads code; it cannot push.
 
+## When MetaTrader 5 asks to update itself
+
+Every terminal from one golden zip is the same build, so when the broker
+ships a new one **every PC gets the LiveUpdate box on the same day**.
+
+Let them press **Restart**. It is the terminal updating itself in place;
+nothing in `C:\MT5-Trader` is touched, the accounts stay signed in, and
+the engine reconnects on its own. Nothing is lost by clicking it, and
+nothing breaks by clicking **Later** either.
+
+But do it once at the source too, or every PC installed from then on
+starts on the old build and updates itself on first launch — in front of
+whoever is installing it.
+
+**Refreshing the template — the same three steps as the first time:**
+
+1. On the build PC, open `C:\MT5-A` and let MetaTrader 5 finish its own
+   LiveUpdate. Then **close it.**
+2. Double-click `deploy\MAKE-KIT.BAT`. It rebuilds `MT5-golden.zip` from
+   `C:\MT5-A` and re-gathers the kit.
+3. Replace the `ROLLOUT-KIT` folder on the stick and in whatever you
+   email out. Delete the old one rather than copying over it.
+
+Two things worth knowing:
+
+- **`C:\MT5-A` on the build PC must never be logged in.** If it has
+  been, log out and clear the account before rebuilding — the template
+  is refused if it finds saved account details, but a build zipped from
+  a used terminal is a bad habit either way.
+- **Machines already installed need nothing.** They update themselves
+  from the LiveUpdate box. The rebuild is only so the NEXT PC starts on
+  the current build.
+
+---
+
 ## One PC, two shifts
 
 A machine shared by two traders on different shifts — say 10001/10002 in

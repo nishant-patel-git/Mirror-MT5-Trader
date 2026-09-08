@@ -271,3 +271,91 @@ def test_a_runner_port_still_held_is_named_before_the_engine_starts(
     assert 'ALREADY IN USE' in printed
     assert "account 'leg_a'" in printed
     assert 'two clients on one terminal' in printed
+
+
+# --- Opening the screen -------------------------------------------------
+#
+#     A desk reported ERR_CONNECTION_REFUSED at every start, then TWO
+#     windows on one screen. Both came from the same line: a fixed
+#     sleep(2) before opening the browser.
+
+def test_the_window_waits_for_the_server_rather_than_a_fixed_two_seconds():
+    """The port is the only honest signal. How long the web child takes
+    to import Flask, read the config and bind is a property of the
+    machine, not a number anybody can pick - and on a PC that had just
+    run the safety tests, two seconds was not enough."""
+    import start
+    calls = {'slept': 0.0}
+    clock = {'t': 0.0}
+
+    def sleep(seconds):
+        calls['slept'] += seconds
+        clock['t'] += seconds
+
+    # Up on the fourth look, not the first.
+    looks = {'n': 0}
+
+    def busy(host, port):
+        looks['n'] += 1
+        return looks['n'] >= 4
+
+    original = start.port_in_use
+    start.port_in_use = busy
+    try:
+        assert start.wait_until_serving('127.0.0.1', 8000, sleep=sleep,
+                                        now=lambda: clock['t'])
+    finally:
+        start.port_in_use = original
+    assert looks['n'] == 4
+    assert calls['slept'] > 0        # it waited, rather than spinning
+
+
+def test_control_a_server_that_never_comes_up_opens_no_window():
+    """The control: it must give up and SAY so. A window opened onto a
+    port with nothing behind it is the refused-connection page the
+    trader was shown, and the natural fix - opening the app by hand -
+    is what left two windows on the screen."""
+    import start
+    clock = {'t': 0.0}
+
+    def sleep(seconds):
+        clock['t'] += seconds
+
+    original = start.port_in_use
+    start.port_in_use = lambda host, port: False
+    try:
+        assert start.wait_until_serving('127.0.0.1', 8000, timeout=5.0,
+                                        sleep=sleep,
+                                        now=lambda: clock['t']) is False
+    finally:
+        start.port_in_use = original
+
+
+def test_a_pwa_desk_can_stop_a_second_window_opening(tmp_path):
+    """A trader who has installed the page as a PWA already has a
+    window, in their own browser profile. This start cannot see it and
+    would open a second one beside it."""
+    import json as _json
+    import start
+    path = tmp_path / 'config.json'
+    path.write_text(_json.dumps(
+        {'settings': {'OPEN_WINDOW_ON_START': False}}), encoding='utf-8')
+    assert start.open_window_wanted(str(path)) is False
+    path.write_text(_json.dumps(
+        {'settings': {'OPEN_WINDOW_ON_START': 'false'}}), encoding='utf-8')
+    assert start.open_window_wanted(str(path)) is False
+
+
+def test_control_the_window_opens_when_nothing_says_otherwise(tmp_path):
+    """The control, and it covers the cases that matter more than the
+    setting: a config with no such key, a config that will not parse,
+    and no config at all. A trader whose config has a problem still
+    needs the screen that fixes it."""
+    import json as _json
+    import start
+    path = tmp_path / 'config.json'
+    path.write_text(_json.dumps({'settings': {}}), encoding='utf-8')
+    assert start.open_window_wanted(str(path)) is True
+    path.write_text('{ not json', encoding='utf-8')
+    assert start.open_window_wanted(str(path)) is True
+    assert start.open_window_wanted(str(tmp_path / 'nope.json')) is True

@@ -1116,3 +1116,80 @@ def test_declining_the_update_prompt_does_not_slam_the_window_shut():
     text = DAILY_BATS['UPDATE.bat']
     block = text[text.index('if /i not "%GOON%"=="YES"'):][:200]
     assert 'pause' in block
+
+
+# --- What the office actually trades ------------------------------------
+
+PAIRS_JSON = json.loads((DEPLOY / 'pairs.json').read_text(encoding='utf-8'))
+PRESETS_JSON = json.loads((DEPLOY / 'presets.json').read_text(
+    encoding='utf-8'))
+
+
+def test_the_roll_list_is_the_two_pairs_this_desk_trades():
+    names = [(p['leg_a'], p['leg_b'], p['pair_type'])
+             for p in PAIRS_JSON['pairs']]
+    assert names == [('XAUUSD.c', 'GCZ6.s', 'SPOT_FUTURE'),
+                     ('USOILX6.c', 'UKOILX6.s', 'RELATED')]
+
+
+def test_the_two_legs_carry_the_suffix_of_their_own_account():
+    """Not a typo and not decoration. The legs sit on DIFFERENT
+    accounts with different symbol suffixes, so a spelling copied from
+    the wrong terminal is a symbol that cannot trade - the pair sits
+    there reading unknown."""
+    for pair in PAIRS_JSON['pairs']:
+        assert pair['leg_a'].endswith('.c'), pair
+        assert pair['leg_b'].endswith('.s'), pair
+    for preset in PRESETS_JSON['presets']:
+        assert preset['leg_a'].endswith('.c'), preset
+        assert preset['leg_b'].endswith('.s'), preset
+
+
+def test_control_the_wizard_offers_the_same_instruments(tmp_path):
+    """The control that keeps the two files honest with each other. A
+    fresh PC is seeded by presets.json and topped up by pairs.json; if
+    they name different instruments, the first desk installed gets a
+    pair nobody else has."""
+    presets = configure.load_presets(str(tmp_path))
+    assert presets, 'deploy/presets.json produced no pairs'
+    # Compared on the INSTRUMENT, because the contract code is exactly
+    # what differs between a seed and a roll.
+    def instruments(rows):
+        found = set()
+        for row in rows:
+            for leg in (row['leg_a'], row['leg_b']):
+                for known in ('XAUUSD', 'GC', 'USOIL', 'UKOIL'):
+                    if leg.startswith(known):
+                        found.add(known)
+        return found
+
+    assert instruments(presets) == instruments(PAIRS_JSON['pairs'])
+    assert instruments(presets) == {'XAUUSD', 'GC', 'USOIL', 'UKOIL'}
+    for preset in presets:
+        assert preset['pair_type'] in ('SPOT_FUTURE', 'FUTURE_FUTURE',
+                                       'RELATED')
+
+
+def test_the_spread_row_says_which_way_each_side_wants_it_to_go():
+    """H -> L under the Bid, L -> H under the Ask. The two columns are
+    not two prices of the same thing: the Bid is where the spread is
+    SOLD and a short profits as it falls; the Ask is where it is
+    BOUGHT and a long profits as it rises."""
+    app_js = (DEPLOY.parent / 'mt5trader' / 'static' /
+              'app.js').read_text(encoding='utf-8')
+    hint = app_js[app_js.index('spread-hint'):][:900]
+    assert 'H &rarr; L' in hint and 'L &rarr; H' in hint
+    assert hint.index('H &rarr; L') < hint.index('L &rarr; H')
+    assert 'c-bid hint-down' in hint and 'c-ask hint-up' in hint
+
+
+def test_control_the_hint_is_only_on_the_spread_row():
+    """The control. The header above is shared with the two LEG rows,
+    where bid and ask are just that leg's own book and say nothing
+    about direction - a hint there would be wrong, not merely noisy."""
+    app_js = (DEPLOY.parent / 'mt5trader' / 'static' /
+              'app.js').read_text(encoding='utf-8')
+    assert app_js.count('hint-down') == 1
+    assert app_js.count('hint-up') == 1
+    # It comes AFTER the spread row, not in the header.
+    assert app_js.index("<tr class=\"spread\">") < app_js.index('spread-hint')

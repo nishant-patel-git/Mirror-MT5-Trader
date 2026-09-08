@@ -2197,6 +2197,26 @@
       cell(market.long_spread, 'c-ask') +
       width(market.short_spread, market.long_spread) +
       '<td class="age c-age"></td></tr>';
+    /*
+        WHICH WAY EACH SIDE WANTS THE SPREAD TO GO, under the price it
+        would be entered at.
+    
+        The two columns are not two prices of the same thing. The Bid is
+        where the spread can be SOLD, and a short makes money as the
+        spread falls - High to Low. The Ask is where it can be BOUGHT,
+        and a long makes money as it rises - Low to High.
+    
+        Written under the numbers rather than in the header, because the
+        header is shared with the two LEG rows above, where bid and ask
+        are just a leg's own book and mean nothing about direction.
+    */
+    html += '<tr class="spread-hint"><th></th><td class="sym"></td>' +
+      '<td class="c-bid hint-down" title="Selling the spread here. A ' +
+      'short is in profit as the spread falls: High to Low.">' +
+      'H &rarr; L</td>' +
+      '<td class="c-ask hint-up" title="Buying the spread here. A long ' +
+      'is in profit as the spread rises: Low to High.">L &rarr; H</td>' +
+      '<td class="c-width"></td><td class="c-age"></td></tr>';
     return html + '</tbody></table>';
   }
 

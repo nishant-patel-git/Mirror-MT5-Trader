@@ -30,31 +30,17 @@
   "default_server": "MentoMarkets-Server",
   "presets": [
     {
-      "label": "Gold basis - XAUUSD.f spot vs GC future",
-      "name": "Gold spot vs future",
-      "leg_a": "XAUUSD.f",
-      "leg_b": "GC{contract}",
+      "label": "Gold basis - XAUUSD.c spot vs GC future (.s)",
+      "name": "XAUUSD | GC{contract}",
+      "leg_a": "XAUUSD.c",
+      "leg_b": "GC{contract}.s",
       "pair_type": "SPOT_FUTURE"
     },
     {
-      "label": "Silver basis - XAGUSD.f spot vs SI future",
-      "name": "Silver spot vs future",
-      "leg_a": "XAGUSD.f",
-      "leg_b": "SI{contract}",
-      "pair_type": "SPOT_FUTURE"
-    },
-    {
-      "label": "Brent vs WTI - spot (USOIL.f / UKOIL.f)",
-      "name": "Brent vs WTI - spot",
-      "leg_a": "USOIL.f",
-      "leg_b": "UKOIL.f",
-      "pair_type": "RELATED"
-    },
-    {
-      "label": "Brent vs WTI - futures (USOIL / UKOIL, same month)",
-      "name": "Brent vs WTI - futures",
-      "leg_a": "USOIL{contract}",
-      "leg_b": "UKOIL{contract}",
+      "label": "Brent vs WTI - futures (USOIL.c / UKOIL.s, same month)",
+      "name": "USOIL{contract} | UKOIL{contract}",
+      "leg_a": "USOIL{contract}.c",
+      "leg_b": "UKOIL{contract}.s",
       "pair_type": "RELATED"
     }
   ]

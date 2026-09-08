@@ -187,6 +187,55 @@ class Child:
             self.process.kill()
 
 
+def open_window_wanted(config_path):
+    """Should this start open a window at all?
+
+    A setting rather than a flag, because it is a property of the DESK -
+    the trader who runs the page as a PWA wants it off every morning,
+    not once. Read here and nowhere else; the launcher reads it at
+    startup, so it is deliberately NOT one of the hot settings the
+    Settings pane can change, which would look applied while nothing
+    had happened.
+
+    Missing, unreadable or unparseable config: TRUE. A trader whose
+    config has a problem still needs the screen that fixes it.
+    """
+    try:
+        with open(config_path, encoding='utf-8') as handle:
+            raw = json.load(handle)
+        setting = (raw.get('settings') or {}).get('OPEN_WINDOW_ON_START')
+    except Exception:
+        return True
+    if setting is None:
+        return True
+    if isinstance(setting, str):
+        return setting.strip().lower() not in ('false', 'no', '0', 'off')
+    return bool(setting)
+
+
+def wait_until_serving(host, port, timeout=45.0, step=0.25,
+                       sleep=time.sleep, now=time.monotonic):
+    """Block until the web process is actually accepting connections.
+
+    A fixed `sleep(2)` used to stand here, and on a PC that had just
+    finished the safety tests two seconds was not enough: the window
+    opened onto ERR_CONNECTION_REFUSED, the trader reloaded or opened
+    the app themselves, and ended up with two windows on the same
+    screen.
+
+    The port is the only honest signal - the web child imports Flask,
+    reads the config and binds, and how long that takes is a property
+    of the machine, not a number anybody can pick. Returns True when it
+    is up, False if it never came.
+    """
+    deadline = now() + timeout
+    while now() < deadline:
+        if port_in_use(host, port):
+            return True
+        sleep(step)
+    return False
+
+
 def port_in_use(host, port):
     """Is something already listening there?
 
@@ -267,12 +316,30 @@ def main():
                             '--port', str(args.web_port)])
         web.start()
         print(f'[launcher] the screen is at {url}')
-        if not args.no_browser:
-            time.sleep(2.0)
-            # A WINDOW OF ITS OWN, not a tab. See mt5trader/appwindow.py
-            # for why that matters on a screen that sends live orders.
-            from mt5trader import appwindow
-            appwindow.open_window(url)
+        # TWO REASONS THIS IS NOT JUST "OPEN THE BROWSER".
+        #
+        # It waits for the port. Opening at a fixed two seconds put
+        # ERR_CONNECTION_REFUSED in front of the trader on any machine
+        # that was busy - and the natural response, opening the app by
+        # hand, is what left two windows on one screen.
+        #
+        # And it can be turned off. A desk that has installed the page
+        # as a PWA already has its window, in its own browser profile;
+        # this one cannot see that and would open a second. Set
+        # OPEN_WINDOW_ON_START to false in config.json and this start
+        # leaves the screen to the window the trader already keeps.
+        if not args.no_browser and open_window_wanted(args.config):
+            if wait_until_serving(args.host, args.web_port):
+                # A WINDOW OF ITS OWN, not a tab. See
+                # mt5trader/appwindow.py for why that matters on a
+                # screen that sends live orders.
+                from mt5trader import appwindow
+                appwindow.open_window(url)
+            else:
+                print(f'[launcher] the screen has not come up yet - no '
+                      f'window was opened. Browse to {url} once it does, '
+                      f'and send whatever this window prints below to '
+                      f'whoever maintains this.')
 
     engine = Engine(args)
     fingerprint = None
