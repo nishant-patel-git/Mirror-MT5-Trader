@@ -1325,8 +1325,8 @@ def test_git_says_it_in_its_own_words():
     screen. 'dubious ownership' is a sentence an operator can act on;
     'not a git clone' was not even true."""
     update = DAILY_BATS['UPDATE.bat']
-    where = update.index('There IS a clone here')
-    after = update[where:where + 900]
+    after = update[update.index('There IS a clone here'):]
+    after = after[:after.index(':know_where_we_are')]
     assert '\ngit rev-parse HEAD\n' in after, 'the error is never shown'
     assert 'dubious ownership' in after
     assert 'safe.directory' in after
@@ -1361,3 +1361,41 @@ def test_control_a_failure_to_register_does_not_fail_the_install():
     assert 'try {' in block and '} catch {' in block
     assert 'Warn (' in block
     assert 'Fail (' not in block
+
+
+def test_the_ownership_fix_needs_no_administrator():
+    """--system writes into C:\\Program Files\\Git\\etc\\gitconfig, so a
+    Command Prompt that is not truly elevated answers 'access denied -
+    cannot lock config file'. That is a second dead end on top of the
+    first, in front of somebody who has already been told to reinstall.
+
+    --global writes to the profile of whoever is sitting there - the
+    account that runs UPDATE, and the account git is refusing."""
+    update = DAILY_BATS['UPDATE.bat']
+    offer = update[update.index('There IS a clone here'):]
+    offer = offer[:offer.index(':know_where_we_are')]
+    assert 'git config --global --add safe.directory' in offer
+    # And it is OFFERED, not printed for somebody to type.
+    assert 'set /p "FIXIT=' in offer
+    assert offer.index('--global') < offer.index('--system'), \
+        'the no-elevation fix has to come first'
+
+
+def test_control_the_all_accounts_fix_is_still_offered_as_the_second():
+    """The control: --global is per-user, so a PC with two shifts still
+    needs the system-wide one, and SETUP - already Administrator - goes
+    on doing exactly that."""
+    update = DAILY_BATS['UPDATE.bat']
+    assert 'EVERY account on this PC' in update
+    assert 'git config --system --add safe.directory' in update
+    assert '--system' in _ps_code()
+
+
+def test_control_declining_the_offer_changes_nothing():
+    """The control that matters on a trading box. Answering anything
+    but YES must leave the machine exactly as it was."""
+    update = DAILY_BATS['UPDATE.bat']
+    assert 'if /i not "%FIXIT%"=="YES" goto :not_fixed' in update
+    after = update[update.index(':not_fixed'):]
+    assert 'Nothing has been changed' in after
+    assert 'exit /b 1' in after
