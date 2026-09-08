@@ -97,7 +97,8 @@ def window_command(url, browser=None, env=None):
     ]
 
 
-def open_window(url, browser=None, env=None, spawn=None, say=print):
+def open_window(url, browser=None, env=None, spawn=None, say=print,
+                open_browser=None):
     """Open the terminal. Returns True when it got its own window.
 
     Never raises: a browser that will not start is a cosmetic problem,
@@ -105,8 +106,27 @@ def open_window(url, browser=None, env=None, spawn=None, say=print):
     of the two happened matters, though — a trader who expected an app
     window and got a tab should know it is the browser that is missing
     and not the terminal.
+
+    BOTH WAYS OUT ARE INJECTED — `spawn` for the app window and
+    `open_browser` for the fallback. `spawn` always was; the fallback
+    was not, and it called `webbrowser.open` directly.
+
+    That is not a tidiness point. Two tests exercise this function's
+    failure paths, and both of them end here, so every run of the
+    safety tests opened two real browser tabs at 127.0.0.1:8000 — on a
+    machine where nothing was serving that port yet, because the tests
+    run BEFORE the engine starts. A trader watching SETUP finish got
+    two 'This site can't be reached' tabs, then two more when NEXUS
+    started and ran the suite again, and every one of them looked like
+    the install had failed.
+
+    A function whose fallback cannot be intercepted is a function that
+    cannot be tested without doing the thing it does.
     """
     spawn = spawn or subprocess.Popen
+    if open_browser is None:
+        import webbrowser
+        open_browser = webbrowser.open
     argv = window_command(url, browser=browser, env=env)
     if argv:
         try:
@@ -119,8 +139,7 @@ def open_window(url, browser=None, env=None, spawn=None, say=print):
         say('[launcher] no Edge or Chrome found, so the terminal opens '
             'in your ordinary browser')
     try:
-        import webbrowser
-        webbrowser.open(url)
+        open_browser(url)
     except Exception as e:                         # a headless box
         say(f'[launcher] could not open a browser ({e}) — browse to {url}')
     return False
