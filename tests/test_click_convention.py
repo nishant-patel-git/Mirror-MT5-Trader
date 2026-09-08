@@ -96,3 +96,96 @@ def test_a_fresh_install_carries_it_explicitly():
         (Path(__file__).resolve().parent.parent /
          'config.example.json').read_text(encoding='utf-8'))
     assert example['settings']['CLICK_CONVENTION'] == 'TT'
+
+
+# --- The screen must never name a side the click does not send ----------
+#
+#     Re-verified end to end after the default was flipped, because a
+#     ladder that says BUY and sends SELL costs money without looking
+#     wrong. Three defects were found by that pass and are fixed; each
+#     is pinned here.
+
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+APP_JS = (ROOT / 'mt5trader' / 'static' / 'app.js').read_text(encoding='utf-8')
+
+
+def test_the_side_is_decided_in_exactly_one_place():
+    """The structural guarantee the whole thing rests on. The browser
+    decides the side and the engine takes it as given - if the server
+    re-applied the convention, every click would be inverted twice and
+    a desk on TT would trade TOUCH."""
+    import re
+    server = (ROOT / 'mt5trader' / 'coordinator.py').read_text(
+        encoding='utf-8') + (ROOT / 'mt5trader' / 'commands.py').read_text(
+        encoding='utf-8') + (ROOT / 'mt5trader' / 'executor.py').read_text(
+        encoding='utf-8')
+    # The server may PUBLISH it and COERCE it. It must never branch on
+    # it to choose a side.
+    for hit in re.finditer(r'CLICK_CONVENTION', server):
+        line = server[server.rfind('\n', 0, hit.start()) + 1:
+                      server.find('\n', hit.start())]
+        assert ('self.config.get' in line or "'CLICK_CONVENTION':" in line
+                or line.strip().startswith('#')), line.strip()
+    assert APP_JS.count('sideForColumn') >= 3      # defined, ladder, grid
+
+
+def test_the_mapping_itself_is_the_right_way_round():
+    """TT: bids buy, asks sell. TOUCH: asks buy, bids sell. Asserted as
+    the exact source line, because this is the one line where a typo is
+    a trade in the wrong direction."""
+    assert "if (column === 'ask') { return tt ? 'SELL' : 'BUY'; }" in APP_JS
+    assert "return tt ? 'BUY' : 'SELL';" in APP_JS
+
+
+def test_a_snapshot_without_the_field_agrees_with_everything_else():
+    """It read `=== 'TT'`, so a missing field meant TOUCH while the
+    engine, the snapshot fallback and the Settings pane all meant TT.
+    That is a second convention nobody chose, reachable whenever the
+    field is absent."""
+    assert "var tt = state.snapshot.click_convention !== 'TOUCH';" in APP_JS
+    assert "state.snapshot.click_convention === 'TT'" not in APP_JS
+
+
+def test_control_all_four_defaults_now_agree():
+    """The control. Any one of them drifting puts a ladder back to
+    trading against its own label."""
+    settings_js = (ROOT / 'mt5trader' / 'static' /
+                   'settings.js').read_text(encoding='utf-8')
+    coordinator = (ROOT / 'mt5trader' /
+                   'coordinator.py').read_text(encoding='utf-8')
+    assert DEFAULT_SETTINGS['CLICK_CONVENTION'] == 'TT'          # engine
+    assert "self.config.get('CLICK_CONVENTION', 'TT')" in coordinator
+    assert "settings.CLICK_CONVENTION || 'TT'" in settings_js     # the pane
+    assert "click_convention !== 'TOUCH'" in APP_JS               # the click
+
+
+def test_the_market_grid_names_the_side_it_will_actually_send():
+    """Its tooltips were written out by hand as 'Click: SELL' on the bid
+    and 'Click: BUY' on the ask - the hit-and-lift reading. On a TT desk
+    both were exactly backwards. The CLICK was right the whole time,
+    which is what made it dangerous: only the words disagreed."""
+    assert 'Click: SELL the spread here' not in APP_JS
+    assert 'Click: BUY the spread here' not in APP_JS
+    assert "clickHint('bid', row.short_spread)" in APP_JS
+    assert "clickHint('ask', row.long_spread)" in APP_JS
+
+
+def test_control_the_grid_click_always_did_use_the_shared_mapping():
+    """The control that says how bad it was: the orders were correct,
+    so no trade went the wrong way - a trader reading the tooltip would
+    simply have been told the opposite of what they were about to do."""
+    assert "clickLevel(key, sideForColumn('bid'), row.short_spread)" in APP_JS
+    assert "clickLevel(key, sideForColumn('ask'), row.long_spread)" in APP_JS
+
+
+def test_the_bid_ask_direction_hint_does_not_read_as_a_click():
+    """H -> L sits under the BID of the quote panel, which is not
+    clickable. Worded as a click it would contradict a TT desk, where
+    the bid column is where a BUY rests. Worded as what the price IS,
+    it is true under either convention."""
+    hint = APP_JS[APP_JS.index('spread-hint'):][:1200]
+    assert 'whichever column your desk clicks' in hint
+    assert 'Selling the spread here' not in APP_JS
+    assert 'Buying the spread here' not in APP_JS
