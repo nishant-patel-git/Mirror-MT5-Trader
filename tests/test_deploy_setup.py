@@ -1299,3 +1299,65 @@ def test_control_a_name_with_no_token_is_left_exactly_as_it_is():
               'leg_a': 'XAUUSD.c', 'leg_b': 'GCZ6.s'}
     assert configure.expand_name(preset, 'Z6', 'Z6') == 'XAUUSD | GCZ6'
     assert configure.expand_name({'label': 'x'}, 'Z6', 'Z6') == ''
+
+
+# --- The clone the trader is not allowed to read ------------------------
+#
+#     A desk ran deploy\UPDATE.BAT and was told 'This folder is not a
+#     git clone'. It was a clone, and a healthy one: SETUP asks for
+#     Administrator and clones as that account, UPDATE is double-clicked
+#     as the trader, and git refuses a repository owned by somebody
+#     else. Its complaint went into a 2>nul and nobody ever saw it.
+
+
+def test_the_two_faults_are_told_apart():
+    """No .git at all is a different problem from a .git git will not
+    touch, and one message for both sent an operator off to reinstall a
+    machine whose clone was fine."""
+    update = DAILY_BATS['UPDATE.bat']
+    assert 'if not exist ".git" (' in update
+    assert 'There is no .git folder here' in update
+    assert 'There IS a clone here, but git will not read it' in update
+
+
+def test_git_says_it_in_its_own_words():
+    """The refusal is re-run WITHOUT 2>nul so the reason reaches the
+    screen. 'dubious ownership' is a sentence an operator can act on;
+    'not a git clone' was not even true."""
+    update = DAILY_BATS['UPDATE.bat']
+    where = update.index('There IS a clone here')
+    after = update[where:where + 900]
+    assert '\ngit rev-parse HEAD\n' in after, 'the error is never shown'
+    assert 'dubious ownership' in after
+    assert 'safe.directory' in after
+
+
+def test_control_a_readable_clone_is_not_sent_down_either_path():
+    """The control. The check must still pass straight through on the
+    normal machine - it is a diagnosis, not a new gate."""
+    update = DAILY_BATS['UPDATE.bat']
+    assert 'if defined WAS goto :know_where_we_are' in update
+    assert update.index('if defined WAS goto :know_where_we_are') < \
+        update.index('if not exist ".git" (')
+    assert ':know_where_we_are' in update
+
+
+def test_setup_registers_the_clone_for_every_account_on_the_pc():
+    """Fixing the cause, not only the message. SETUP is the one process
+    that is already Administrator, so it is the one that can do this."""
+    code = _ps_code()
+    assert 'safe.directory' in code
+    assert '--system' in code, '--global would write it into the ' \
+        'Administrator profile, the one account that did not need it'
+    assert "$safe = $Root -replace '\\\\', '/'" in code
+
+
+def test_control_a_failure_to_register_does_not_fail_the_install():
+    """The control. The install is complete either way, and UPDATE now
+    names the fix in its own refusal - so this must warn, never stop."""
+    code = _ps_code()
+    block = code[code.index("$safe = $Root"):]
+    block = block[:block.index("Step 'Dependencies'")]
+    assert 'try {' in block and '} catch {' in block
+    assert 'Warn (' in block
+    assert 'Fail (' not in block

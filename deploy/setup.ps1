@@ -801,6 +801,36 @@ if (Test-Path (Join-Path $Root '.git')) {
     }
 }
 
+<#
+    THE CLONE MUST BE READABLE BY THE ACCOUNT THAT USES IT.
+
+    This script runs as Administrator - it has to, to install Git and
+    Python for all users - so the clone it just made is owned by that
+    account. The trader then double-clicks UPDATE.bat as themselves,
+    git sees a repository owned by somebody else, and refuses it
+    outright with 'detected dubious ownership'. Nothing is broken; git
+    will not touch it.
+
+    --system, not --global: --global would write it into the
+    ADMINISTRATOR's own config, which is the one account that did not
+    need it. System scope covers every user of this PC, which is the
+    set of people who might run UPDATE here.
+
+    Forward slashes, which is the form git itself prints and matches
+    against. Not fatal if it fails: the install is complete either way,
+    and UPDATE now names this fix in its own refusal.
+#>
+$safe = $Root -replace '\\', '/'
+try {
+    & $git config --system --add safe.directory $safe 2>$null | Out-Null
+    Say ('Registered ' + $safe + ' as safe for every account on this PC.')
+} catch {
+    Warn ('Could not mark ' + $safe + ' as a safe directory (' +
+          $_.Exception.Message + '). If UPDATE.bat later says "dubious ' +
+          'ownership", run this once as Administrator: git config ' +
+          '--system --add safe.directory ' + $safe)
+}
+
 Step 'Dependencies'
 Push-Location $Root
 # --no-warn-script-location: pip prints a yellow paragraph per console

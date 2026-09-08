@@ -137,12 +137,51 @@ REM  Recorded BEFORE anything moves. A rollback that has to work out
 REM  where it was going is a rollback that cannot run when it is needed.
 set "WAS="
 for /f %%h in ('git rev-parse HEAD 2^>nul') do set "WAS=%%h"
-if not defined WAS (
-  echo   [X] This folder is not a git clone, so there is nothing to
-  echo       update. Re-run deploy\SETUP.bat.
+if defined WAS goto :know_where_we_are
+
+REM  TWO DIFFERENT FAULTS, and this used to blame the wrong one.
+REM
+REM  git rev-parse can come back empty because there is no clone here -
+REM  a folder somebody unzipped instead of installing - or because git
+REM  CAN SEE the clone and is refusing to touch it. Saying 'not a git
+REM  clone' for both sent an operator off to reinstall a machine whose
+REM  clone was perfectly fine.
+REM
+REM  The refusal that actually happens on these PCs is dubious
+REM  ownership. SETUP asks for Administrator and clones as that
+REM  account; UPDATE is double-clicked as the trader. When those are
+REM  different accounts git refuses the repository outright, and its
+REM  complaint went to the 2>nul above, so nobody ever saw it.
+if not exist ".git" (
+  echo   [X] There is no .git folder here, so this is not a clone -
+  echo       it is a copy of the files. UPDATE works by fetching, so
+  echo       there is nothing for it to fetch into.
+  echo.
+  echo       Re-run deploy\SETUP.bat, or clone over it. config.json
+  echo       and .env are NOT in the repository, so copy those two
+  echo       aside first and put them back afterwards.
+  echo.
   pause
   exit /b 1
 )
+echo   [X] There IS a clone here, but git will not read it. Its own
+echo       words:
+echo.
+git rev-parse HEAD
+echo.
+echo       If that mentions "dubious ownership", the clone was made by
+echo       a different Windows account - SETUP runs as Administrator,
+echo       this does not. Fix it once, in a Command Prompt opened AS
+echo       ADMINISTRATOR:
+echo.
+echo           git config --system --add safe.directory C:/MT5-Trader
+echo.
+echo       Then run this again. Nothing has been changed.
+echo.
+pause
+exit /b 1
+
+:know_where_we_are
 echo   This PC is on %WAS%
 
 if /i "%~1"=="--rollback" goto :rollback
