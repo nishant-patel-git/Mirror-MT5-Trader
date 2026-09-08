@@ -473,6 +473,25 @@ function Test-StoreStub {
     return $source -and ($source -like '*\WindowsApps\*')
 }
 
+function Test-Usable {
+    <#
+        Is this interpreter one this project can actually run on?
+
+        64-BIT, because MetaTrader5's IPC handshake fails against a
+        32-bit Python with an error that says nothing.
+
+        A VERSION ON THE LIST, because requirements.txt is not
+        negotiable: Flask 3, pytest 8, playwright and python-dotenv 1
+        every one require 3.8 or newer, so a machine's stray 3.7 could
+        not install the dependencies even if this script let it try.
+
+        Used as a FILTER, not as a refusal. See Find-Python.
+    #>
+    param($Found)
+    return $Found -and $Found.Bits -eq 64 -and
+           ($PyVersions -contains $Found.Version)
+}
+
 function Find-Python {
     <#
         The command that runs Python here, as a list: the program and
@@ -485,6 +504,18 @@ function Find-Python {
         The exact version is asked for FIRST. 'py -3.11' on a box that
         also has 3.9 on PATH is the good outcome, and looking at PATH
         first would miss it.
+
+        AN INTERPRETER THIS PROJECT CANNOT USE IS NOT A FIND. It is
+        said out loud and stepped over.
+
+        That distinction is the whole of this function's job, and
+        getting it wrong cost a fresh EC2 box its install: the machine
+        had Python 3.7 on PATH, this returned it as 'the Python', and
+        the check below refused the entire setup - telling an operator
+        to go and install 3.11 by hand on a script whose next line
+        would have installed 3.11 by itself. A wrong Python on PATH is
+        a fact about the machine, not a reason to stop; 3.11 is put on
+        beside it and the launcher picks the right one from then on.
     #>
     # 1. The launcher, by name and then by its known home. py.exe goes
     #    to C:\Windows, which is always on PATH - but only for a
@@ -496,7 +527,15 @@ function Find-Python {
     foreach ($launcher in $launchers) {
         foreach ($version in $PyVersions) {
             $found = Test-Python @($launcher, ('-' + $version))
-            if ($found) { return $found }
+            # Asked for BY version, so only the bitness can be wrong
+            # here - and a 32-bit build of the right version is still
+            # one the terminal will not talk to.
+            if (Test-Usable $found) { return $found }
+            if ($found) {
+                Warn ('Ignoring ' + ($found.Command -join ' ') + ': it is ' +
+                      $found.Version + ' ' + $found.Bits + '-bit, and ' +
+                      'MetaTrader 5 needs 64-bit.')
+            }
         }
     }
 
@@ -505,15 +544,30 @@ function Find-Python {
     #    already open does not learn about an install, and refreshing it
     #    from the registry does not always reach PowerShell's command
     #    lookup either. A path on disk has neither problem.
+    # Test-Usable again, though Find-PythonInFolders has already
+    # applied it. The rule this function has to keep is 'nothing
+    # unusable leaves here', and a rule enforced at every exit is one a
+    # later edit cannot quietly break.
     $found = Find-PythonInFolders
-    if ($found) { return $found }
+    if (Test-Usable $found) { return $found }
 
     # 3. Whatever 'python' means here - a conda prompt, a venv - as long
     #    as it is not the Microsoft Store stub.
     if ((Get-Command python -ErrorAction SilentlyContinue) -and
         -not (Test-StoreStub 'python')) {
         $found = Test-Python @('python')
-        if ($found) { return $found }
+        if (Test-Usable $found) { return $found }
+        if ($found) {
+            # SAID, and then left alone. Nothing is uninstalled and
+            # nothing on this machine changes because of it: whatever
+            # else on this PC uses that Python goes on using it.
+            Warn ('This machine has Python ' + $found.Version + ' ' +
+                  $found.Bits + '-bit on PATH. The suite runs on ' +
+                  ($PyVersions -join ' and ') + ' 64-bit, and ' +
+                  'requirements.txt needs 3.8 or newer, so 3.11 is being ' +
+                  'installed alongside it. The existing Python is left ' +
+                  'exactly as it is.')
+        }
     }
     return $null
 }
@@ -541,7 +595,15 @@ function Find-PythonInFolders {
     foreach ($candidate in $candidates) {
         if (Test-Path $candidate) {
             $found = Test-Python @($candidate)
-            if ($found) { return $found }
+            # Filtered here too, and not only for tidiness: one of the
+            # folders looked in is Program Files (x86), where a 32-bit
+            # build of exactly the right version lives. The terminal
+            # will not talk to it.
+            if (Test-Usable $found) { return $found }
+            if ($found) {
+                Warn ('Ignoring ' + $candidate + ': it is ' + $found.Version +
+                      ' ' + $found.Bits + '-bit.')
+            }
         }
     }
     return $null

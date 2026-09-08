@@ -1193,3 +1193,70 @@ def test_control_the_hint_is_only_on_the_spread_row():
     assert app_js.count('hint-up') == 1
     # It comes AFTER the spread row, not in the header.
     assert app_js.index("<tr class=\"spread\">") < app_js.index('spread-hint')
+
+
+# --- A stray Python must not block the install --------------------------
+#
+#     A fresh EC2 box had Python 3.7 on PATH. Find-Python returned it,
+#     the version check refused the whole setup, and the operator was
+#     told to go and install 3.11 by hand - by a script whose very next
+#     line installs 3.11 by itself.
+
+
+def test_a_python_this_project_cannot_use_is_not_a_find():
+    """It is stepped over, not returned. Whether a machine happens to
+    have some other Python on PATH is a fact about the machine, not a
+    reason to stop installing."""
+    code = _ps_code()
+    assert 'function Test-Usable' in code
+    # Every route out of Find-Python goes through the filter.
+    body = code[code.index('function Find-Python'):
+                code.index('function Assert-Python')]
+    for line in body.split('\n'):
+        if 'return $found' in line:
+            assert 'Test-Usable' in line, line.strip()
+    assert body.count('Test-Usable $found') >= 3
+
+
+def test_control_a_usable_python_is_still_used_rather_than_reinstalled():
+    """The control. The filter must not become 'install every time' -
+    a machine that already has a proven 64-bit interpreter uses it."""
+    code = _ps_code()
+    assert '$Found.Bits -eq 64' in code
+    assert '($PyVersions -contains $Found.Version)' in code
+    assert 'if (Test-Usable $found) { return $found }' in code
+
+
+def test_the_stray_python_is_said_out_loud_and_left_alone():
+    """Said, because a desk should know why a second Python appeared.
+    Left alone, because whatever else on that PC uses it goes on
+    using it - nothing is uninstalled and nothing is repointed."""
+    code = _ps_code()
+    assert 'is being ' in code and 'installed alongside it' in code
+    assert 'left ' in code and 'exactly as it is' in code
+    for word in ('uninstall', 'Remove-Item $found', 'Uninstall'):
+        assert word not in code[code.index('function Find-Python'):
+                                code.index('function Assert-Python')]
+
+
+def test_the_installer_does_the_tick_boxes_itself():
+    """'Add python.exe to PATH' and 'py launcher' are switches on the
+    silent install, not something anybody clicks."""
+    code = _ps_code()
+    assert 'PrependPath=1' in code
+    assert 'Include_launcher=1' in code
+    assert 'InstallLauncherAllUsers=1' in code
+    assert 'InstallAllUsers=1' in code
+    assert '/quiet' in code
+
+
+def test_control_the_requirements_are_why_3_7_cannot_be_allowed():
+    """Not a preference. Flask 3, pytest 8 and python-dotenv 1 all
+    require 3.8 or newer, so a 3.7 box cannot install the dependencies
+    whatever this script decides."""
+    requirements = (DEPLOY.parent / 'requirements.txt').read_text(
+        encoding='utf-8')
+    assert 'Flask>=3' in requirements
+    assert 'pytest>=8' in requirements
+    assert 'python-dotenv>=1' in requirements
+    assert '3.7' not in ROLLOUT['python_versions']
