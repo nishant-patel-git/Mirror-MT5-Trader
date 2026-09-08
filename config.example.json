@@ -18,8 +18,14 @@
   "pairs": {
     "XAUUSD_|GC1226": {
       "name": "Gold spot vs Dec future",
-      "leg_a": {"account": "leg_a", "symbol": "XAUUSD_"},
-      "leg_b": {"account": "leg_b", "symbol": "GC1226"},
+      "leg_a": {
+        "account": "leg_a",
+        "symbol": "XAUUSD_"
+      },
+      "leg_b": {
+        "account": "leg_b",
+        "symbol": "GC1226"
+      },
       "pair_type": "SPOT_FUTURE",
       "hedge_ratio": 1.0,
       "hedge_ratio_for": "XAUUSD_|GC1226",
@@ -39,6 +45,7 @@
     "POLL_INTERVAL_SEC": 0.3,
     "LEG_DEADLINE_SEC": 2.0,
     "MARKET_PROTECTION_TICKS": 3.0,
+    "CLICK_CONVENTION": "TT",
     "REPEG_DEAD_BAND_TICKS": 1.0,
     "MAX_QUOTE_AGE_SEC": 15.0,
     "MAX_SPREAD_JUMP_SIGMA": 5.0,

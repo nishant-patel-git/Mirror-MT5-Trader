@@ -171,13 +171,23 @@ DEFAULT_SETTINGS = {
     #: BUY and SELL buttons and the B/S keys name their side outright
     #: and are not affected at all.
     #:
-    #: DEFAULT IS TOUCH, which is what this app has always done,
-    #: so adding the switch moves no existing click and the whole
-    #: suite — the end-to-end money path included — goes on
-    #: asserting the same thing it always did. A desk that wants
-    #: TT sets it deliberately. Flipping the DEFAULT is a
-    #: separate decision from having the switch.
-    'CLICK_CONVENTION': 'TOUCH',
+    #: DEFAULT IS TT, and that was a decision taken separately from
+    #: adding the switch, which is why this comment used to say the
+    #: opposite. The desk this is built for trades TT and every PC was
+    #: being changed by hand after every install.
+    #:
+    #: It also settles a disagreement between three files. The Settings
+    #: pane has always drawn an unset value as TT
+    #: (`settings.CLICK_CONVENTION || 'TT'`) and the snapshot has
+    #: always defaulted to TT too, while this line said TOUCH. So a
+    #: fresh machine SHOWED 'Bids buy — TT price ladder' on the screen
+    #: and CROSSED the other way — the one shape of bug that costs
+    #: money without looking wrong.
+    #:
+    #: A desk that wants hit-and-lift sets it deliberately, and a desk
+    #: that has ever pressed Apply on the Trading pane already carries
+    #: its own value here and is not moved by this line at all.
+    'CLICK_CONVENTION': 'TT',
 
     #: Does a click the OPPOSITE way close what is open, or stack a
     #: second position beside it?
