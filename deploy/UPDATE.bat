@@ -164,19 +164,56 @@ if not exist ".git" (
   pause
   exit /b 1
 )
-echo   [X] There IS a clone here, but git will not read it. Its own
+echo   [!] There IS a clone here, but git will not read it. Its own
 echo       words:
 echo.
 git rev-parse HEAD
 echo.
-echo       If that mentions "dubious ownership", the clone was made by
-echo       a different Windows account - SETUP runs as Administrator,
-echo       this does not. Fix it once, in a Command Prompt opened AS
-echo       ADMINISTRATOR:
+
+REM  OFFERED, NOT PRINTED FOR SOMEBODY TO TYPE.
+REM
+REM  The fix is one command and this window can run it: --global writes
+REM  to the profile of whoever is sitting here, which is the account
+REM  that runs UPDATE and the account git is refusing. No elevation,
+REM  nothing shared, nothing that can fail on a locked-down PC.
+REM
+REM  --system was the first advice and it was the wrong one to lead
+REM  with: it writes into C:\Program Files\Git\etc\gitconfig, so a
+REM  Command Prompt that is not truly elevated answers 'access denied -
+REM  cannot lock config file', which is a second dead end on top of the
+REM  first. SETUP still does --system, because SETUP is already
+REM  Administrator and that covers every account on the PC at once.
+REM
+REM  Backslashes become forward slashes: that is the form git prints
+REM  and the form it matches against.
+set "HERE=%CD:\=/%"
+echo       If that says "dubious ownership", this clone was made by a
+echo       different Windows account - SETUP runs as Administrator and
+echo       this does not. Nothing is broken and nothing is lost; git is
+echo       just refusing to touch a repository it did not expect.
 echo.
-echo           git config --system --add safe.directory C:/MT5-Trader
+echo       This window can fix it for your account, right now:
+echo           git config --global --add safe.directory %HERE%
 echo.
-echo       Then run this again. Nothing has been changed.
+set "FIXIT="
+set /p "FIXIT=      Type YES to do that and carry on: "
+if /i not "%FIXIT%"=="YES" goto :not_fixed
+git config --global --add safe.directory "%HERE%"
+if errorlevel 1 goto :not_fixed
+for /f %%h in ('git rev-parse HEAD 2^>nul') do set "WAS=%%h"
+if defined WAS (
+  echo.
+  echo   Fixed - git can read this clone now. Carrying on.
+  goto :know_where_we_are
+)
+
+:not_fixed
+echo.
+echo   [X] Nothing has been changed. If you would rather fix it for
+echo       EVERY account on this PC at once, open a Command Prompt as
+echo       Administrator and run:
+echo.
+echo           git config --system --add safe.directory %HERE%
 echo.
 pause
 exit /b 1

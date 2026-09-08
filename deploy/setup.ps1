@@ -826,9 +826,11 @@ try {
     Say ('Registered ' + $safe + ' as safe for every account on this PC.')
 } catch {
     Warn ('Could not mark ' + $safe + ' as a safe directory (' +
-          $_.Exception.Message + '). If UPDATE.bat later says "dubious ' +
-          'ownership", run this once as Administrator: git config ' +
-          '--system --add safe.directory ' + $safe)
+          $_.Exception.Message + '). Nothing is broken - the install ' +
+          'is complete. If UPDATE.bat later says "dubious ownership", ' +
+          'it offers to fix it there and then, for the account sitting ' +
+          'at the machine, with no Administrator needed: git config ' +
+          '--global --add safe.directory ' + $safe)
 }
 
 Step 'Dependencies'
