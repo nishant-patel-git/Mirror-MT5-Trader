@@ -292,22 +292,21 @@ def test_the_window_waits_for_the_server_rather_than_a_fixed_two_seconds():
         calls['slept'] += seconds
         clock['t'] += seconds
 
-    # Up on the fourth look, not the first.
-    looks = {'n': 0}
+    # Answering on the fourth look, not the first.
+    looks = {'n': 0, 'url': None}
 
-    def busy(host, port):
+    def busy(url):
         looks['n'] += 1
+        looks['url'] = url
         return looks['n'] >= 4
 
-    original = start.port_in_use
-    start.port_in_use = busy
-    try:
-        assert start.wait_until_serving('127.0.0.1', 8000, sleep=sleep,
-                                        now=lambda: clock['t'])
-    finally:
-        start.port_in_use = original
+    assert start.wait_until_serving('127.0.0.1', 8000, sleep=sleep,
+                                    now=lambda: clock['t'], probe=busy)
     assert looks['n'] == 4
     assert calls['slept'] > 0        # it waited, rather than spinning
+    # It asks for the PAGE. A bare TCP connect succeeds from the moment
+    # the server binds, which is before it can answer anything.
+    assert looks['url'] == 'http://127.0.0.1:8000/'
 
 
 def test_control_a_server_that_never_comes_up_opens_no_window():
@@ -321,14 +320,9 @@ def test_control_a_server_that_never_comes_up_opens_no_window():
     def sleep(seconds):
         clock['t'] += seconds
 
-    original = start.port_in_use
-    start.port_in_use = lambda host, port: False
-    try:
-        assert start.wait_until_serving('127.0.0.1', 8000, timeout=5.0,
-                                        sleep=sleep,
-                                        now=lambda: clock['t']) is False
-    finally:
-        start.port_in_use = original
+    assert start.wait_until_serving('127.0.0.1', 8000, timeout=5.0,
+                                    sleep=sleep, now=lambda: clock['t'],
+                                    probe=lambda url: False) is False
 
 
 def test_a_pwa_desk_can_stop_a_second_window_opening(tmp_path):
@@ -359,3 +353,51 @@ def test_control_the_window_opens_when_nothing_says_otherwise(tmp_path):
     path.write_text('{ not json', encoding='utf-8')
     assert start.open_window_wanted(str(path)) is True
     assert start.open_window_wanted(str(tmp_path / 'nope.json')) is True
+
+
+def test_a_page_that_answers_with_an_error_still_counts_as_up():
+    """A 404 or a 500 is a SERVED page. The screen is what shows the
+    reason, so refusing to open the window over it would hide the only
+    diagnosis there is - and leave the trader with nothing at all
+    rather than a page with the fault written on it."""
+    import urllib.error
+    import start
+
+    def raises_http(url, timeout=None):
+        raise urllib.error.HTTPError(url, 500, 'boom', {}, None)
+
+    import urllib.request
+    original = urllib.request.urlopen
+    urllib.request.urlopen = raises_http
+    try:
+        assert start.page_is_served('http://127.0.0.1:8000/') is True
+    finally:
+        urllib.request.urlopen = original
+
+
+def test_control_a_refused_connection_is_not_up():
+    """The control. The point of the probe is to tell those apart."""
+    import start
+    import urllib.request
+    original = urllib.request.urlopen
+
+    def refused(url, timeout=None):
+        raise ConnectionRefusedError('nothing listening')
+
+    urllib.request.urlopen = refused
+    try:
+        assert start.page_is_served('http://127.0.0.1:8000/') is False
+    finally:
+        urllib.request.urlopen = original
+
+
+def test_the_launcher_says_when_it_is_the_one_opening_a_window():
+    """So a refused page can be attributed. If this line is not above
+    it in the black window, the window came from somewhere else - a
+    pinned tab, a restored session, or a PWA Windows starts at
+    sign-in."""
+    source = (Path(__file__).resolve().parent.parent /
+              'start.py').read_text(encoding='utf-8')
+    assert "print('[launcher] opening the screen now')" in source
+    assert source.index('opening the screen now') < \
+        source.index('appwindow.open_window(url)')

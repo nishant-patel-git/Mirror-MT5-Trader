@@ -2192,11 +2192,6 @@
     html += line('B', row.symbol_b, market.leg_b_bid, market.leg_b_ask,
                  market.leg_b_quote_age_sec, market.leg_b_visible,
                  market.leg_b_tick_time);
-    html += '<tr class="spread"><th></th><td class="sym">spread</td>' +
-      cell(market.short_spread, 'c-bid') +
-      cell(market.long_spread, 'c-ask') +
-      width(market.short_spread, market.long_spread) +
-      '<td class="age c-age"></td></tr>';
     /*
         WHICH WAY EACH SIDE WANTS THE SPREAD TO GO, under the price it
         would be entered at.
@@ -2206,9 +2201,11 @@
         spread falls - High to Low. The Ask is where it can be BOUGHT,
         and a long makes money as it rises - Low to High.
     
-        Written under the numbers rather than in the header, because the
-        header is shared with the two LEG rows above, where bid and ask
-        are just a leg's own book and mean nothing about direction.
+        Directly ABOVE the spread row and in the same two columns, so
+        the label and the number it is about are read together. It is
+        not in the header: that is shared with the two LEG rows, where
+        bid and ask are just a leg's own book and mean nothing about
+        direction.
     */
     html += '<tr class="spread-hint"><th></th><td class="sym"></td>' +
       '<td class="c-bid hint-down" title="Selling the spread here. A ' +
@@ -2217,6 +2214,11 @@
       '<td class="c-ask hint-up" title="Buying the spread here. A long ' +
       'is in profit as the spread rises: Low to High.">L &rarr; H</td>' +
       '<td class="c-width"></td><td class="c-age"></td></tr>';
+    html += '<tr class="spread"><th></th><td class="sym">spread</td>' +
+      cell(market.short_spread, 'c-bid') +
+      cell(market.long_spread, 'c-ask') +
+      width(market.short_spread, market.long_spread) +
+      '<td class="age c-age"></td></tr>';
     return html + '</tbody></table>';
   }
 

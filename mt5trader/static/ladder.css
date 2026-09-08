@@ -1162,11 +1162,16 @@ table.unclaimed th, table.unclaimed td {
    quiet about everything else. */
 table.legbook tr.spread-hint td {
   font: bold 11px var(--mono);
-  text-align: center;
-  padding: 0 6px 2px;
-  border-top: 0;
+  /* RIGHT, like the prices underneath. Centred, the label floated off
+     the number it is about - the whole point is that the two are read
+     as one thing. */
+  text-align: right;
+  padding: 2px 6px 0;
+  border-bottom: 0;
   letter-spacing: 0.5px;
 }
+table.legbook tr.spread-hint + tr.spread td,
+table.legbook tr.spread-hint + tr.spread th { border-top: 0; }
 table.legbook tr.spread-hint td.hint-down {
   color: #1a7a3c;
   background: #e8f6ec;

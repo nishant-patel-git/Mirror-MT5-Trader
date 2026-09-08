@@ -1191,8 +1191,13 @@ def test_control_the_hint_is_only_on_the_spread_row():
               'app.js').read_text(encoding='utf-8')
     assert app_js.count('hint-down') == 1
     assert app_js.count('hint-up') == 1
-    # It comes AFTER the spread row, not in the header.
-    assert app_js.index("<tr class=\"spread\">") < app_js.index('spread-hint')
+    # Directly ABOVE the spread row, so the label and the number it is
+    # about are read together - and never in the shared header.
+    assert app_js.index('spread-hint') < app_js.index('<tr class=\"spread\">')
+    between = app_js[app_js.index('spread-hint'):
+                     app_js.index('<tr class=\"spread\">')]
+    assert '<tr' not in between.replace('spread-hint', ''), \
+        'something was inserted between the hint and the row it labels'
 
 
 # --- A stray Python must not block the install --------------------------

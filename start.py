@@ -213,8 +213,24 @@ def open_window_wanted(config_path):
     return bool(setting)
 
 
+def page_is_served(url):
+    """Did the screen actually answer? Injected in tests as `probe`."""
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=2.0):
+            return True
+    except urllib.error.HTTPError:
+        # It ANSWERED. A 404 or a 500 is a served page, and the screen
+        # is what shows the reason - refusing to open the window over
+        # it would hide the only diagnosis there is.
+        return True
+    except Exception:
+        return False
+
+
 def wait_until_serving(host, port, timeout=45.0, step=0.25,
-                       sleep=time.sleep, now=time.monotonic):
+                       sleep=time.sleep, now=time.monotonic, probe=None):
     """Block until the web process is actually accepting connections.
 
     A fixed `sleep(2)` used to stand here, and on a PC that had just
@@ -223,14 +239,21 @@ def wait_until_serving(host, port, timeout=45.0, step=0.25,
     the app themselves, and ended up with two windows on the same
     screen.
 
-    The port is the only honest signal - the web child imports Flask,
-    reads the config and binds, and how long that takes is a property
-    of the machine, not a number anybody can pick. Returns True when it
-    is up, False if it never came.
+    A REAL REQUEST, not a bare TCP connect. The listening socket exists
+    from the moment the server binds, which is before it can answer
+    anything - a connect that succeeds there proves only that the port
+    is taken. Asking for the page proves the page is servable, which is
+    the thing the window is about to do.
+
+    How long that takes is a property of the machine, not a number
+    anybody can pick. Returns True when it is up, False if it never
+    came.
     """
+    probe = probe or page_is_served
+    url = f'http://{host}:{port}/'
     deadline = now() + timeout
     while now() < deadline:
-        if port_in_use(host, port):
+        if probe(url):
             return True
         sleep(step)
     return False
@@ -330,6 +353,13 @@ def main():
         # leaves the screen to the window the trader already keeps.
         if not args.no_browser and open_window_wanted(args.config):
             if wait_until_serving(args.host, args.web_port):
+                # SAID, immediately before it happens. A trader who
+                # sees a refused page can now tell from this window
+                # whether it was this launcher that opened it - and if
+                # this line is not above it, it was something else:
+                # a pinned tab, a restored session, or a PWA that
+                # Windows starts at sign-in.
+                print('[launcher] opening the screen now')
                 # A WINDOW OF ITS OWN, not a tab. See
                 # mt5trader/appwindow.py for why that matters on a
                 # screen that sends live orders.
