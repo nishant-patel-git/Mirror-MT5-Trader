@@ -142,6 +142,32 @@ def expand_preset(preset, contract_a='', contract_b=''):
     return symbol_a, symbol_b
 
 
+def expand_name(preset, contract_a='', contract_b=''):
+    """The pair's DISPLAY name, with the contract codes filled in too.
+
+    A preset's name may carry the token as its legs do -
+    `USOIL{contract} | UKOIL{contract}` - and it was the only field
+    that never had it substituted. The result reached the ladder
+    header and the Pairs table literally, so a desk read
+    `USOIL{contract} | UKOIL{contract}` above a ladder trading
+    USOILX6.c against UKOILX6.s.
+
+    Leg A's code fills the first token and leg B's the rest: a pair
+    whose two legs are different months would otherwise be named after
+    one of them twice.
+    """
+    name = str(preset.get('name') or '')
+    if not name:
+        return name
+    contract_a = str(contract_a or '').strip()
+    contract_b = str(contract_b or '').strip()
+    if CONTRACT_TOKEN in name and contract_a:
+        name = name.replace(CONTRACT_TOKEN, contract_a, 1)
+    if contract_b:
+        name = name.replace(CONTRACT_TOKEN, contract_b)
+    return name.replace(CONTRACT_TOKEN, contract_a).strip()
+
+
 #: How the two accounts are named: `AC-` and the MT5 login.
 #:
 #: The name is what the ladder header prints - `AC-100015 -> AC-100016`
@@ -521,7 +547,7 @@ def _run_gui(root, terminal_a, terminal_b):          # pragma: no cover
                 symbol_a, symbol_b = expand_preset(preset, con_a.get(),
                                                    con_b.get())
                 pair_type = preset.get('pair_type', 'SPOT_FUTURE')
-                name = preset.get('name')
+                name = expand_name(preset, con_a.get(), con_b.get())
             else:
                 symbol_a, symbol_b = sym_a.get(), sym_b.get()
                 # RELATED: the reading with NO fair value, which is the

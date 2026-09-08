@@ -1260,3 +1260,37 @@ def test_control_the_requirements_are_why_3_7_cannot_be_allowed():
     assert 'pytest>=8' in requirements
     assert 'python-dotenv>=1' in requirements
     assert '3.7' not in ROLLOUT['python_versions']
+
+
+# --- The pair's name is a field like any other --------------------------
+
+
+def test_the_contract_code_reaches_the_pair_name_too():
+    """A desk read `USOIL{contract} | UKOIL{contract}` above a ladder
+    that was trading USOILX6.c against UKOILX6.s. Every other field
+    had the token substituted; the NAME was the one that never did,
+    and the name is what the ladder header and the Pairs table show."""
+    preset = {'label': 'x', 'name': 'USOIL{contract} | UKOIL{contract}',
+              'leg_a': 'USOIL{contract}.c', 'leg_b': 'UKOIL{contract}.s',
+              'pair_type': 'RELATED'}
+    assert configure.expand_name(preset, 'X6', 'X6') == 'USOILX6 | UKOILX6'
+    assert '{contract}' not in configure.expand_name(preset, 'X6', 'X6')
+
+
+def test_two_different_months_are_named_after_the_right_leg_each():
+    """A calendar spread dates both legs. Leg A's code fills the first
+    token and leg B's the rest, or the pair is named after one month
+    twice."""
+    preset = {'label': 'x', 'name': 'GC{contract} vs GC{contract}',
+              'leg_a': 'GC{contract}', 'leg_b': 'GC{contract}',
+              'pair_type': 'FUTURE_FUTURE'}
+    assert configure.expand_name(preset, 'Z6', 'H7') == 'GCZ6 vs GCH7'
+
+
+def test_control_a_name_with_no_token_is_left_exactly_as_it_is():
+    """The control. Most presets do not date their name at all, and
+    substitution must not touch them."""
+    preset = {'label': 'x', 'name': 'XAUUSD | GCZ6',
+              'leg_a': 'XAUUSD.c', 'leg_b': 'GCZ6.s'}
+    assert configure.expand_name(preset, 'Z6', 'Z6') == 'XAUUSD | GCZ6'
+    assert configure.expand_name({'label': 'x'}, 'Z6', 'Z6') == ''
