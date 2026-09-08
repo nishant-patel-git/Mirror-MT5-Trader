@@ -17,6 +17,7 @@ ships and there is no new build toolchain.
 """
 
 import os
+from pathlib import Path
 
 from mt5trader import appwindow
 
@@ -110,21 +111,72 @@ def test_a_browser_that_will_not_start_falls_back_and_says_so():
 
     ok = appwindow.open_window(
         'http://127.0.0.1:8000/', browser='msedge.exe', env=WINDOWS_ENV,
-        spawn=explodes, say=said.append)
+        spawn=explodes, say=said.append, open_browser=opened.append)
 
     assert ok is False
     assert any('could not open the app window' in line for line in said)
     assert any('Access is denied' in line for line in said)
+    # It really did fall back - and to the FAKE, not to this machine's
+    # actual browser. See the note below.
+    assert opened == ['http://127.0.0.1:8000/']
 
 
 def test_no_chromium_at_all_still_opens_the_terminal():
-    said = []
+    said, opened = [], []
     ok = appwindow.open_window(
         'http://127.0.0.1:8000/', browser=None,
         env={'PROGRAMFILES': r'C:\nope', 'LOCALAPPDATA': r'C:\tmp'},
-        spawn=lambda argv: None, say=said.append)
+        spawn=lambda argv: None, say=said.append, open_browser=opened.append)
     assert ok is False
     assert any('ordinary browser' in line for line in said)
+    assert opened == ['http://127.0.0.1:8000/']
+
+
+# -- the safety tests must not open the trader's browser -----------------
+#
+#     Both tests above end in the fallback, and until now the fallback
+#     called webbrowser.open directly - there was no way to intercept
+#     it. So every run of the suite opened two real tabs at
+#     127.0.0.1:8000, on a machine where nothing was serving that port
+#     yet: the tests run BEFORE the engine starts.
+#
+#     The trader saw two "This site can't be reached" tabs as SETUP
+#     finished, and two more when NEXUS started and ran the suite
+#     again. Four tabs that looked exactly like a failed install, from
+#     a suite that had passed.
+
+
+def test_the_fallback_can_be_intercepted():
+    """A function whose side effect cannot be intercepted is one that
+    cannot be tested without doing it."""
+    import inspect
+    assert 'open_browser' in inspect.signature(
+        appwindow.open_window).parameters
+
+
+def test_no_test_reaches_a_real_browser():
+    """Every call in this file that can land in the fallback passes a
+    fake. Checked as text, because the failure is invisible from
+    inside the suite: it looks like a pass and a browser tab."""
+    import re
+    source = Path(__file__).read_text(encoding='utf-8')
+    for call in re.findall(r'appwindow\.open_window\((?:[^()]|\([^()]*\))*\)',
+                           source):
+        if 'spawn=spawned.append' in call:
+            continue          # the control: it never reaches the fallback
+        assert 'open_browser=' in call, call
+
+
+def test_control_the_real_browser_is_still_the_default():
+    """The control. Injectable must not mean 'does nothing unless
+    asked' - on a desk with no Edge or Chrome, the ordinary browser IS
+    how the trader gets their screen."""
+    import inspect
+    assert inspect.signature(
+        appwindow.open_window).parameters['open_browser'].default is None
+    source = inspect.getsource(appwindow.open_window)
+    assert 'import webbrowser' in source
+    assert 'open_browser = webbrowser.open' in source
 
 
 def test_the_window_opens_when_the_browser_is_there():
