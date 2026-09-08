@@ -1157,6 +1157,25 @@ table.unclaimed th, table.unclaimed td {
 .adopt-form select:disabled,
 .adopt-form .btn:disabled { opacity: 0.5; }
 
+/* Which way each side of the spread wants it to go. Read at a glance,
+   under the price it would be entered at - so it is bold, coloured and
+   quiet about everything else. */
+table.legbook tr.spread-hint td {
+  font: bold 11px var(--mono);
+  text-align: center;
+  padding: 0 6px 2px;
+  border-top: 0;
+  letter-spacing: 0.5px;
+}
+table.legbook tr.spread-hint td.hint-down {
+  color: #1a7a3c;
+  background: #e8f6ec;
+}
+table.legbook tr.spread-hint td.hint-up {
+  color: #b3261e;
+  background: #fdeaea;
+}
+
 /* -- taskbar -------------------------------------------------------- */
 
 #taskbar {
