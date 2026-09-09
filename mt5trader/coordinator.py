@@ -2063,12 +2063,33 @@ class Coordinator:
             if not self.session_clock.due(key):
                 continue
             self.session_clock.mark(key)
+            # COUNT WHAT WAS ACTUALLY CANCELLED, not what was asked.
+            #
+            # The answer was discarded and the event reported
+            # len(expired) either way, so a cancel that FAILED was
+            # published as a cancel that worked. A DAY order still
+            # resting at the session cutoff can fill overnight and put
+            # a leg on with nobody watching, and the one record of the
+            # cutoff said it had been pulled.
             expired = day_orders(self.book.orders(key))
+            cancelled, stuck = 0, []
             for order in expired:
-                self.cancel_order(order.order_id)
+                # cancel_order, NOT _cancel_order: run_session_cutoff is
+                # called from the poll loop WITHOUT the lock, so the
+                # locking wrapper is the one that belongs here. The
+                # lock is an RLock, so this is safe from a holder too.
+                if self.cancel_order(order.order_id).get('ok'):
+                    cancelled += 1
+                else:
+                    stuck.append(order.order_id)
+            if stuck:
+                logging.critical(
+                    '%s: %d DAY order(s) could NOT be cancelled at the '
+                    'session cutoff and may still be resting at the '
+                    'broker: %s', key, len(stuck), ', '.join(stuck))
             if expired:
                 events.append({'pair': key, 'action': 'day_orders_cancelled',
-                               'count': len(expired)})
+                               'count': cancelled, 'failed': stuck})
             md = self.market.get(key)
             for position in self.book.positions(key):
                 # "In profit" is NET P&L, less THIS ladder's commission —

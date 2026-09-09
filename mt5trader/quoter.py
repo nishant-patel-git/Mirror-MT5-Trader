@@ -577,7 +577,33 @@ class Quoter:
             reason = (f"the hedge was rejected: {cross.get('error')} — "
                       f"unwinding leg {group.leg.upper()}")
             logging.critical("%s: %s", pair.key, reason)
-            self.executor._unwind_leg(pair, group.leg, quote_side, quote_fill)
+            # THE UNWIND'S ANSWER IS READ, and this is the worse of the
+            # two places it was thrown away.
+            #
+            # A resting order fills when the market comes to it, which
+            # may be an hour after the click and with nobody watching.
+            # If the hedge is then rejected and the unwind ALSO fails,
+            # the trader owns an outright position they never asked
+            # for and were never told about.
+            #
+            # The naked BANNER cannot cover this: it scans positions in
+            # the BOOK for one leg on and one off, and a fill that was
+            # never booked is not there to scan. So it is said here, at
+            # CRITICAL, with the tickets - which now reaches a file on
+            # disk - and carried out in the event this returns.
+            naked = None
+            undo = self.executor._unwind_leg(pair, group.leg, quote_side,
+                                             quote_fill)
+            if not undo.get('ok'):
+                naked = {'leg': group.leg.upper(),
+                         'symbol': self.executor._symbol(pair, group.leg),
+                         'volume': filled, 'tickets': tickets,
+                         'why': undo.get('error')}
+                reason = (f"{reason} — AND THE UNWIND FAILED "
+                          f"({undo.get('error')}): {filled:g} lots of "
+                          f"{naked['symbol']} are ON and unhedged, "
+                          f"tickets {', '.join(str(t) for t in tickets)}")
+                logging.critical("%s: %s", pair.key, reason)
             # If the crossing account cannot trade, none of the remaining
             # synthetics on this pair can complete either.
             self._pull_pair(pair, reason)
@@ -587,7 +613,8 @@ class Quoter:
                     order.reason = reason
             return {'group': (group.pair_key, group.side.value, group.level,
                               group.position_id),
-                    'action': 'hedge_rejected', 'reason': reason}
+                    'action': 'hedge_rejected', 'reason': reason,
+                    'naked': naked}
 
         fills = ({'a': cross, 'b': quote_fill} if group.leg == 'b'
                  else {'a': quote_fill, 'b': cross})
