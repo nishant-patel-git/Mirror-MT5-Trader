@@ -32,6 +32,28 @@ import time
 
 from .models import MAGIC_NUMBER, OrderSide
 
+#: The comment we write on every order this system places. Positions
+#: carrying it are OURS by definition - the broker is quoting our own
+#: words back at us - so one that is missing from the book is a
+#: BOOKKEEPING failure, never a stray position to be tidied away.
+OUR_COMMENT_TAGS = ('LADDER', 'HEDGE')
+
+
+def is_ours(position):
+    """Did THIS system place the order that opened this position?
+
+    Read off the broker's own copy of the comment we wrote. A position
+    that answers yes is never auto-closed: if it is not in our book,
+    the book is wrong, and closing a real trade to tidy up a
+    bookkeeping error is the worst available outcome.
+
+    Errs towards LEAVING IT ALONE. An unreadable or missing comment
+    answers no, which is the old behaviour - this only ever adds
+    protection, never removes it.
+    """
+    comment = str((position or {}).get('comment') or '').strip().upper()
+    return any(comment.startswith(tag) for tag in OUR_COMMENT_TAGS)
+
 
 class Reconciler:
     def __init__(self, config, legs, book, executor, clock=time.time):
@@ -111,6 +133,46 @@ class Reconciler:
                 if key in self.unclaimed:
                     # Older than this process, and unexplained. It is on
                     # the screen for a person; it is not ours to close.
+                    continue
+                if is_ours(position):
+                    """OURS, and the book lost it. Never close it.
+
+                    A trader put a spread on and watched both legs
+                    close sixty seconds later - three strikes at a
+                    twenty-second poll - with RECONCILE in the MT5
+                    Reason column. The positions were ours: they
+                    carried the LADDER tag this system writes on every
+                    order it sends.
+
+                    positions_by_magic did not report the comment, so
+                    the reconciler compared tickets and nothing else.
+                    A leg we placed that had fallen out of the book was
+                    indistinguishable from a stray position somebody
+                    opened by hand, and the tidy-up closed real trades.
+
+                    The magic number alone cannot settle this: it is
+                    shared by every desk running this system against
+                    the same terminal, and it is on the reconciler's
+                    own closes too. The COMMENT is the thing only we
+                    write.
+
+                    So: never auto-closed, put on the screen for a
+                    person, and said in the log at CRITICAL - because
+                    reaching here at all means the book lost something
+                    it opened, which is a fault worth chasing even
+                    though the money is now safe.
+                    """
+                    logging.critical(
+                        "%s:%s carries OUR comment (%s) but is not in the "
+                        "book - NOT closing it. The book lost a position "
+                        "this system opened; adopt or close it by hand.",
+                        account, ticket, position.get('comment'))
+                    self.unclaimed[key] = dict(position, account=account)
+                    report['orphans'].append(
+                        dict(position, account=account, strikes=0,
+                             held='this carries our own order comment, so '
+                                  'it is ours and is never auto-closed - '
+                                  'the book lost it'))
                     continue
                 if not self.book_complete:
                     # We are not sure our book is the whole truth, so we

@@ -28,15 +28,22 @@ def engine(config, pair, legs, tmp_path):
 
 
 def an_orphan(legs, symbol='GC1226', side=OrderSide.SELL, volume=0.1,
-              account='acct_b'):
+              account='acct_b', comment='stray'):
     """A position carrying OUR magic that the book has never heard of.
 
     That is what an orphan is: a fill of ours we lost track of — not the
     trader's own terminal click, which carries a different magic and is
     never ours to touch.
+
+    The default comment is deliberately NOT one of ours. This helper
+    used to open every orphan with `LADDER-lost`, which under the rule
+    added after a live incident means "this system placed it" — and a
+    position that says that is never auto-closed. The tests below are
+    about the OTHER case: our magic, on a position we cannot show we
+    placed, which is the only kind the reconciler may tidy away.
     """
     result = legs[account].broker.send_market_order(symbol, side, volume,
-                                                    comment='LADDER-lost')
+                                                    comment=comment)
     return result.ticket
 
 
@@ -480,3 +487,76 @@ def test_the_half_filled_form_survives_a_snapshot():
     operator's hands."""
     assert "adopt: {pair: '', a: '', b: ''}" in APP_JS
     assert "state.adopt.a = e.target.value" in APP_JS
+
+
+# --- Never close a position this system opened --------------------------
+#
+#     A trader put a spread on and watched both legs close sixty
+#     seconds later - three strikes at a twenty-second poll - with
+#     RECONCILE in the MT5 Reason column. The positions were ours: they
+#     carried the LADDER tag this system writes on every order it
+#     sends.
+#
+#     positions_by_magic did not report the comment, so the reconciler
+#     compared TICKETS and nothing else. A leg we placed that had
+#     fallen out of the book was indistinguishable from a stray
+#     position somebody opened by hand.
+
+from mt5trader.reconcile import is_ours                      # noqa: E402
+
+
+def test_a_position_carrying_our_own_comment_is_ours():
+    assert is_ours({'comment': 'LADDER0001-887b:A'})
+    assert is_ours({'comment': 'HEDGE0002-aa11'})
+    assert is_ours({'comment': 'ladder0003-66a1:A'})     # case, and spacing
+    assert is_ours({'comment': '  LADDER0004-1234  '})
+
+
+def test_control_anything_else_is_not_and_the_old_path_still_applies():
+    """The control that keeps this from becoming 'never close
+    anything'. A stray position with no comment, or somebody's manual
+    trade, is exactly what the reconciler exists for."""
+    for comment in ('', None, 'manual', 'RECONCILE', 'UNCLAIMED'):
+        assert not is_ours({'comment': comment}), comment
+    assert not is_ours({})
+    assert not is_ours(None)
+
+
+def test_the_broker_reports_the_comment_at_all():
+    """The root cause. Without this field the guard above can never
+    fire, however correct it is."""
+    from pathlib import Path
+    source = (Path(__file__).resolve().parent.parent / 'mt5trader' /
+              'broker.py').read_text(encoding='utf-8')
+    block = source[source.index('def positions_by_magic'):]
+    block = block[:block.index('def account_is_hedging')]
+    assert "'comment': p.comment or ''," in block
+
+
+def test_our_own_leg_is_never_auto_closed(config, pair, legs, tmp_path):
+    """The whole point, end to end: a position at the broker carrying
+    our comment, missing from the book, survives every strike."""
+    from mt5trader.database import Store
+    from mt5trader.models import OrderSide
+    ticket = an_orphan(legs, 'XAUUSD_', OrderSide.BUY, 0.1, 'acct_a',
+                       comment='LADDER0001-887b:A')
+    broker = legs['acct_a'].broker
+    assert ticket
+    coordinator = Coordinator(config, legs, sleep=lambda s: None,
+                              store=Store(str(tmp_path / 'test.db')))
+    coordinator.start()
+    coordinator.poll_once()
+    coordinator.reconciler.book_complete = True
+    coordinator.reconciler.unclaimed = {}
+
+    reports = [coordinator.reconciler.run() for _ in range(6)]
+
+    # Six passes is twice the strikes it takes to close an orphan.
+    assert all(r['closed'] == [] for r in reports), 'we closed our own leg'
+    assert broker.open_positions(), 'the money is gone'
+    # Said on the first pass, and on the screen from then on: after it
+    # is listed as unclaimed it is a person's to decide, which is the
+    # same place it ends up either way.
+    held = [row for row in reports[0]['orphans'] if row.get('held')]
+    assert held and 'our own order comment' in held[0]['held']
+    assert ('acct_a', str(ticket)) in coordinator.reconciler.unclaimed

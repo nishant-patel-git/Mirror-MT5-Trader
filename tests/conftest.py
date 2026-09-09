@@ -322,7 +322,14 @@ class FakeBroker:
         never touched — and never mistaken for ours."""
         return [{'ticket': p['ticket'], 'symbol': p['symbol'],
                  'side': p['side'], 'volume': p['volume'],
-                 'price_open': p['price_open']}
+                 'price_open': p['price_open'],
+                 # The COMMENT, because the real broker reports it and
+                 # the reconciler needs it to tell one of OUR legs from
+                 # a stray position. This double omitted it exactly as
+                 # the real one did, which is why no test caught the
+                 # day a trader's own spread was closed sixty seconds
+                 # after they put it on.
+                 'comment': p.get('comment', '')}
                 for p in self.positions.values()
                 if p['magic'] == MAGIC_NUMBER
                 and (symbol is None or p['symbol'] == symbol)]

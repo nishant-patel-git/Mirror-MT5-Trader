@@ -819,6 +819,13 @@ class BrokerSession:
                          else 'SELL'),
                 'volume': p.volume,
                 'price_open': p.price_open,
+                # THE COMMENT, which is what we wrote on the order that
+                # opened it. Without it the reconciler compares tickets
+                # and nothing else, so a leg WE placed that is missing
+                # from our book is indistinguishable from a stray
+                # position somebody opened by hand - and it closed one
+                # sixty seconds after the trader put it on.
+                'comment': p.comment or '',
             })
         return out
 
