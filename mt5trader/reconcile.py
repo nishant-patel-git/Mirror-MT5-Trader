@@ -56,12 +56,21 @@ def is_ours(position):
 
 
 class Reconciler:
-    def __init__(self, config, legs, book, executor, clock=time.time):
+    def __init__(self, config, legs, book, executor, clock=time.time,
+                 store=None):
         self.config = config
         self.legs = legs
         self.book = book
         self.executor = executor
         self.clock = clock
+        #: OUR OWN record of every ticket the book has ever held, which
+        #: is the answer to 'did we place this' that does not depend on
+        #: a broker. See database.py's our_tickets table. None where
+        #: there is no database, and then only the comment and the book
+        #: are left - which is the old behaviour, not a worse one.
+        self.store = store
+        self._ledger = set()
+        self._ledger_read = 0.0
         self.orphan_strikes = {}       # (account, ticket) -> count
         self.ghost_strikes = {}        # position_id -> count
         self.close_failures = {}       # (account, ticket) -> failed closes
@@ -104,7 +113,7 @@ class Reconciler:
                 continue
             broker[name] = {str(p['ticket']): p for p in positions}
 
-        known = self.known_tickets()
+        known = self.known_tickets() | self.ledger()
         # The same TICKET seen under another account name is the same
         # position seen through a second connection to one terminal —
         # which is what two configured accounts sharing an MT5 login
@@ -235,6 +244,33 @@ class Reconciler:
                 for ticket in fill.position_tickets:
                     known.add((fill.account, str(ticket)))
         return known
+
+    #: How often the ledger is re-read. It only grows, and a ticket
+    #: that appears between reads is still covered by the book itself -
+    #: this is the memory of tickets the book has FORGOTTEN.
+    LEDGER_REFRESH_SEC = 30.0
+
+    def ledger(self):
+        """Every (account, ticket) we have ever held, from OUR records.
+
+        Re-read rather than held forever, so a ticket stamped by this
+        poll is known to the next one. A database that will not read
+        gives an EMPTY set and says so - never an exception out of the
+        reconciler, and never a claim that nothing is ours.
+        """
+        if self.store is None:
+            return set()
+        if self.clock() - self._ledger_read < self.LEDGER_REFRESH_SEC:
+            return self._ledger
+        try:
+            self._ledger = self.store.our_tickets()
+        except Exception as e:                       # a broken database
+            logging.critical(
+                'could not read the ticket ledger (%s) - falling back to '
+                'the book and the order comment alone for this pass', e)
+            self._ledger = set()
+        self._ledger_read = self.clock()
+        return self._ledger
 
     def _missing_legs(self, position, broker):
         missing = []

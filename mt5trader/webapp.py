@@ -1145,6 +1145,15 @@ def main():
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8000)
     args = parser.parse_args()
+    # The screen's own process logs too: a refused command, a lock, a
+    # settings change. Without it the only record of what the operator
+    # did was the console window they closed.
+    from . import logsetup
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s - %(levelname)s - [web] '
+                               '%(message)s',
+                        handlers=[logging.StreamHandler()])
+    logsetup.setup('web')
     app = create_app(args.status, args.commands, args.results, args.config,
                      args.db)
     app.run(host=args.host, port=args.port, threaded=True)

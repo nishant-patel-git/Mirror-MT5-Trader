@@ -92,6 +92,29 @@ CREATE TABLE IF NOT EXISTS fills (
 CREATE INDEX IF NOT EXISTS fills_time ON fills (broker_time_ms);
 CREATE INDEX IF NOT EXISTS fills_pair ON fills (pair_key, broker_time_ms);
 
+-- EVERY POSITION TICKET THIS SYSTEM HAS EVER HELD, and the one table
+-- that answers "did we place this?" without asking the broker.
+--
+-- A trader watched both legs of a live spread close sixty seconds
+-- after they put it on, because a position that had fallen out of the
+-- book looked exactly like a stray position to the reconciler. The
+-- first fix read the order COMMENT back off the broker - true, but it
+-- is the broker's copy of our words, and comments are truncated,
+-- dropped or reformatted differently by every liquidity provider. A
+-- desk that changes LP must not silently lose a money guard.
+--
+-- This is OUR record, written the moment the book holds a ticket, kept
+-- after the book stops holding it, and unchanged by any LP. Rows are
+-- never deleted: the whole value is remembering a ticket the book has
+-- forgotten.
+CREATE TABLE IF NOT EXISTS our_tickets (
+    account         TEXT NOT NULL,
+    ticket          TEXT NOT NULL,
+    first_seen      REAL NOT NULL,
+    pair_key        TEXT,
+    PRIMARY KEY (account, ticket)
+);
+
 -- Everything else worth being able to answer "what happened at 14:32?"
 -- with: refusals, sweeps, reconciler decisions, session cutoffs.
 CREATE TABLE IF NOT EXISTS events (
@@ -161,6 +184,32 @@ class Store:
                  row['click_to_on_ms'], json.dumps(row['leg_a']),
                  json.dumps(row['leg_b'])))
         return position
+
+    def remember_tickets(self, rows):
+        """Stamp (account, ticket, pair_key) as ours. Idempotent.
+
+        Called on every poll with whatever the book is holding, so a
+        ticket is in here from the first snapshot after it fills and
+        stays here for good. INSERT OR IGNORE, so the first_seen of a
+        ticket is the first time we saw it and not the last.
+        """
+        rows = [r for r in (rows or []) if r and r[0] and r[1]]
+        if not rows:
+            return 0
+        now = time.time()
+        with self._connect() as connection:
+            connection.executemany(
+                'INSERT OR IGNORE INTO our_tickets '
+                '(account, ticket, first_seen, pair_key) VALUES (?,?,?,?)',
+                [(str(a), str(t), now, key) for a, t, key in rows])
+        return len(rows)
+
+    def our_tickets(self):
+        """Every (account, ticket) this system has ever held."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                'SELECT account, ticket FROM our_tickets').fetchall()
+        return {(str(r['account']), str(r['ticket'])) for r in rows}
 
     def open_positions(self):
         """Every position that was open when we last wrote it.
