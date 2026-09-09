@@ -284,3 +284,32 @@ def test_control_the_pane_learns_only_whether_a_pin_exists():
     assert 'NEXUS_PIN_HASH' not in SETTINGS_JS
     assert 'NEXUS_PIN_HASH' not in APP_JS
     assert 'NEXUS_PIN_HASH' not in INDEX
+
+
+# --- A volume that is not zero must never print as zero ------------------
+#
+#     The Reconciler listed a stuck position as `0.00` and the trader
+#     read it as nothing being there. It was 0.001 lots - and that is
+#     the whole explanation of "it will not close, even from MT5": a
+#     volume under the symbol's minimum lot cannot be the subject of a
+#     legal close order, by us or by anybody.
+#
+#     The formatter that fixes it came from the orphan-leg work on
+#     another branch. This is the PROPERTY, asserted here so the two
+#     cells on the Reconciler tab cannot quietly go back to toFixed(2)
+#     - which is what printed real money as nothing.
+
+
+def test_the_reconciler_never_rounds_a_real_volume_away_to_zero():
+    assert 'fmt(row.volume, 2)' not in APP_JS, 'two decimals hides 0.001'
+    assert APP_JS.count('qty(row.volume)') == 2, (
+        'both volume cells on the Reconciler tab must go through qty()')
+
+
+def test_control_the_formatter_it_uses_really_does_keep_the_digits():
+    """The control. Naming a function is worthless if the function
+    rounds the same way - so this checks what qty() is built from."""
+    block = APP_JS[APP_JS.index('function qty(value)'):]
+    block = block[:block.index('\n  }')]
+    assert 'toFixed(6)' in block, 'six decimals is what keeps 0.001'
+    assert 'parseFloat' in block, 'and this is what drops the padding'

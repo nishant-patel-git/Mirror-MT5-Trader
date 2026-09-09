@@ -3392,7 +3392,7 @@
 
   function adoptRowLabel(row) {
     return row.account + ':' + row.ticket + '  ' + row.symbol + ' ' +
-      row.side + ' ' + fmt(row.volume, 2);
+      row.side + ' ' + qty(row.volume);
   }
 
   function adoptOptions(rows, account, chosen) {
