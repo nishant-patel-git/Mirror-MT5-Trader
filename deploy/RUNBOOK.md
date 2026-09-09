@@ -10,7 +10,6 @@ Once:
 cd C:\
 git clone https://github.com/ajoxf/MT5-Trader.git
 cd MT5-Trader
-git checkout claude/monitoring-positions-market-grid-17nyys
 powershell -ExecutionPolicy Bypass -File deploy\bootstrap.ps1
 ```
 
