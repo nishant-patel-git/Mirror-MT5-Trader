@@ -475,6 +475,15 @@ class FakeBroker:
             'symbol': symbol, 'inst_type': 'DEAL', 'side': side.lower(),
             'pos_side': entry, 'order_type': 'market',
             'quantity': volume, 'fill_qty': volume, 'fill_price': price,
+            # THE SAME KEYS THE REAL order_log EMITS, NO MORE AND NO
+            # FEWER. This double used to be RICHER than the thing it
+            # doubles: it carried commission, swap and magic while
+            # BrokerSession.order_log emitted only their merged `fee`.
+            # Tests asserting `fill['commission'] < 0` passed against
+            # the fake and could never have failed, while every real
+            # fill wrote NULL. A double that supplies what production
+            # does not manufactures confidence, which is worse than a
+            # gap. test_journal_row_shape pins the two key sets equal.
             'commission': -0.7 * volume, 'swap': 0.0,
             'fee': -0.7 * volume, 'fee_ccy': 'USD', 'pnl': profit,
             'state': 'filled',

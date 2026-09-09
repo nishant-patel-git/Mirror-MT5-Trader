@@ -753,12 +753,32 @@ class BrokerSession:
                     'quantity': deal.volume,
                     'fill_qty': deal.volume,
                     'fill_price': deal.price,
+                    # COMMISSION AND SWAP, SEPARATELY, AS THE BROKER
+                    # REPORTS THEM — and `fee` as their sum, which is
+                    # what the order log prints.
+                    #
+                    # Only `fee` used to be emitted. The journal's
+                    # commission and swap columns are read straight off
+                    # these keys, so they were NULL on every fill ever
+                    # written, and the totals - COALESCE(SUM(...), 0) -
+                    # published "$0.00" for a charge nobody had
+                    # measured. That number is the counterweight to the
+                    # TYPED COMMISSION_PER_LOT the P&L is marked with;
+                    # with both reading zero, a commission nobody
+                    # entered could never be caught, and EXIT_IF_PROFIT
+                    # would close a position still under water by it.
+                    #
+                    # None, not 0.0, where the broker reports nothing:
+                    # unmeasured is not zero.
+                    'commission': deal.commission,
+                    'swap': deal.swap,
                     'fee': (deal.commission or 0.0) + (deal.swap or 0.0),
                     'fee_ccy': '',
                     'pnl': deal.profit or 0.0,
                     'state': 'filled',
                     'filled_at': int(deal.time) * 1000,
                     'position_id': deal.position_id,
+                    'magic': deal.magic,
                     'is_bot': deal.magic == MAGIC_NUMBER,
                     'comment': deal.comment or '',
                 })
@@ -790,11 +810,15 @@ class BrokerSession:
                     'quantity': order.volume_initial,
                     'fill_qty': 0.0,
                     'fill_price': order.price_open or 0.0,
+                    # An order that never dealt was charged nothing, and
+                    # carries no commission or swap of its own to read.
+                    'commission': None, 'swap': None,
                     'fee': 0.0, 'fee_ccy': '', 'pnl': 0.0,
                     'state': state,
                     'filled_at': int(getattr(order, 'time_done',
                                              order.time_setup)) * 1000,
                     'position_id': order.position_id,
+                    'magic': order.magic,
                     'is_bot': order.magic == MAGIC_NUMBER,
                     'comment': order.comment or '',
                 })
@@ -812,10 +836,13 @@ class BrokerSession:
                     'fill_qty': (order.volume_initial
                                  - order.volume_current),
                     'fill_price': order.price_open or 0.0,
+                    # Still resting: nothing dealt, so nothing charged.
+                    'commission': None, 'swap': None,
                     'fee': 0.0, 'fee_ccy': '', 'pnl': 0.0,
                     'state': 'working',
                     'filled_at': int(order.time_setup) * 1000,
                     'position_id': order.position_id,
+                    'magic': order.magic,
                     'is_bot': order.magic == MAGIC_NUMBER,
                     'comment': order.comment or '',
                 })

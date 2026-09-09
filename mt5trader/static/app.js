@@ -2850,13 +2850,9 @@
     var html = '<table><thead><tr><th>Pair</th><th>Side</th><th>Net</th>' +
       '<th>Avg entry</th><th>Mark</th><th>Open P&amp;L</th><th>Mode</th>' +
       '<th>Slip</th><th>Click→on</th><th>Legs</th><th></th></tr></thead><tbody>';
-    var total = 0;
     var any = false;
     eachPosition(function (key, row, position) {
       any = true;
-      if (position.net_pnl !== null && position.net_pnl !== undefined) {
-        total += position.net_pnl;
-      }
       html += '<tr data-position="' + position.position_id + '">';
       html += '<td>' + (row.name || key) + '</td>';
       html += '<td>' + position.side + '</td>';
@@ -2881,7 +2877,7 @@
     });
     if (!any) { html += '<tr><td colspan="11">nothing open</td></tr>'; }
     html += '</tbody></table>';
-    html += accountReconciliation(total);
+    html += accountReconciliation();
     return html;
   }
 
@@ -2898,30 +2894,58 @@
       (leg.contract_size || DASH) + '/lot';
   }
 
-  function accountReconciliation(ourTotal) {
-    // Our total against MT5's OWN per-account profit. A difference is a
-    // fault to be SHOWN, not smoothed.
-    var accounts = state.snapshot.accounts || {};
-    var theirs = 0;
-    var known = false;
-    Object.keys(accounts).forEach(function (name) {
-      var info = accounts[name];
-      if (info && typeof info.profit === 'number') {
-        theirs += info.profit;
-        known = true;
-      }
-    });
-    if (!known) {
-      return '<div class="note">MT5’s own profit could not be read, ' +
-        'so there is nothing to reconcile against — unmeasured, not zero.</div>';
+  function accountReconciliation() {
+    /* Our total against MT5's OWN per-account profit. A difference is a
+     * fault to be SHOWN, not smoothed.
+     *
+     * BOTH NUMBERS COME FROM THE ENGINE, and from ONE MOMENT. This
+     * used to add up the marks on screen and compare them against an
+     * account profit the engine caches for ~5s — a photo taken now
+     * against one taken five seconds ago. On a moving market they
+     * always differed by more than the one-cent tolerance, so the row
+     * was red every session; a light that is always on is one nobody
+     * reads. The engine now only takes the comparison on the passes
+     * where it read both halves together, and holds the answer between
+     * them (coordinator.pnl_check), so a cent of tolerance is honest
+     * and any red is real.
+     *
+     * The on-screen sum also quietly skipped positions that could not
+     * be marked, which made the total read as authoritative while
+     * being short one position. The engine's figure carries the
+     * unmeasured-is-not-zero rule instead: one unmarkable position
+     * makes the whole total unknown.
+     */
+    var check = state.snapshot.pnl_check;
+    if (!check) {
+      return '<div class="note">our P&amp;L and MT5’s own have not yet ' +
+        'been read together, so there is nothing to reconcile — ' +
+        'unmeasured, not zero.</div>';
     }
-    var difference = ourTotal - theirs;
-    var bad = Math.abs(difference) > 0.01;
+    if (check.ours === null || check.ours === undefined ||
+        check.theirs === null || check.theirs === undefined) {
+      return '<div class="note">' + (
+        check.theirs === null || check.theirs === undefined
+          ? 'MT5’s own profit could not be read'
+          : 'a position could not be marked, so our own total is unknown') +
+        ', so there is nothing to reconcile against — unmeasured, not ' +
+        'zero.</div>';
+    }
+    var bad = Math.abs(check.difference) > 0.01;
     return '<table><tbody><tr' + (bad ? ' class="mismatch"' : '') +
-      '><td>our total</td><td>' + money(ourTotal) +
-      '</td><td>MT5’s own</td><td>' + money(theirs) +
-      '</td><td>difference</td><td>' + money(difference) +
-      '</td></tr></tbody></table>';
+      '><td>our total</td><td>' + money(check.ours) +
+      '</td><td>MT5’s own</td><td>' + money(check.theirs) +
+      '</td><td>difference</td><td>' + money(check.difference) +
+      '</td><td>' + agoText(check.at) + '</td></tr></tbody></table>';
+  }
+
+  function agoText(at) {
+    // Both halves were read together AT THIS TIME — said out loud, so
+    // a figure that is a few seconds old is never mistaken for live.
+    var now = state.snapshot.at;
+    if (typeof at !== 'number' || typeof now !== 'number') { return ''; }
+    var seconds = Math.max(0, Math.round(now - at));
+    return seconds < 1 ? 'read together just now'
+      : 'read together ' + seconds + 's ago';
   }
 
   function ordersTable() {
@@ -3063,10 +3087,30 @@
     }
 
     var totals = journal.totals || {};
+    /* A CHARGE NOBODY MEASURED IS NOT A CHARGE OF ZERO.
+     *
+     * These two used to be COALESCE(SUM(...), 0) over a column that was
+     * NULL on every row, so the header stated "commission $0.00" for a
+     * cost the broker had really taken. It is the counterweight to the
+     * TYPED COMMISSION_PER_LOT the P&L is marked with, and a
+     * counterweight that always reads zero can never disagree.
+     *
+     * `n_measured` is how many fills carried a figure: none means "—",
+     * some-but-not-all means the total is real but PARTIAL, and saying
+     * which is the difference between a number and a guess.
+     */
+    function brokerCharge(value, measured, fills) {
+      if (!measured) { return DASH; }
+      return money(value) +
+        (measured < fills ? ' (' + measured + ' of ' + fills + ')' : '');
+    }
     html += '<table><tbody><tr><td>' + (totals.fills || 0) + ' fills</td>' +
       '<td>' + fmt(totals.volume, 2) + ' lots</td>' +
-      '<td>commission ' + money(totals.commission) + '</td>' +
-      '<td>swap ' + money(totals.swap) + '</td>' +
+      '<td>commission ' + brokerCharge(totals.commission,
+                                       totals.commission_measured,
+                                       totals.fills) + '</td>' +
+      '<td>swap ' + brokerCharge(totals.swap, totals.swap_measured,
+                                 totals.fills) + '</td>' +
       '<td>the broker\'s own P&amp;L ' +
       '<b class="' + upDown(totals.profit) + '">' + money(totals.profit) +
       '</b></td></tr></tbody></table>';

@@ -2047,7 +2047,8 @@ def test_the_journal_colours_what_was_made_and_what_was_lost(page):
                 return Promise.resolve(new Response(JSON.stringify({
                     ok: true,
                     totals: {fills: 3, volume: 3, commission: -2,
-                             swap: 0, profit: 64.9},
+                             commission_measured: 3, swap: 0,
+                             swap_measured: 3, profit: 64.9},
                     fills: [
                         {deal_id: '1', account: 'a', symbol: 'X',
                          side: 'buy', entry: 'close', volume: 1,
@@ -4532,3 +4533,148 @@ def test_control_a_close_that_worked_does_not_raise_an_error_toast(page):
             'a close that worked was reported as a refusal')
     finally:
         page.evaluate("() => document.getElementById('toasts').innerHTML = ''")
+
+
+def fills_totals(page, totals):
+    """Render the Fills tab against one totals block."""
+    page.evaluate("""(totals) => {
+        window.__realFetch = window.__realFetch || window.fetch;
+        window.fetch = function (url, options) {
+            if (String(url).indexOf('/api/fills') >= 0) {
+                return Promise.resolve(new Response(JSON.stringify({
+                    ok: true, totals: totals, fills: []}),
+                    {status: 200,
+                     headers: {'Content-Type': 'application/json'}}));
+            }
+            return window.__realFetch(url, options);
+        };
+        const UI = window.MT5Trader;
+        UI.state.fills = null;
+        UI.state.open = [UI.panelId('monitor')];
+        UI.state.monitorTab = 'fills';
+        UI.render();
+    }""", totals)
+    page.wait_for_function(
+        "() => document.querySelector('.monitor') && "
+        "document.querySelector('.monitor').textContent.indexOf('fills') >= 0",
+        timeout=WAIT)
+    return page.text_content('.monitor')
+
+
+def test_a_commission_nobody_measured_is_not_printed_as_zero(page):
+    """The SCREEN's half of the contract, pinned.
+
+    Said plainly: this one passes against the old build too. The
+    "$0.00" came from the database — COALESCE(SUM(commission), 0) over
+    a column that was NULL on every fill — and the old screen would
+    have rendered a true null as "—" if it had ever been handed one.
+    test_journal_row_shape.py is what catches that fault.
+
+    It is still worth pinning here. It is the screen half of the rule
+    the totals now depend on, and without it a later change that reads
+    the value instead of the COUNT would print "$0.00" again with
+    nothing to stop it.
+    """
+    try:
+        text = fills_totals(page, {'fills': 4, 'volume': 4, 'profit': -90.0,
+                                   'commission': None,
+                                   'commission_measured': 0,
+                                   'swap': None, 'swap_measured': 0})
+        assert 'commission $0.00' not in text, (
+            'a charge nobody measured was printed as zero')
+        assert 'commission —' in text, text[:400]
+    finally:
+        page.evaluate("() => { if (window.__realFetch) "
+                      "{ window.fetch = window.__realFetch; } }")
+
+
+def test_control_a_commission_the_broker_DID_report_is_printed(page):
+    """The control for the two above: without it, "always say —" would
+    pass, and that hides the real number as thoroughly as the zero did.
+    """
+    try:
+        text = fills_totals(page, {'fills': 4, 'volume': 4, 'profit': -90.0,
+                                   'commission': -9.0,
+                                   'commission_measured': 4,
+                                   'swap': -2.0, 'swap_measured': 4})
+        assert 'commission -$9.00' in text, text[:400]
+        assert 'swap -$2.00' in text, text[:400]
+    finally:
+        page.evaluate("() => { if (window.__realFetch) "
+                      "{ window.fetch = window.__realFetch; } }")
+
+
+def test_a_partial_commission_total_says_how_many_fills_it_covers(page):
+    try:
+        text = fills_totals(page, {'fills': 4, 'volume': 4, 'profit': -90.0,
+                                   'commission': -9.0,
+                                   'commission_measured': 2,
+                                   'swap': None, 'swap_measured': 0})
+        assert '(2 of 4)' in text, text[:400]
+    finally:
+        page.evaluate("() => { if (window.__realFetch) "
+                      "{ window.fetch = window.__realFetch; } }")
+
+
+def test_the_pnl_row_reports_when_the_two_halves_were_read_together(page):
+    """Our total against MT5's own. Both come from the ENGINE now, from
+    one moment, and the row says when — so a figure a few seconds old is
+    never mistaken for live."""
+    page.evaluate("""() => {
+        const UI = window.MT5Trader;
+        UI.state.snapshot.at = 1000.0;
+        UI.state.snapshot.pnl_check = {at: 996.0, ours: 7.0, theirs: 7.0,
+                                       difference: 0.0};
+        UI.state.open = [UI.panelId('monitor')];
+        UI.state.monitorTab = 'positions';
+        UI.render();
+    }""")
+    page.wait_for_function(
+        "() => document.querySelector('.monitor').textContent"
+        ".indexOf('read together') >= 0", timeout=WAIT)
+    text = page.text_content('.monitor')
+
+    assert 'read together 4s ago' in text
+    # Agreement is not a fault: the row must NOT be red.
+    assert page.locator('.monitor tr.mismatch').count() == 0, (
+        'two totals that agree were flagged as a disagreement')
+
+
+def test_control_a_real_disagreement_is_still_flagged_red(page):
+    """The control. The row exists to catch a genuine gap; a fix that
+    simply stopped reddening would remove the check entirely."""
+    page.evaluate("""() => {
+        const UI = window.MT5Trader;
+        UI.state.snapshot.at = 1000.0;
+        UI.state.snapshot.pnl_check = {at: 1000.0, ours: 7.0,
+                                       theirs: -21.0, difference: 28.0};
+        UI.state.open = [UI.panelId('monitor')];
+        UI.state.monitorTab = 'positions';
+        UI.render();
+    }""")
+    page.wait_for_function(
+        "() => document.querySelectorAll('.monitor tr.mismatch').length > 0",
+        timeout=WAIT)
+
+    assert '$28.00' in page.text_content('.monitor tr.mismatch')
+
+
+def test_an_unreadable_account_leaves_the_row_UNMEASURED(page):
+    """Unmeasured is not zero: an account that could not be read does
+    not make the difference nil, it makes it unknown."""
+    page.evaluate("""() => {
+        const UI = window.MT5Trader;
+        UI.state.snapshot.at = 1000.0;
+        UI.state.snapshot.pnl_check = {at: 1000.0, ours: 7.0,
+                                       theirs: null, difference: null};
+        UI.state.open = [UI.panelId('monitor')];
+        UI.state.monitorTab = 'positions';
+        UI.render();
+    }""")
+    page.wait_for_function(
+        "() => document.querySelector('.monitor').textContent"
+        ".indexOf('nothing to reconcile') >= 0", timeout=WAIT)
+    text = page.text_content('.monitor')
+
+    assert 'unmeasured, not zero' in text
+    assert '$0.00' not in text.split('nothing to reconcile')[0][-120:]
