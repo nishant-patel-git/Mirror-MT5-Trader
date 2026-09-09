@@ -152,9 +152,48 @@ class PairExecutor:
             reason = (f"only {matched:.0%} of the clip matched on both legs "
                       f"— unwinding rather than holding a part-hedged pair")
             logging.warning("%s: %s", pair.key, reason)
-            self._unwind_leg(pair, 'a', sides['a'], fills['a'])
-            self._unwind_leg(pair, 'b', sides['b'], fills['b'])
-            return ExecutionResult(False, reason=reason,
+            """THE UNWIND'S ANSWER IS READ. It used to be thrown away.
+
+            A trader clicked, one leg went on, the other did not, and
+            this branch tried to undo the one that had. If that undo
+            FAILED - a refused close, a ticket the broker would not
+            take back - nothing said so. No naked flag, no banner, no
+            log line above WARNING. The trader was left holding a
+            single unhedged leg while the screen showed a refusal, and
+            the first thing to notice was the reconciler closing it
+            forty-four seconds later.
+
+            The branch above, where the second leg is REJECTED
+            outright, has always reported `naked` and always said so
+            at CRITICAL. This one is the same fault with a quieter
+            cause - a partial fill rather than a rejection - and it
+            deserves the same treatment.
+
+            Only legs that actually FILLED are unwound. Asking to undo
+            a leg that never went on produced 'filled but reported no
+            position ticket', which is not a naked leg and must not be
+            reported as one."""
+            naked = None
+            for leg in ('a', 'b'):
+                fill = fills.get(leg) or {}
+                if not (fill.get('filled_volume') or 0.0):
+                    continue                 # nothing of ours went on
+                undo = self._unwind_leg(pair, leg, sides[leg], fill)
+                if undo.get('ok'):
+                    continue
+                naked = {
+                    'leg': leg.upper(),
+                    'symbol': self._symbol(pair, leg),
+                    'volume': fill.get('filled_volume'),
+                    'tickets': fill.get('position_tickets'),
+                    'why': undo.get('error'),
+                }
+                logging.critical(
+                    "%s: leg %s is ON and could NOT be unwound (%s) — %s "
+                    "lots of %s are naked at the broker",
+                    pair.key, leg.upper(), undo.get('error'),
+                    fill.get('filled_volume'), self._symbol(pair, leg))
+            return ExecutionResult(False, reason=reason, naked=naked,
                                    elapsed_ms=elapsed_ms, legs=fills)
 
         position = self._book_position(pair, side, spreads, plan, fills,

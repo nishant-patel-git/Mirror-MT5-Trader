@@ -333,3 +333,88 @@ def test_a_piece_one_leg_must_round_down_is_matched_on_the_other(
     # 0.60 on both, not 0.63 and 0.60.
     assert sent[pair.symbol_b] == pytest.approx(0.6)
     assert sent[pair.symbol_a] == pytest.approx(0.6)
+
+
+# --- A leg that went on and could not come off --------------------------
+#
+#     A trader clicked, ONE LEG EXECUTED, and the screen said the click
+#     was refused. Forty-four seconds later the reconciler closed the
+#     leg that was on.
+#
+#     The partial-match branch unwinds both legs and threw the answers
+#     away. When an unwind failed, nothing said so: no naked flag, no
+#     banner, nothing above WARNING in a log that did not reach disk.
+#     The branch beside it - where the second leg is REJECTED - has
+#     always reported it.
+
+
+def _partly_filled(config, pair, legs, monkeypatch):
+    """Leg A on, leg B not: the shape of the trader's click.
+
+    Forced through the MATCHED FRACTION, because that is the branch
+    that was silent - a leg B that half-fills is not a rejection, so
+    the code above this never runs.
+    """
+    resolved(pair, legs)
+    executor = PairExecutor(config, legs, sleep=lambda s: None)
+    monkeypatch.setattr(executor, '_matched_fraction', lambda *a, **k: 0.0)
+    return executor
+
+
+def test_a_leg_that_cannot_be_unwound_is_reported_as_naked(
+        config, pair, legs, monkeypatch):
+    """The whole point. A trader holding an unhedged leg must be told -
+    never left to find out when something else tidies it away."""
+    executor = _partly_filled(config, pair, legs, monkeypatch)
+    monkeypatch.setattr(executor, '_unwind_leg',
+                        lambda *a, **k: {'ok': False, 'error': 'refused'})
+
+    result = executor.market_entry(pair, SpreadSide.BUY,
+                                   snapshot(pair, legs), 1.0)
+
+    assert result.ok is False
+    assert result.naked, 'a leg is on at the broker and nothing said so'
+    assert result.naked['leg'] in ('A', 'B')
+    assert result.naked['why'] == 'refused'
+
+
+def test_control_an_unwind_that_works_reports_nothing_naked(
+        config, pair, legs, monkeypatch):
+    """The control. A refusal that really did undo itself must not
+    raise a naked alarm - a banner that cries wolf is one traders
+    learn to ignore."""
+    executor = _partly_filled(config, pair, legs, monkeypatch)
+    monkeypatch.setattr(executor, '_unwind_leg', lambda *a, **k: {'ok': True})
+
+    result = executor.market_entry(pair, SpreadSide.BUY,
+                                   snapshot(pair, legs), 1.0)
+
+    assert result.ok is False
+    assert result.naked is None
+
+
+def test_a_leg_that_never_filled_is_not_called_naked(
+        config, pair, legs, monkeypatch):
+    """Asking to undo a leg that never went on produced 'filled but
+    reported no position ticket'. That is not a naked leg, and
+    reporting it as one would put a critical banner on the screen for
+    a click that placed nothing."""
+    executor = _partly_filled(config, pair, legs, monkeypatch)
+    asked = []
+
+    def record(pair_, leg, side, fill):
+        asked.append(leg)
+        return {'ok': False, 'error': 'no position ticket'}
+
+    monkeypatch.setattr(executor, '_unwind_leg', record)
+    monkeypatch.setattr(executor, '_send_leg',
+                        lambda *a, **k: {'ok': True, 'filled_volume': 0.0,
+                                         'price': 100.0, 'ticket': None,
+                                         'position_tickets': []})
+
+    result = executor.market_entry(pair, SpreadSide.BUY,
+                                   snapshot(pair, legs), 1.0)
+
+    assert result.ok is False
+    assert asked == [], 'an unfilled leg was sent for unwinding'
+    assert result.naked is None
