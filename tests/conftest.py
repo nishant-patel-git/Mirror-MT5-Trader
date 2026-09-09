@@ -84,6 +84,13 @@ class FakeBroker:
         #: leg that goes on and then cannot be taken off again.
         self.fail_closes = set()
         self.reject_orders = {}          # symbol -> error string
+        #: symbol -> (lots that DEAL anyway, the broker's refusal).
+        #: The shape the real fault had: order_send answers with a
+        #: retcode that is not DONE, and a position is on regardless -
+        #: 10010 DONE_PARTIAL, or a rejection that lands after the
+        #: first deal. A fake that can only reject cleanly cannot see
+        #: it, which is why nothing caught this until a desk did.
+        self.refuse_but_fill = {}
         #: Margin per lot this terminal reports, or None for a broker
         #: that cannot price it.
         self.margin_per_lot = None
@@ -256,6 +263,21 @@ class FakeBroker:
         info = self.symbols[symbol]
         price = info.ask if side is OrderSide.BUY else info.bid
         ticket = self._ticket()
+        if symbol in self.refuse_but_fill:
+            dealt, error = self.refuse_but_fill[symbol]
+            dealt = min(float(dealt), float(volume))
+            magic = MAGIC_NUMBER if comment != 'by hand' else 0
+            self.positions[ticket] = {
+                'ticket': ticket, 'symbol': symbol, 'side': side.value,
+                'volume': dealt, 'price_open': price, 'magic': magic,
+                'comment': comment, 'profit': 0.0}
+            self._record_deal(symbol, side.value, dealt, price, 'open',
+                              comment, ticket, magic)
+            # The TICKET comes back with the refusal, exactly as
+            # BrokerSession does now: without it nothing upstream can
+            # find out that the refusal left a position on.
+            return OrderResult(False, requested_price=price, ticket=ticket,
+                               error=error)
         # HEDGING: this OPENS a position. It never closes another one.
         magic = MAGIC_NUMBER if comment != 'by hand' else 0
         self.positions[ticket] = {

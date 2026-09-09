@@ -293,22 +293,23 @@ def test_control_the_pane_learns_only_whether_a_pin_exists():
 #     the whole explanation of "it will not close, even from MT5": a
 #     volume under the symbol's minimum lot cannot be the subject of a
 #     legal close order, by us or by anybody.
+#
+#     The formatter that fixes it came from the orphan-leg work on
+#     another branch. This is the PROPERTY, asserted here so the two
+#     cells on the Reconciler tab cannot quietly go back to toFixed(2)
+#     - which is what printed real money as nothing.
 
 
-def test_a_real_volume_is_never_rounded_away_to_zero():
-    block = APP_JS[APP_JS.index('function lots(value)'):]
+def test_the_reconciler_never_rounds_a_real_volume_away_to_zero():
+    assert 'fmt(row.volume, 2)' not in APP_JS, 'two decimals hides 0.001'
+    assert APP_JS.count('qty(row.volume)') == 2, (
+        'both volume cells on the Reconciler tab must go through qty()')
+
+
+def test_control_the_formatter_it_uses_really_does_keep_the_digits():
+    """The control. Naming a function is worthless if the function
+    rounds the same way - so this checks what qty() is built from."""
+    block = APP_JS[APP_JS.index('function qty(value)'):]
     block = block[:block.index('\n  }')]
-    assert 'toFixed(digits)' in block
-    assert 'digits <= 8' in block, 'it gives up too early to show 0.001'
-    # The Reconciler's two volume cells go through it.
-    assert 'lots(row.volume)' in APP_JS
-    assert 'fmt(row.volume, 2)' not in APP_JS
-
-
-def test_control_an_ordinary_size_still_reads_as_two_decimals():
-    """The control. Every volume on the screen must not suddenly grow a
-    tail of digits - 1 lot is '1.00', not '1.00000000'."""
-    block = APP_JS[APP_JS.index('function lots(value)'):]
-    block = block[:block.index('\n  }')]
-    assert 'var digits = 2' in block
-    assert "if (value === 0) { return '0.00'; }" in block
+    assert 'toFixed(6)' in block, 'six decimals is what keeps 0.001'
+    assert 'parseFloat' in block, 'and this is what drops the padding'

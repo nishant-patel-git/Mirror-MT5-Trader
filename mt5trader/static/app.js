@@ -93,30 +93,6 @@
     return value.toFixed(digits === undefined ? 4 : digits);
   }
 
-  function lots(value) {
-    /* A VOLUME THAT IS NOT ZERO MUST NEVER PRINT AS ZERO.
-     *
-     * The Reconciler listed a stuck position as `0.00` because it was
-     * formatted to two decimals, and the trader read it as nothing
-     * being there. It was 0.001 lots - and that is the whole
-     * explanation of "it will not close, even from MT5": a volume
-     * under the symbol's minimum lot cannot be the subject of a legal
-     * close order, by us or by anybody.
-     *
-     * Two decimals for an ordinary size, more only when more is
-     * needed, and never a rounded-down zero standing for real money.
-     */
-    if (value === null || value === undefined || value === '') { return DASH; }
-    if (typeof value !== 'number' || !isFinite(value)) { return fmt(value, 2); }
-    if (value === 0) { return '0.00'; }
-    for (var digits = 2; digits <= 8; digits += 1) {
-      if (Math.abs(value) >= Math.pow(10, -digits) / 2) {
-        return value.toFixed(digits);
-      }
-    }
-    return value.toExponential(1);      // smaller than 1e-8, and still real
-  }
-
   // A SIZE, printed the way it was typed.
   //
   // Quantities are added and subtracted — a click walking down a stack
@@ -284,6 +260,21 @@
     var data = (result && result.data) || {};
     if (result && result.ok === false) {
       return toast(result.error || 'the engine refused that');
+    }
+    /* THE ENGINE'S OWN `ok`, WHICH IS NOT THE ENVELOPE'S.
+     *
+     * The envelope says whether the command RAN; the payload says
+     * whether the broker did the thing. A close that the broker
+     * refused came back {ok: false, error: '3677: ...'} inside an
+     * envelope that ran fine, and this function had no branch for it:
+     * no toast, no style, nothing. The operator clicked "Close it" on
+     * an unclaimed position, the broker said no, and the screen said
+     * NOTHING — which is what "there is no way to close it" looks
+     * like from the desk. A refusal carries the broker's own words
+     * (spec §11), and it has to reach the screen to do that.
+     */
+    if (data.ok === false) {
+      return toast(data.error || data.reason || 'the broker refused that');
     }
     if (data.refused) { return toast(data.reason || 'refused'); }
     if (data.reason) { return toast(data.reason, 'ok'); }
@@ -3401,7 +3392,7 @@
 
   function adoptRowLabel(row) {
     return row.account + ':' + row.ticket + '  ' + row.symbol + ' ' +
-      row.side + ' ' + lots(row.volume);
+      row.side + ' ' + qty(row.volume);
   }
 
   function adoptOptions(rows, account, chosen) {
@@ -3472,13 +3463,18 @@
         ' position(s) at the broker carry our magic but are not in our ' +
         'book. Nothing is closed automatically: adopt one into a pair, ' +
         'or close it by hand.</div>';
+      // VOLUME AT FULL PRECISION, not two decimals. A broker whose
+      // volume step is 0.001 - and a PARTIAL fill, which is how these
+      // get here - printed 0.00 in this column, so the one number the
+      // operator needs to close the position by hand read as nothing
+      // at all.
       html += '<table class="unclaimed"><thead><tr><th>Account</th>' +
         '<th>Ticket</th><th>Symbol</th><th>Side</th><th>Volume</th>' +
         '<th>Open</th><th></th></tr></thead><tbody>';
       unclaimed.forEach(function (row) {
         html += '<tr><td>' + row.account + '</td><td>' + row.ticket +
           '</td><td>' + row.symbol + '</td><td>' + row.side + '</td><td>' +
-          lots(row.volume) + '</td><td>' + fmt(row.price_open, 4) +
+          qty(row.volume) + '</td><td>' + fmt(row.price_open, 4) +
           '</td><td><button class="btn close-unclaimed" data-account="' +
           row.account + '" data-ticket="' + row.ticket +
           '">Close it</button></td></tr>';
