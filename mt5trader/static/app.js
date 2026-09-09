@@ -2754,13 +2754,17 @@
           state.adopt = {pair: e.target.value, a: '', b: ''};
           render();
         }
+        // NO render() here. Picking a ticket changes only whether the
+        // Adopt button is enabled, and re-rendering the pane from under
+        // a <select> the operator has just used is what made this form
+        // unusable in the first place.
         if (e.target.classList.contains('adopt-a')) {
           state.adopt.a = e.target.value;
-          render();
+          syncAdoptButton(e.target);
         }
         if (e.target.classList.contains('adopt-b')) {
           state.adopt.b = e.target.value;
-          render();
+          syncAdoptButton(e.target);
         }
       });
       el('desktop').appendChild(node);
@@ -2770,6 +2774,27 @@
         button.classList.toggle('on', button.dataset.tab === state.monitorTab);
       });
     var pane = node.querySelector('.pane');
+    /* A PANE BEING TYPED INTO IS NOT REDRAWN.
+     *
+     * This whole pane is rebuilt from innerHTML on every snapshot,
+     * about twice a second. That is fine for tables, and fatal for a
+     * <select>: an open dropdown belongs to the element, so replacing
+     * the element closes it. The Reconciler tab's adopt form blinked
+     * open and shut on every poll and no ticket could ever be picked.
+     *
+     * Skipping the redraw while the focus is inside costs nothing -
+     * the numbers behind the form are a poll out of date for as long
+     * as somebody is holding a dropdown open, and they are looking at
+     * the dropdown.
+     */
+    if (pane.contains(document.activeElement) &&
+        document.activeElement !== document.body) {
+      var tag = (document.activeElement.tagName || '').toUpperCase();
+      if (tag === 'SELECT' || tag === 'INPUT' || tag === 'TEXTAREA') {
+        node.classList.toggle('inactive', state.active !== panelId('monitor'));
+        return node;
+      }
+    }
     if (state.monitorTab === 'positions') { pane.innerHTML = positionsTable(); }
     else if (state.monitorTab === 'orders') { pane.innerHTML = ordersTable(); }
     else if (state.monitorTab === 'fills') {
@@ -3337,6 +3362,18 @@
     return html;
   }
 
+
+  function syncAdoptButton(within) {
+    /* The one thing that changes when a ticket is picked, done in
+     * place. Redrawing the pane for it would close the dropdown that
+     * was just used. */
+    var form = within.closest('.adopt-form');
+    if (!form) { return; }
+    var go = form.querySelector('.adopt-go');
+    if (go) {
+      go.disabled = !(state.adopt.pair && state.adopt.a && state.adopt.b);
+    }
+  }
 
   function adoptRowLabel(row) {
     return row.account + ':' + row.ticket + '  ' + row.symbol + ' ' +
