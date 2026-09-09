@@ -1,6 +1,7 @@
 {
   "_README": [
     "THE ONE PLACE TO CHANGE THE REPOSITORY AND BRANCH.",
+    "The branch is main - the trunk. It was a claude/... branch while the rollout was being built.",
     "",
     "deploy/setup.ps1 reads this file, so switching the office from the",
     "demo repo to the live one is an edit to the two lines below - not a",
@@ -22,7 +23,7 @@
     "file travels on a USB stick."
   ],
   "repo_url": "https://github.com/nishant-patel-git/Mirror-MT5-Trader.git",
-  "branch": "claude/monitoring-positions-market-grid-17nyys",
+  "branch": "main",
   "root": "C:\\MT5-Trader",
   "terminal_a": "C:\\MT5-A",
   "terminal_b": "C:\\MT5-B",

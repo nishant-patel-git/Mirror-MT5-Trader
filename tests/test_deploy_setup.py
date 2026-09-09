@@ -1399,3 +1399,40 @@ def test_control_declining_the_offer_changes_nothing():
     after = update[update.index(':not_fixed'):]
     assert 'Nothing has been changed' in after
     assert 'exit /b 1' in after
+
+
+# --- The kit must point at the trunk ------------------------------------
+
+
+def test_the_rollout_kit_installs_from_the_trunk():
+    """rollout.json is the ONE place a new PC learns which branch to
+    clone. It sat on a claude/... working branch through the rollout,
+    and when main became the trunk that branch stopped moving - so
+    every PC built from the kit would have been installed onto frozen
+    code, silently.
+
+    A feature branch is a fine thing to point at deliberately for one
+    machine (Start-Setup.bat takes -Branch). It is not a thing to ship
+    to the office on a USB stick."""
+    branch = ROLLOUT['branch']
+    assert branch == 'main', branch
+    assert not branch.startswith('claude/'), (
+        'the kit is shipping a working branch to every new PC')
+
+
+def test_control_the_branch_is_still_configurable():
+    """The control. Pinning it to main in the file must not mean the
+    branch has stopped being a setting - a desk testing a fix needs to
+    point one machine somewhere else."""
+    code = _ps_code()
+    assert "$Branch    = Setting $Branch    'branch'" in code
+    assert '[string] $Branch' in code          # and on the command line
+
+
+def test_no_document_still_names_the_old_working_branch():
+    """Two documents told an operator to check out a branch that is no
+    longer the trunk. A runbook that is wrong about the branch is worse
+    than one that says nothing."""
+    for name in ('OFFICE-PC.md', 'RUNBOOK.md'):
+        text = (DEPLOY / name).read_text(encoding='utf-8')
+        assert 'monitoring-positions-market-grid' not in text, name

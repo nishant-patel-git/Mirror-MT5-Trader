@@ -75,7 +75,7 @@ That is why SETUP unpacks a zip rather than driving the installer.
 
 ```json
 "repo_url": "https://github.com/nishant-patel-git/Mirror-MT5-Trader.git",
-"branch":   "claude/monitoring-positions-market-grid-17nyys",
+"branch":   "main",
 ```
 
 Edit it in the rollout kit; new PCs are built from that copy. Anything
