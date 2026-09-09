@@ -591,18 +591,23 @@ class Quoter:
             # never booked is not there to scan. So it is said here, at
             # CRITICAL, with the tickets - which now reaches a file on
             # disk - and carried out in the event this returns.
-            naked = None
-            undo = self.executor._unwind_leg(pair, group.leg, quote_side,
-                                             quote_fill)
-            if not undo.get('ok'):
-                naked = {'leg': group.leg.upper(),
-                         'symbol': self.executor._symbol(pair, group.leg),
-                         'volume': filled, 'tickets': tickets,
-                         'why': undo.get('error')}
+            #
+            # BOTH LEGS. The hedge is "rejected" on the broker's
+            # verdict, and a rejected order can still have dealt part
+            # of itself first (10010, or a rejection after the first
+            # deal). Unwinding only the quoting leg leaves that piece
+            # at the broker, unbooked and unhedged - the orphan leg
+            # again, on the path where nobody is watching.
+            naked = self.executor._unwind_what_went_on(
+                pair, {group.leg: quote_side, cross_leg: cross_side},
+                {group.leg: quote_fill, cross_leg: cross},
+                (group.leg, cross_leg))
+            if naked is not None:
                 reason = (f"{reason} — AND THE UNWIND FAILED "
-                          f"({undo.get('error')}): {filled:g} lots of "
+                          f"({naked['why']}): {naked['volume']:g} lots of "
                           f"{naked['symbol']} are ON and unhedged, "
-                          f"tickets {', '.join(str(t) for t in tickets)}")
+                          f"tickets "
+                          f"{', '.join(str(t) for t in naked['tickets'])}")
                 logging.critical("%s: %s", pair.key, reason)
             # If the crossing account cannot trade, none of the remaining
             # synthetics on this pair can complete either.

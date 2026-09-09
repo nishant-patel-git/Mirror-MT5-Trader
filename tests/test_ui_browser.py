@@ -4488,3 +4488,47 @@ def test_the_keypad_does_not_offer_a_size_the_broker_will_refuse(page):
         s.armed = {};
         window.MT5Trader.render();
     }""")
+
+
+def test_a_close_the_broker_refused_says_so_on_the_screen(page):
+    """"There is no way to close it."
+
+    The Reconciler's "Close it" button sends a command that RUNS
+    fine and comes back {ok: false, error: '<the broker's words>'} in
+    its payload. `toastOutcome` read the ENVELOPE's ok, which was true,
+    and had no branch for the payload's — so a refused close produced
+    no toast at all. From the desk that is a dead button on the one
+    position nothing else is allowed to close.
+    """
+    page.evaluate("() => document.getElementById('toasts').innerHTML = ''")
+    try:
+        page.evaluate("""() => window.MT5Trader.toastOutcome({
+            ok: true,
+            data: {ok: false,
+                   error: '3677: 10027 AutoTrading disabled by client'}
+        })""")
+        page.wait_for_selector('.toast:not(.ok)', timeout=WAIT)
+        toast = page.text_content('.toast:not(.ok)')
+        # The BROKER's own words, never "check the log" (spec §11).
+        assert '10027' in toast
+        assert 'AutoTrading disabled by client' in toast
+    finally:
+        page.evaluate("() => document.getElementById('toasts').innerHTML = ''")
+
+
+def test_control_a_close_that_worked_does_not_raise_an_error_toast(page):
+    """The control. Without it the branch above would pass on a build
+    that toasts a refusal at every outcome — and a success styled as a
+    fault is the noise the error style exists to stand out from."""
+    page.evaluate("() => document.getElementById('toasts').innerHTML = ''")
+    try:
+        page.evaluate("""() => window.MT5Trader.toastOutcome({
+            ok: true,
+            data: {ok: true, closed: [{ticket: '3677', volume: 0.01}],
+                   left: 0.0}
+        })""")
+        page.wait_for_timeout(200)
+        assert page.locator('.toast:not(.ok)').count() == 0, (
+            'a close that worked was reported as a refusal')
+    finally:
+        page.evaluate("() => document.getElementById('toasts').innerHTML = ''")

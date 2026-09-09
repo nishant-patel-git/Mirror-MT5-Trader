@@ -116,11 +116,37 @@ class PairExecutor:
         first_fill = self._send_leg(pair, first, sides[first], volumes[first],
                                     contracts[first], tag)
         if not first_fill.get('ok'):
-            # Nothing is on. This is a refusal, not a naked position.
-            return ExecutionResult(
-                False, refused=True,
-                reason=(f"leg {first.upper()} refused: "
-                        f"{first_fill.get('error')}"))
+            # A REFUSAL IS ONLY A REFUSAL IF NOTHING WENT ON.
+            #
+            # This branch used to assert "nothing is on. This is a
+            # refusal, not a naked position" and return on the strength
+            # of `ok` alone. `ok` is the broker's verdict on the
+            # REQUEST, and a request can be refused with part of it
+            # already dealt - a 10010 partial fill, or a rejection that
+            # lands after the first deal. Then something IS on: the
+            # second leg was never sent, nothing was unwound, nothing
+            # was booked, and the leg sat at the broker until the
+            # reconciler listed it as a position carrying our own
+            # comment that nothing may close. That is the orphan leg
+            # two desks reported.
+            #
+            # So the question asked here is the broker's book, not the
+            # broker's opinion.
+            if self._went_on(first_fill) is None:
+                return ExecutionResult(
+                    False, refused=True,
+                    reason=(f"leg {first.upper()} refused: "
+                            f"{first_fill.get('error')}"))
+            reason = (f"leg {first.upper()} was refused "
+                      f"({first_fill.get('error')}) but went on anyway — "
+                      f"unwinding it; leg {second.upper()} was not sent")
+            logging.critical("%s: %s", pair.key, reason)
+            naked = self._unwind_what_went_on(pair, sides,
+                                              {first: first_fill}, (first,))
+            elapsed_ms = (self.clock() - started) * 1000.0
+            return ExecutionResult(False, reason=reason, naked=naked,
+                                   elapsed_ms=elapsed_ms,
+                                   legs={first: first_fill})
 
         # IMMEDIATELY — no wait, no poll interval, no patience.
         second_fill = self._cross_with_deadline(
@@ -136,14 +162,13 @@ class PairExecutor:
                       f"{second_fill.get('error')} — unwinding leg "
                       f"{first.upper()}")
             logging.critical("%s: %s", pair.key, reason)
-            unwind = self._unwind_leg(pair, first, sides[first], first_fill)
-            naked = None if unwind.get('ok') else {
-                'leg': first.upper(),
-                'symbol': self._symbol(pair, first),
-                'volume': first_fill.get('filled_volume'),
-                'tickets': first_fill.get('position_tickets'),
-                'why': unwind.get('error'),
-            }
+            # BOTH legs, not just the first. A rejected crossing leg can
+            # still have dealt part of itself on the way to being
+            # rejected, and unwinding only the leg we believe is on
+            # leaves the other piece exactly where the orphans came
+            # from.
+            naked = self._unwind_what_went_on(pair, sides, fills,
+                                              (first, second))
             return ExecutionResult(False, reason=reason, naked=naked,
                                    elapsed_ms=elapsed_ms, legs=fills)
 
@@ -152,47 +177,14 @@ class PairExecutor:
             reason = (f"only {matched:.0%} of the clip matched on both legs "
                       f"— unwinding rather than holding a part-hedged pair")
             logging.warning("%s: %s", pair.key, reason)
-            """THE UNWIND'S ANSWER IS READ. It used to be thrown away.
-
-            A trader clicked, one leg went on, the other did not, and
-            this branch tried to undo the one that had. If that undo
-            FAILED - a refused close, a ticket the broker would not
-            take back - nothing said so. No naked flag, no banner, no
-            log line above WARNING. The trader was left holding a
-            single unhedged leg while the screen showed a refusal, and
-            the first thing to notice was the reconciler closing it
-            forty-four seconds later.
-
-            The branch above, where the second leg is REJECTED
-            outright, has always reported `naked` and always said so
-            at CRITICAL. This one is the same fault with a quieter
-            cause - a partial fill rather than a rejection - and it
-            deserves the same treatment.
-
-            Only legs that actually FILLED are unwound. Asking to undo
-            a leg that never went on produced 'filled but reported no
-            position ticket', which is not a naked leg and must not be
-            reported as one."""
-            naked = None
-            for leg in ('a', 'b'):
-                fill = fills.get(leg) or {}
-                if not (fill.get('filled_volume') or 0.0):
-                    continue                 # nothing of ours went on
-                undo = self._unwind_leg(pair, leg, sides[leg], fill)
-                if undo.get('ok'):
-                    continue
-                naked = {
-                    'leg': leg.upper(),
-                    'symbol': self._symbol(pair, leg),
-                    'volume': fill.get('filled_volume'),
-                    'tickets': fill.get('position_tickets'),
-                    'why': undo.get('error'),
-                }
-                logging.critical(
-                    "%s: leg %s is ON and could NOT be unwound (%s) — %s "
-                    "lots of %s are naked at the broker",
-                    pair.key, leg.upper(), undo.get('error'),
-                    fill.get('filled_volume'), self._symbol(pair, leg))
+            # A trader clicked, one leg went on, the other did not, and
+            # this branch tried to undo the one that had. If that undo
+            # FAILED - a refused close, a ticket the broker would not
+            # take back - nothing said so, and the first sign of it was
+            # something else tidying the leg away. The unwind's answer
+            # is read in one place now, for all three of these
+            # branches; see _unwind_what_went_on.
+            naked = self._unwind_what_went_on(pair, sides, fills, ('a', 'b'))
             return ExecutionResult(False, reason=reason, naked=naked,
                                    elapsed_ms=elapsed_ms, legs=fills)
 
@@ -330,6 +322,15 @@ class PairExecutor:
             if result.get('ok'):
                 result['attempts'] = attempt
                 return result
+            if self._went_on(result) is not None:
+                # IT FAILED AND WENT ON ANYWAY - a partial fill, or a
+                # rejection that arrived after the first deal. Sending
+                # the next attempt now would put a SECOND order on top
+                # of the piece that is already there, and the deadline
+                # allows a hundred of them. The failure is returned
+                # with what is on, for the caller to unwind.
+                result['attempts'] = attempt
+                return result
             if self.clock() >= deadline:
                 result['attempts'] = attempt
                 result['error'] = (f"{result.get('error')} (after {attempt} "
@@ -337,6 +338,64 @@ class PairExecutor:
                                    f"{self.config.get('LEG_DEADLINE_SEC')}s)")
                 return result
             self.sleep(0.02)
+
+    @staticmethod
+    def _went_on(fill):
+        """What a leg left AT THE BROKER, whatever the broker said.
+
+        `ok` answers "did the broker accept the request". This answers
+        the only question that matters when the answer to that is no:
+        is any of it on? A filled volume or a position ticket both
+        mean yes, and either is enough to unwind.
+
+        None means nothing went on, which is the one case that may be
+        reported as a clean refusal.
+        """
+        fill = fill or {}
+        volume = float(fill.get('filled_volume') or 0.0)
+        tickets = list(fill.get('position_tickets') or [])
+        if volume <= 0 and not tickets:
+            return None
+        return {'volume': volume, 'tickets': tickets}
+
+    def _unwind_what_went_on(self, pair, sides, fills, legs):
+        """Take back every leg that is actually on. Returns the naked
+        report, or None when nothing is left at the broker.
+
+        ONE place, because all three ways a click can fail end the same
+        way - something may be on and it has to come off - and the two
+        that had their own copy of this drifted apart: one unwound a
+        single leg, one read `filled_volume` alone, and neither noticed
+        a leg that filled under a refusal.
+
+        THE UNWIND'S ANSWER IS READ. A leg that will not come off is
+        the loudest thing on the screen (spec §16) and CRITICAL in a
+        log that reaches disk; a failure reported as a refusal with
+        nothing said is how a trader ends up holding an unhedged leg
+        overnight.
+        """
+        naked = None
+        for leg in legs:
+            fill = fills.get(leg) or {}
+            on = self._went_on(fill)
+            if on is None:
+                continue                 # nothing of ours went on
+            undo = self._unwind_leg(pair, leg, sides[leg], fill)
+            if undo.get('ok'):
+                continue
+            naked = {
+                'leg': leg.upper(),
+                'symbol': self._symbol(pair, leg),
+                'volume': on['volume'],
+                'tickets': on['tickets'],
+                'why': undo.get('error'),
+            }
+            logging.critical(
+                "%s: leg %s is ON and could NOT be unwound (%s) — %s "
+                "lots of %s are naked at the broker",
+                pair.key, leg.upper(), undo.get('error'),
+                on['volume'], self._symbol(pair, leg))
+        return naked
 
     def _matched_fraction(self, plan, fills):
         """How much of the intended clip is hedged on BOTH legs.
