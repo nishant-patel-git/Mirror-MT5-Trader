@@ -121,7 +121,23 @@ def test_a_browser_that_will_not_start_falls_back_and_says_so():
     assert opened == ['http://127.0.0.1:8000/']
 
 
-def test_no_chromium_at_all_still_opens_the_terminal():
+def test_no_chromium_at_all_still_opens_the_terminal(monkeypatch):
+    """THE SCENARIO IS ESTABLISHED, NOT ASSUMED.
+
+    This used to point `env` at directories that do not exist and call
+    that "no chromium at all". It is not: `find_browser` falls through
+    the Windows lookup to `shutil.which`, so on any box with
+    microsoft-edge, google-chrome or chromium ON PATH a browser was
+    found, the window opened, and the test failed — which is what CI
+    did on its first run, GitHub's Ubuntu image shipping Edge at
+    /usr/bin/microsoft-edge.
+
+    `which` is injectable at `find_browser`, but the default is bound
+    at def-time and `open_window` does not thread it through, so the
+    honest way to say "there is no browser on this machine" from here
+    is to say it directly.
+    """
+    monkeypatch.setattr(appwindow, 'find_browser', lambda **kwargs: None)
     said, opened = [], []
     ok = appwindow.open_window(
         'http://127.0.0.1:8000/', browser=None,
@@ -202,14 +218,25 @@ def test_the_shortcut_runs_exactly_what_the_launcher_runs():
     assert argv is None or line is not None
 
 
-def test_a_path_with_spaces_is_quoted_in_the_shortcut():
+def test_a_path_with_spaces_is_quoted_in_the_shortcut(monkeypatch):
     """`C:\\Program Files (x86)\\...` is where Edge actually lives, and
-    an unquoted shortcut target runs `C:\\Program`."""
+    an unquoted shortcut target runs `C:\\Program`.
+
+    THE PATH WITH SPACES IS THE POINT, so it is supplied rather than
+    hoped for. `if line is None: return` used to let this pass without
+    asserting anything on a box with no browser, and on a Linux box
+    WITH one it asserted against /usr/bin/microsoft-edge — a path with
+    no spaces in it, so the one thing the test is named for was never
+    exercised either way.
+    """
+    edge = r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
+    monkeypatch.setattr(appwindow, 'find_browser', lambda **kwargs: edge)
+
     line = appwindow.shortcut_target('http://127.0.0.1:8000/',
                                      env=WINDOWS_ENV)
-    if line is None:                     # no chromium on this box
-        return
-    assert line.startswith('"')
+
+    assert line is not None
+    assert line.startswith(f'"{edge}"'), line
 
 
 def test_the_profile_is_under_the_users_own_local_data():
