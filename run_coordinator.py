@@ -17,6 +17,7 @@ from mt5trader.commands import CommandRunner
 from mt5trader.config import TraderConfig
 from mt5trader.coordinator import Coordinator
 from mt5trader.database import Store
+from mt5trader import logsetup
 from mt5trader.legs import RemoteLeg
 from mt5trader.shutdown import should_close
 
@@ -72,8 +73,12 @@ def main():
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - [coord] %(message)s',
-        handlers=[logging.FileHandler('coordinator.log', encoding='utf-8'),
-                  logging.StreamHandler()])
+        handlers=[logging.StreamHandler()])
+    # ROTATING, and in logs/ beside the other processes. The plain
+    # FileHandler that stood here grew without limit and sat loose in
+    # the repo root, so it was both a disk risk and the only process
+    # that logged at all.
+    logsetup.setup('coordinator')
 
     config = TraderConfig.from_file(args.config)
     legs = build_legs(config)

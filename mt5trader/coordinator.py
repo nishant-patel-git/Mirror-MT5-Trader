@@ -71,7 +71,7 @@ class Coordinator:
         # that filled on a resting order came back OPEN.
         self.quoter.on_change = self.remember
         self.reconciler = Reconciler(config, legs, self.book, self.executor,
-                                     clock=clock)
+                                     clock=clock, store=store)
         self._last_reconcile = None
         self.session_clock = SessionClock(config, offset=self.broker_offset)
         #: The measured broker clock, per account: (measured at, offset).
@@ -400,7 +400,41 @@ class Coordinator:
     def poll_once(self):
         """One pass over every enabled pair. Returns the snapshot dict."""
         with self.lock:
-            return self._poll_once()
+            snapshot = self._poll_once()
+            self._stamp_our_tickets()
+            return snapshot
+
+    def _stamp_our_tickets(self):
+        """Write every ticket the book is holding into OUR ledger.
+
+        Done on every poll, and cheap: it is INSERT OR IGNORE on a
+        handful of rows. The point is durability, not speed - a ticket
+        recorded here stays recorded after the book stops holding it,
+        which is exactly the case that cost a trader two legs of a live
+        spread. See database.py's our_tickets table.
+
+        Never fatal. A ledger that cannot be written is a guard we do
+        not have; it is not a reason to stop trading, and the two other
+        signals - the book itself and the order comment - are
+        untouched.
+        """
+        if self.store is None:
+            return
+        rows = []
+        for position in self.book.positions():
+            for fill in (position.leg_a, position.leg_b):
+                if not fill:
+                    continue
+                for ticket in (fill.position_tickets or []):
+                    rows.append((fill.account, ticket, position.pair_key))
+        if not rows:
+            return
+        try:
+            self.store.remember_tickets(rows)
+        except Exception as e:
+            logging.critical('could not record our own tickets (%s) - the '
+                             'reconciler has the book and the order comment '
+                             'to go on, and nothing else', e)
 
     def reload_reference_fields(self):
         """Re-read the config and take the REFERENCE-ONLY pair fields.

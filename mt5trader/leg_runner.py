@@ -18,12 +18,14 @@ symbols are right, and these are the tools for finding out.
 
 import argparse
 import logging
+import re
 import os
 import socket
 import sys
 import threading
 
 from .broker import BrokerSession
+from . import logsetup
 from .config import TraderConfig
 from .ipc import JsonLineSocket, parse_endpoint
 from .legs import LocalLeg
@@ -189,11 +191,13 @@ def main():
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - [leg] %(message)s',
-        handlers=[
-            logging.FileHandler(f'leg_{args.account}.log', encoding='utf-8'),
-            logging.StreamHandler(),
-        ],
+        handlers=[logging.StreamHandler()],
     )
+    # Rotating, in logs/, one file per account: a leg's chatter must
+    # never bury a reconciler decision, and an unbounded file on a box
+    # that runs for months is a full disk waiting to happen.
+    safe = re.sub(r'[^A-Za-z0-9_.-]', '_', str(args.account))
+    logsetup.setup(f'leg-{safe}')
 
     config = TraderConfig.from_file(args.config)
     if args.account not in config.accounts:

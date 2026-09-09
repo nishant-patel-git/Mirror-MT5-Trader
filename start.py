@@ -24,6 +24,7 @@ half way there leaves orders resting that nothing is watching.
 
 import argparse
 import json
+import logging
 import os
 import shutil
 import signal
@@ -309,6 +310,18 @@ def main():
             f'http://127.0.0.1:{args.web_port}/')
         print(line or '')
         return 0 if line else 1
+
+    # The launcher's own decisions - which children it started, which
+    # it restarted, why it held the engine down - go on disk too. It is
+    # the process that knows what the others were told to do.
+    try:
+        from mt5trader import logsetup
+        logging.basicConfig(level=logging.INFO,
+                            format='%(asctime)s [launcher] %(message)s',
+                            handlers=[logging.StreamHandler()])
+        logsetup.setup('launcher')
+    except Exception:
+        pass                       # never stop a start over a log file
 
     made = first_run(args.config)
     for path in made:

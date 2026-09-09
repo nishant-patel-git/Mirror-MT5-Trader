@@ -560,3 +560,97 @@ def test_our_own_leg_is_never_auto_closed(config, pair, legs, tmp_path):
     held = [row for row in reports[0]['orphans'] if row.get('held')]
     assert held and 'our own order comment' in held[0]['held']
     assert ('acct_a', str(ticket)) in coordinator.reconciler.unclaimed
+
+
+# --- OUR record, not the broker's -----------------------------------------
+#
+#     The comment guard reads the broker's copy of our own words back.
+#     True, but truncated, dropped or reformatted differently by every
+#     liquidity provider - and this desk changes LP as it needs to. A
+#     money guard must not quietly weaken because a broker changed.
+#
+#     So: every ticket the book holds is stamped into our own database
+#     on every poll, and kept after the book stops holding it. That is
+#     the case that cost a trader two legs of a live spread.
+
+
+def test_a_ticket_we_have_ever_held_is_never_auto_closed(config, pair, legs,
+                                                          tmp_path):
+    """No comment at all, no book entry - and still not closed, because
+    OUR OWN records say we placed it."""
+    from mt5trader.database import Store
+    from mt5trader.models import OrderSide
+    store = Store(str(tmp_path / 'test.db'))
+    ticket = an_orphan(legs, 'XAUUSD_', OrderSide.BUY, 0.1, 'acct_a',
+                       comment='')          # an LP that drops comments
+    store.remember_tickets([('acct_a', ticket, pair.key)])
+
+    coordinator = Coordinator(config, legs, sleep=lambda s: None, store=store)
+    coordinator.start()
+    coordinator.poll_once()
+    coordinator.reconciler.book_complete = True
+    coordinator.reconciler.unclaimed = {}
+
+    reports = [coordinator.reconciler.run() for _ in range(6)]
+
+    assert all(r['closed'] == [] for r in reports), 'we closed our own ticket'
+    assert legs['acct_a'].broker.open_positions(), 'the money is gone'
+
+
+def test_control_a_ticket_that_is_not_in_our_records_is_still_an_orphan():
+    """The control, and the one that keeps the reconciler useful. A
+    position carrying our magic that we have never held, with no
+    comment of ours, is exactly what it is for."""
+    from mt5trader.database import Store
+    import tempfile
+    store = Store(str(Path(tempfile.mkdtemp()) / 'test.db'))
+    store.remember_tickets([('acct_a', '111', 'A|B')])
+    assert ('acct_a', '111') in store.our_tickets()
+    assert ('acct_a', '222') not in store.our_tickets()
+    assert ('acct_b', '111') not in store.our_tickets()   # per ACCOUNT
+
+
+def test_the_ledger_remembers_a_ticket_the_book_has_forgotten(config, pair,
+                                                              legs, tmp_path):
+    """The whole point. The book holding it is not the guard - the book
+    is what failed. The ledger is what is left when it does."""
+    from mt5trader.database import Store
+    store = Store(str(tmp_path / 'test.db'))
+    coordinator = Coordinator(config, legs, sleep=lambda s: None, store=store)
+    coordinator.start()
+    coordinator.poll_once()
+    # A position in the book, by the shortest honest route: what is
+    # being tested is the STAMPING, not the execution path.
+    from mt5trader.models import LegFill, OrderSide, SpreadPosition, \
+        SpreadSide, OrderType
+    leg_a = LegFill(pair.account_a, pair.symbol_a, OrderSide.BUY, 0.1, 100.0,
+                    position_tickets=[9001])
+    leg_b = LegFill(pair.account_b, pair.symbol_b, OrderSide.SELL, 0.1, 110.0,
+                    position_tickets=[9002])
+    coordinator.book.add_position(SpreadPosition(
+        pair.key, SpreadSide.BUY, 1, leg_a, leg_b, 10.0, OrderType.MARKET, 1))
+    coordinator.poll_once()
+
+    held = store.our_tickets()
+    assert (pair.account_a, '9001') in held, 'leg A was never stamped'
+    assert (pair.account_b, '9002') in held, 'leg B was never stamped'
+
+    # Now lose it, exactly as the incident did.
+    for position in list(coordinator.book.positions()):
+        coordinator.book._positions.pop(position.position_id, None)
+    assert coordinator.book.positions() == []
+    assert store.our_tickets() == held, 'the ledger forgot with the book'
+
+
+def test_a_broken_ledger_is_not_a_claim_that_nothing_is_ours(config, pair,
+                                                             legs):
+    """Unmeasured is not zero. A database that will not read must leave
+    the book and the comment doing their job, and say so - never assert
+    that every position at the broker is a stray."""
+    class Broken:
+        def our_tickets(self):
+            raise RuntimeError('disk gone')
+
+    from mt5trader.reconcile import Reconciler
+    reconciler = Reconciler(config, legs, None, None, store=Broken())
+    assert reconciler.ledger() == set()
