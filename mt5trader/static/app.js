@@ -93,6 +93,30 @@
     return value.toFixed(digits === undefined ? 4 : digits);
   }
 
+  function lots(value) {
+    /* A VOLUME THAT IS NOT ZERO MUST NEVER PRINT AS ZERO.
+     *
+     * The Reconciler listed a stuck position as `0.00` because it was
+     * formatted to two decimals, and the trader read it as nothing
+     * being there. It was 0.001 lots - and that is the whole
+     * explanation of "it will not close, even from MT5": a volume
+     * under the symbol's minimum lot cannot be the subject of a legal
+     * close order, by us or by anybody.
+     *
+     * Two decimals for an ordinary size, more only when more is
+     * needed, and never a rounded-down zero standing for real money.
+     */
+    if (value === null || value === undefined || value === '') { return DASH; }
+    if (typeof value !== 'number' || !isFinite(value)) { return fmt(value, 2); }
+    if (value === 0) { return '0.00'; }
+    for (var digits = 2; digits <= 8; digits += 1) {
+      if (Math.abs(value) >= Math.pow(10, -digits) / 2) {
+        return value.toFixed(digits);
+      }
+    }
+    return value.toExponential(1);      // smaller than 1e-8, and still real
+  }
+
   // A SIZE, printed the way it was typed.
   //
   // Quantities are added and subtracted — a click walking down a stack
@@ -3377,7 +3401,7 @@
 
   function adoptRowLabel(row) {
     return row.account + ':' + row.ticket + '  ' + row.symbol + ' ' +
-      row.side + ' ' + fmt(row.volume, 2);
+      row.side + ' ' + lots(row.volume);
   }
 
   function adoptOptions(rows, account, chosen) {
@@ -3454,7 +3478,7 @@
       unclaimed.forEach(function (row) {
         html += '<tr><td>' + row.account + '</td><td>' + row.ticket +
           '</td><td>' + row.symbol + '</td><td>' + row.side + '</td><td>' +
-          fmt(row.volume, 2) + '</td><td>' + fmt(row.price_open, 4) +
+          lots(row.volume) + '</td><td>' + fmt(row.price_open, 4) +
           '</td><td><button class="btn close-unclaimed" data-account="' +
           row.account + '" data-ticket="' + row.ticket +
           '">Close it</button></td></tr>';
