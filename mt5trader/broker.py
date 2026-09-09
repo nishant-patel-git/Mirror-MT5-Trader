@@ -28,6 +28,43 @@ except ImportError:  # not available off-Windows; tests use FakeBroker
     mt5 = None
 
 
+#: MT5's own return codes for a request the broker ACCEPTED, and the
+#: whole of the orphan-leg fault.
+#:
+#:   10008 PLACED       - accepted, not executed yet
+#:   10009 DONE         - executed in full
+#:   10010 DONE_PARTIAL - executed in PART. A POSITION IS OPEN for the
+#:                        part that filled.
+#:
+#: Every send in here compared against DONE alone, so 10010 was
+#: reported upwards as a flat failure. `PairExecutor.market_entry`
+#: reads a failed FIRST leg as "nothing is on. This is a refusal, not a
+#: naked position", returns, and never sends leg B - so a partially
+#: filled leg A stayed at the broker, hedged by nothing, absent from
+#: the book, and surfaced in the reconciler as a position carrying our
+#: own comment that nothing is allowed to close. Two desks, live
+#: 2026-09-09: leg A on, leg B never sent, three positions nobody could
+#: get rid of.
+#:
+#: Numbers rather than mt5.TRADE_RETCODE_*: they are fixed by the
+#: protocol, and this module has to answer the same way on a box where
+#: the package is not installed at all.
+RETCODE_PLACED = 10008
+RETCODE_DONE = 10009
+RETCODE_DONE_PARTIAL = 10010
+RETCODE_INVALID_FILL = 10030
+
+#: The request EXECUTED - in full or in part. Either way money moved
+#: and there is a position to account for.
+FILLED_RETCODES = (RETCODE_DONE, RETCODE_DONE_PARTIAL)
+
+#: A pending order the broker is now holding. MT5 answers PLACED for a
+#: resting order and DONE only where it filled on arrival; both mean
+#: the order reached the book, and reading PLACED as a failure left
+#: real orders resting that this system had written off.
+RESTED_RETCODES = (RETCODE_PLACED, RETCODE_DONE)
+
+
 class OrderResult:
     """Outcome of a market order, decoupled from mt5 result objects."""
 
@@ -883,8 +920,8 @@ class BrokerSession:
             result = mt5.order_send(request)
             if result is None:
                 continue
-            if result.retcode != 10030:        # not a filling-mode problem
-                return result, mode
+            if result.retcode != RETCODE_INVALID_FILL:
+                return result, mode        # not a filling-mode problem
             logging.debug("%s rejected filling mode %s (10030) — retrying",
                           symbol, mode)
         return result, None
@@ -1006,10 +1043,18 @@ class BrokerSession:
                 "type_filling": self._pending_filling_mode(symbol),
             }
             result = mt5.order_send(request)
-            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            # PLACED is the ordinary answer for an order that RESTS;
+            # DONE is what a broker says when it filled on arrival.
+            # Only DONE was accepted, so on a broker that answers PLACED
+            # every working order was written off as refused while it
+            # sat live at the broker.
+            retcode = None if result is None else getattr(result, 'retcode',
+                                                          None)
+            if retcode not in RESTED_RETCODES:
                 error = (mt5.last_error() if result is None
-                         else f"{result.retcode} - {result.comment}")
-                return {'ok': False, 'ticket': None, 'error': str(error)}
+                         else f"{retcode} - {result.comment}")
+                return {'ok': False, 'ticket': getattr(result, 'order', None),
+                        'error': str(error)}
             return {'ok': True, 'ticket': result.order, 'error': None,
                     'price': price, 'price_note': moved}
         except Exception as e:
@@ -1176,18 +1221,32 @@ class BrokerSession:
                 "type_time": mt5.ORDER_TIME_GTC,
             }
             result, _mode = self._send_market(request, symbol)
-            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            retcode = None if result is None else getattr(result, 'retcode',
+                                                          None)
+            if retcode not in FILLED_RETCODES:
                 error = (mt5.last_error() if result is None
-                         else f"{result.retcode} - {result.comment}")
-                if result is not None and result.retcode == 10030:
+                         else f"{retcode} - {result.comment}")
+                if retcode == RETCODE_INVALID_FILL:
                     error += f" (tried every filling mode; " \
                              f"{self._filling_hint(symbol)})"
                 return OrderResult(False, requested_price=price,
+                                   ticket=getattr(result, 'order', None),
                                    error=f"Close failed: {error}")
+            done = float(getattr(result, 'volume', 0.0) or 0.0)
+            if retcode == RETCODE_DONE_PARTIAL:
+                # PART of the position came off. Reporting this as a
+                # failed close left the whole ticket on our books while
+                # some of it was already gone at the broker; the caller
+                # measures what is LEFT from the broker's own book and
+                # books a partial close.
+                logging.warning(
+                    "%s ticket %s: broker closed %s of %s lots (10010 "
+                    "partial)", symbol, ticket, done, volume)
+            else:
+                done = done or volume
             return OrderResult(True, requested_price=price,
                                executed_price=result.price,
-                               ticket=result.order,
-                               volume=getattr(result, 'volume', volume))
+                               ticket=result.order, volume=done)
         except Exception as e:
             return OrderResult(False, error=f"Close error: {e}")
 
@@ -1223,18 +1282,39 @@ class BrokerSession:
             if result is None:
                 return OrderResult(False, requested_price=price,
                                    error=f"order_send failed: {mt5.last_error()}")
-            if result.retcode != mt5.TRADE_RETCODE_DONE:
-                detail = f"{result.retcode} - {result.comment}"
-                if result.retcode == 10030:
+            retcode = getattr(result, 'retcode', None)
+            ticket = getattr(result, 'order', None)
+            filled = float(getattr(result, 'volume', 0.0) or 0.0)
+            if retcode not in FILLED_RETCODES:
+                detail = f"{retcode} - {result.comment}"
+                if retcode == RETCODE_INVALID_FILL:
                     detail += f" (tried every filling mode; " \
                               f"{self._filling_hint(symbol)})"
+                # THE TICKET COMES BACK EVEN ON A REFUSAL, and that is
+                # the point of this branch. A broker that answers 10008
+                # PLACED, or that rejects after part of the order has
+                # already dealt, has left something of ours at the
+                # broker; without the ticket nobody upstream can find
+                # out, and "refused" becomes a guess that reads as
+                # "nothing is on". legs.LocalLeg.order asks the fill
+                # state off this ticket whichever way the verdict went.
                 return OrderResult(False, requested_price=price,
+                                   ticket=ticket,
                                    error=f"Order failed: {detail}")
 
+            if retcode == RETCODE_DONE_PARTIAL:
+                # NOT a failure. The broker filled what it could and
+                # said so; the caller hedges to what filled.
+                logging.warning(
+                    "%s: broker filled %s of %s lots (10010 partial) - "
+                    "order %s", symbol, filled, volume, ticket)
+            else:
+                # A full execution that reports no volume is the
+                # broker being terse, not a zero fill.
+                filled = filled or volume
             return OrderResult(True, requested_price=price,
                                executed_price=result.price,
-                               ticket=result.order,
-                               volume=getattr(result, 'volume', volume))
+                               ticket=ticket, volume=filled)
 
         except Exception as e:
             logging.error("Order exception on %s: %s", symbol, e)

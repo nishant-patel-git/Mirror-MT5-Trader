@@ -115,18 +115,53 @@ class LocalLeg:
                 'time': getattr(tick, 'time', time.time())}
 
     def order(self, symbol, side, volume, slippage_points=1.0, comment=""):
+        """Send a market order and report WHAT IS AT THE BROKER.
+
+        `ok` is the broker's verdict on the request. `filled_volume`
+        and `position_tickets` are the answer to a different and more
+        important question - is anything of ours on? - and they are
+        filled in EITHER WAY.
+
+        They used to be zeroed whenever `ok` was false, on the
+        assumption that a request the broker did not accept left
+        nothing behind. A partial fill (10010), and a rejection that
+        arrives after part of the order has already dealt, both break
+        that assumption, and the caller then has no ticket to unwind
+        and no volume to notice. That is how a leg went on, was
+        reported as a refusal, and sat at the broker until the
+        reconciler listed it as unclaimed.
+        """
         result = self.broker.send_market_order(
             symbol, OrderSide(side), volume,
             slippage_points=slippage_points, comment=comment)
+        filled = float(result.volume or 0.0) if result.success else 0.0
+        price = result.executed_price
         position_tickets = []
-        if result.success and result.ticket:
+        if result.ticket:
             # Resolve which position(s) the fill created (hedging mode)
             state = self.broker.order_fill_state(result.ticket)
-            position_tickets = state.get('position_tickets') or [result.ticket]
+            measured = float(state.get('filled_volume') or 0.0)
+            tickets = list(state.get('position_tickets') or [])
+            if result.success:
+                filled = measured or filled
+                position_tickets = tickets or [result.ticket]
+            elif measured or tickets:
+                # REFUSED, AND ON ANYWAY. The refusal stands - it is
+                # the broker's own word and it reaches the screen - but
+                # the position it left behind is now visible to the
+                # unwind instead of being discovered by the reconciler.
+                logging.critical(
+                    "%s: the broker refused this order (%s) but %s lots are "
+                    "ON, tickets %s - it is not a clean refusal",
+                    symbol, result.error, measured,
+                    ', '.join(str(t) for t in tickets) or 'unknown')
+                filled = measured
+                position_tickets = tickets
+                price = state.get('price') or price
         return {
             'ok': result.success,
-            'filled_volume': result.volume if result.success else 0.0,
-            'price': result.executed_price,
+            'filled_volume': filled,
+            'price': price,
             'ticket': result.ticket,
             'position_tickets': position_tickets,
             'error': result.error,
