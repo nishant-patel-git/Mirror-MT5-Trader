@@ -99,6 +99,11 @@ class Coordinator:
         self.market = {}                    # pair key -> snapshot
         self.session = {}                   # pair key -> O/H/L/V of OUR series
         self._account_cache = {}            # account -> (at, info)
+        #: The last comparison of our open P&L against MT5's own, taken
+        #: on a pass where both halves were read together. Held between
+        #: such passes rather than recomputed against a stale half —
+        #: see pnl_check().
+        self._pnl_check = None
         #: (account, symbol) -> (at, the leg's own session figures)
         self._session_cache = {}
         #: (account, symbol) -> (at, that leg's DOM)
@@ -1729,6 +1734,56 @@ class Coordinator:
             measured and max(measured) - min(measured) > 60)
         return block
 
+    def pnl_check(self, ours, accounts, started):
+        """Our open P&L against MT5's own — BOTH AS OF ONE MOMENT.
+
+        A disagreement here means one of us is wrong about real money,
+        so it has to be shown. But the two halves are read on different
+        clocks: our marks come off the tick this poll just read, while
+        `account_info` is cached for ~5s. Comparing them was comparing
+        a photo taken now against one taken five seconds ago, so on a
+        moving market they ALWAYS differed and the row sat red all
+        session. A light that is always on is a light nobody reads, and
+        the day it means something nobody looks.
+
+        So the comparison is only made on the passes where every
+        account's profit was actually read from the terminal — a cache
+        stamp at or after this pass began — and the answer is then HELD
+        until the next such pass, carrying the time it was taken. Both
+        halves therefore always describe the same instant, the row goes
+        red only on a real disagreement, and nobody has to pick a
+        tolerance for market noise that would be wrong the moment a
+        pair with a different `k` is added.
+
+        Costs nothing: no extra round trip, and the cache is untouched.
+        """
+        fresh = []
+        for name in self.legs:
+            stamped = self._account_cache.get(name)
+            if stamped is None or stamped[0] < started:
+                return self._pnl_check      # a cache hit: not this pass
+            fresh.append(accounts.get(name))
+        if not fresh:
+            return self._pnl_check
+        # UNMEASURED IS NOT ZERO, at either end. An account that could
+        # not be read makes MT5's side unknown, and an unmarkable
+        # position makes ours unknown; neither is a difference of zero.
+        theirs = 0.0
+        for info in fresh:
+            profit = (info or {}).get('profit')
+            if info is None or not isinstance(profit, (int, float)):
+                theirs = None
+                break
+            theirs += float(profit)
+        self._pnl_check = {
+            'at': started,
+            'ours': ours,
+            'theirs': theirs,
+            'difference': (None if ours is None or theirs is None
+                           else ours - theirs),
+        }
+        return self._pnl_check
+
     def account_info(self, name):
         """Cached ~5s. Fetching this three times a second is three IPC
         round trips a second for a number that moves slowly."""
@@ -1746,7 +1801,17 @@ class Coordinator:
 
     def snapshot(self):
         """Everything every panel needs, from one poll's data."""
+        # ONE reading, held for the whole pass. `account_info` stamps
+        # its cache with the clock at the moment it actually reads the
+        # terminal, so a stamp at or after this one is a read that
+        # happened INSIDE this pass — which is how the P&L comparison
+        # below knows its two halves describe the same instant.
+        started = self.clock()
         pairs = {}
+        #: Our own open P&L across every pair, with the same
+        #: unmeasured-is-not-zero rule each pair uses: one position
+        #: that cannot be marked makes the TOTAL unknown, not smaller.
+        ours = 0.0
         for key, pair in self.config.pairs.items():
             md = self.market.get(key)
             sizes = self.implied_depth(pair)
@@ -1803,6 +1868,11 @@ class Coordinator:
                 nights=nights,
                 carry_buy=self.holding_carry(pair, 'BUY', nights),
                 carry_sell=self.holding_carry(pair, 'SELL', nights))
+            if positions:
+                if open_pnl is None:
+                    ours = None
+                elif ours is not None:
+                    ours += open_pnl
             pairs[key] = {
                 'key': key, 'name': pair.name, 'enabled': pair.enabled,
                 'account_a': pair.account_a, 'account_b': pair.account_b,
@@ -1950,8 +2020,11 @@ class Coordinator:
                 'open_pnl': open_pnl if positions else None,
                 'last_print': self.book.last_print(key),
             }
+        accounts = {name: self.account_info(name) for name in self.legs}
         return {
-            'at': self.clock(),
+            'at': started,
+            #: Our open P&L against MT5's own, BOTH AS OF ONE MOMENT.
+            'pnl_check': self.pnl_check(ours, accounts, started),
             # What a click does, and how fast it is drained — the UI
             # arms itself from the ENGINE's answer, never from its own
             # idea of what the trader last selected.
@@ -1972,7 +2045,7 @@ class Coordinator:
             # process instead of argued about (spec §9).
             'loop_interval_sec': self._loop_interval,
             'poll_target_sec': self.config.get('POLL_INTERVAL_SEC'),
-            'accounts': {name: self.account_info(name) for name in self.legs},
+            'accounts': accounts,
             # Named, not omitted: an absent account looked exactly like
             # a quiet one on the screen.
             'dark_accounts': self.dark_accounts(),

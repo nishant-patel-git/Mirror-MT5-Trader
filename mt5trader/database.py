@@ -344,8 +344,16 @@ class Store:
             row = connection.execute(
                 f"""SELECT COUNT(*) AS fills,
                            COALESCE(SUM(volume), 0) AS volume,
-                           COALESCE(SUM(commission), 0) AS commission,
-                           COALESCE(SUM(swap), 0) AS swap,
+                           -- NOT coalesced to zero. A column of NULLs
+                           -- sums to NULL, and that is the honest
+                           -- answer: nobody measured this. The COUNTs
+                           -- say how many rows carried a figure, so a
+                           -- PARTIAL total can be labelled rather than
+                           -- passed off as the whole.
+                           SUM(commission) AS commission,
+                           COUNT(commission) AS commission_measured,
+                           SUM(swap) AS swap,
+                           COUNT(swap) AS swap_measured,
                            COALESCE(SUM(profit), 0) AS profit
                     FROM fills {clause}""", params).fetchone()
         return dict(row)
@@ -374,8 +382,16 @@ class Store:
             row = connection.execute(
                 f"""SELECT COUNT(*) AS fills,
                            COALESCE(SUM(volume), 0) AS volume,
-                           COALESCE(SUM(commission), 0) AS commission,
-                           COALESCE(SUM(swap), 0) AS swap,
+                           -- NOT coalesced to zero. A column of NULLs
+                           -- sums to NULL, and that is the honest
+                           -- answer: nobody measured this. The COUNTs
+                           -- say how many rows carried a figure, so a
+                           -- PARTIAL total can be labelled rather than
+                           -- passed off as the whole.
+                           SUM(commission) AS commission,
+                           COUNT(commission) AS commission_measured,
+                           SUM(swap) AS swap,
+                           COUNT(swap) AS swap_measured,
                            COALESCE(SUM(profit), 0) AS profit
                     FROM fills {clause}""", params).fetchone()
         return dict(row)
