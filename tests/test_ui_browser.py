@@ -501,6 +501,14 @@ def test_bid_is_blue_and_ask_is_red_on_the_rendered_page(page):
 
 
 def test_a_limit_click_places_one_order_and_asks_nothing(page):
+    # PIN THE CONVENTION. Which column sends which side is a SETTING,
+    # and this test is about one click being one order, not about the
+    # mapping — so it says which convention it is standing in rather
+    # than inheriting whatever the default happens to be today. It
+    # inherited it before, and when the default moved to TT this test
+    # went red for a reason that had nothing to do with what it tests.
+    # The mapping itself is owned by the TT/TOUCH pair further down.
+    set_convention(page, 'TT')
     before = command_count(page)
     page.locator('.ladder .grid tbody tr td.bid').nth(5).click()
     page.wait_for_timeout(250)
@@ -508,31 +516,49 @@ def test_a_limit_click_places_one_order_and_asks_nothing(page):
     assert command_count(page) == before + 1
     command = last_command(page)
     assert command['kind'] == 'click'
-    # The BIDS column SELLS the spread — sell leg B, buy leg A — and the
-    # Asks column buys it. Getting this pair of columns the wrong way
-    # round is the most expensive mistake this screen could make.
-    assert command['payload']['side'] == 'SELL'
+    # Under TT — the shipped default, and the convention every desk
+    # arrives with — clicking the BIDS column joins the bid, which is a
+    # resting BUY. Getting this pair of columns the wrong way round is
+    # the most expensive mistake this screen could make.
+    assert command['payload']['side'] == 'BUY'
 
 
-def test_the_asks_column_buys_the_spread_and_the_bids_column_sells_it(page):
-    """Stated as its own test because it is a definition, not a
-    preference: buying the spread is buying leg B and selling leg A,
-    and that is what the ASK side of the ladder offers."""
-    page.locator('.ladder .grid tbody tr td.ask').nth(3).click()
-    page.wait_for_timeout(250)
-    assert last_command(page)['payload']['side'] == 'BUY'
+def test_the_buttons_are_coloured_by_the_side_they_send(page):
+    """BUY is red and SELL is blue on the buttons, in BOTH conventions.
 
-    page.locator('.ladder .grid tbody tr td.bid').nth(3).click()
-    page.wait_for_timeout(250)
-    assert last_command(page)['payload']['side'] == 'SELL'
+    This used to be tacked onto an assertion that the asks column buys,
+    and read as though the button borrowed the colour of the column it
+    acted on. It does not, and it must not: which column sends which
+    side is a SETTING (TT or TOUCH), while a button names its side
+    outright and never goes through that mapping at all. Under the
+    shipped TT default the two even disagree - the bids column is blue
+    and sends BUY, and the BUY button beside it is red - so a test that
+    tied the button to the column was asserting something that is only
+    true on a TOUCH desk.
 
-    # ...and the buttons carry the colour of the column they act on.
-    buy = page.locator('.ladder .buy-touch')
-    sell = page.locator('.ladder .sell-touch')
-    # One step deeper than the bands: a button carries white text and
-    # needs the contrast, while a band is data and gets out of the way.
-    assert is_red(buy.evaluate('n => getComputedStyle(n).backgroundColor'))
-    assert is_blue(sell.evaluate('n => getComputedStyle(n).backgroundColor'))
+    The colour rule that IS stable: red is where a purchase executes
+    (the offer) and blue is where a sale does (the bid), so the BUY
+    button is red and the SELL button is blue whatever the desk clicks
+    to get there. Checked under both conventions, because 'whatever the
+    convention' is the whole claim.
+    """
+    # TOUCH FIRST, TT LAST, and the order is not cosmetic: the page
+    # fixture is module-scoped and set_convention patches every poll,
+    # so whatever this loop ends on is what every later test in this
+    # file inherits. It ends on TT, which is what the engine ships.
+    for convention in ('TOUCH', 'TT'):
+        set_convention(page, convention)
+        buy = page.locator('.ladder .buy-touch')
+        sell = page.locator('.ladder .sell-touch')
+        # One step deeper than the bands: a button carries white text
+        # and needs the contrast, while a band is data and gets out of
+        # the way.
+        assert is_red(
+            buy.evaluate('n => getComputedStyle(n).backgroundColor')), \
+            'the BUY button lost its colour under ' + convention
+        assert is_blue(
+            sell.evaluate('n => getComputedStyle(n).backgroundColor')), \
+            'the SELL button lost its colour under ' + convention
 
 
 def test_three_clicks_at_one_price_send_three_orders(page):
@@ -2184,19 +2210,35 @@ def test_each_side_can_carry_its_own_size(page):
     page.wait_for_timeout(250)
     assert last_command(page)['payload']['quantity'] == 5
 
-    # ...and a ladder click takes the size of the side it is on: the
-    # Asks column buys, the Bids column sells.
-    page.locator('.ladder .grid tbody tr td.ask').nth(3).click()
-    page.wait_for_timeout(250)
-    assert last_command(page)['payload'] ['side'] == 'BUY'
-    assert last_command(page)['payload']['quantity'] == 1
+    # ...and a ladder click takes the size of the SIDE IT SENDS, not of
+    # the column it is in. Those are not the same thing: under the
+    # shipped TT default the asks column sends a SELL, so it must carry
+    # the SELL box's 5 and not the BUY box's 1. A click that took its
+    # size from the column would send 1 where the desk had typed 5.
+    #
+    # The convention is pinned rather than inherited, so that a change
+    # of default cannot silently turn this into a test of the other
+    # mapping - which is exactly what happened to it once.
+    try:
+        set_convention(page, 'TT')
+        page.locator('.ladder .grid tbody tr td.ask').nth(3).click()
+        page.wait_for_timeout(250)
+        assert last_command(page)['payload']['side'] == 'SELL'
+        assert last_command(page)['payload']['quantity'] == 5
 
-    page.locator('.ladder .grid tbody tr td.bid').nth(3).click()
-    page.wait_for_timeout(250)
-    assert last_command(page)['payload']['side'] == 'SELL'
-    assert last_command(page)['payload']['quantity'] == 5
-
-    page.click('.ladder .keypad button.clr')
+        page.locator('.ladder .grid tbody tr td.bid').nth(3).click()
+        page.wait_for_timeout(250)
+        assert last_command(page)['payload']['side'] == 'BUY'
+        assert last_command(page)['payload']['quantity'] == 1
+    finally:
+        # ALWAYS clear the pad. The page fixture is module-scoped, so a
+        # size left in the box is still there for every later test in
+        # this file: when this test failed above, the next one read a
+        # qty of 5 it never typed and failed too. A cleanup that only
+        # runs when the test passes is not a cleanup.
+        page.click('.ladder .keypad button.clr')
+        page.fill('.ladder .sell-qty', '')
+        page.wait_for_timeout(150)
 
 
 def test_any_size_from_0_01_can_be_typed_into_the_qty_box(page):
@@ -2287,10 +2329,20 @@ def test_each_legs_book_is_laid_out_with_its_width(page):
     open_ladder(page)
     page.wait_for_selector('table.legbook', timeout=WAIT)
 
-    rows = page.locator('table.legbook tbody tr')
+    # The PRICE rows, addressed by what they are rather than by how
+    # many there are. A direction hint (H -> L / L -> H) was later
+    # added between leg B and the spread, and a bare count of 3 turned
+    # red for a row that carries no prices at all - the panel was
+    # right, the arithmetic in the test was stale. Counting only the
+    # rows under test survives another row being added beside them.
+    rows = page.locator('table.legbook tbody tr:not(.spread-hint)')
     assert rows.count() == 3                       # A, B, and the spread
     assert '0.2500' in rows.nth(0).text_content()  # leg A's own width
     assert '0.4000' in rows.nth(1).text_content()
+    # ...and the hint really is there, directly above the spread row,
+    # so 'not .spread-hint' is excluding something that exists rather
+    # than quietly matching everything.
+    assert page.locator('table.legbook tr.spread-hint').count() == 1
     # A leg that has stopped is marked — on its AGE cell, not down the
     # whole line: painting the row red made a quiet market look like a
     # fault.
@@ -3168,6 +3220,7 @@ def test_a_click_sends_the_price_that_was_on_the_row(page):
     """Never the index: an index moves when the window does."""
     open_ladder(page)
     page.wait_for_selector('.ladder .grid tbody td.ask', timeout=WAIT)
+    set_convention(page, 'TT')
 
     cell = page.locator('.ladder .grid tbody tr[data-level] td.ask').nth(4)
     level = float(cell.evaluate('n => n.closest("tr").dataset.level'))
@@ -3180,7 +3233,11 @@ def test_a_click_sends_the_price_that_was_on_the_row(page):
     assert sent['kind'] == 'click'
     assert sent['payload']['level'] == level, (
         f"clicked {level}, sent {sent['payload']['level']}")
-    assert sent['payload']['side'] == 'BUY'      # the ask side buys
+    # Under the shipped TT default the asks column joins the offer,
+    # which is a resting SELL. Pinned for the same reason as above: the
+    # subject here is the PRICE, and the side is only along for the
+    # ride, so it must not depend on which default is in force.
+    assert sent['payload']['side'] == 'SELL'
 
 
 def test_ticking_the_setting_OPENS_the_fair_window(page):

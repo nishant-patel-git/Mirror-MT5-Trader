@@ -288,12 +288,25 @@ def test_a_click_away_from_the_touch_rests_instead_of_being_refused(
     page = browser_page
     before = len(desk.brokers['spot'].sent)
 
-    # The ASK column BUYS the spread; far down the ladder is a price
-    # well under the offer.
+    # A BUY, far down the ladder - a price well under the offer.
+    #
+    # WHICH COLUMN BUYS IS A SETTING, so it is read from the snapshot
+    # the engine published rather than written in here. Under the
+    # shipped TT default the BIDS column buys; under TOUCH it is the
+    # asks. This test hard-coded 'ask' and, once TT became the default,
+    # was clicking a SELL instead - which CAN cross below the market,
+    # so it reduced the desk's position at market and never rested
+    # anything. It then left that half-traded desk behind for the four
+    # tests after it, which is why they failed too.
+    #
     # Clicked in ONE evaluate: the ladder rebuilds on every publish, and
     # a row resolved in Python can be replaced before the click lands.
     page.evaluate("""() => {
-        const cells = document.querySelectorAll('.ladder .grid tbody tr td.ask');
+        const tt = window.MT5Trader.state.snapshot.click_convention
+            !== 'TOUCH';
+        const buys = tt ? 'bid' : 'ask';
+        const cells = document.querySelectorAll(
+            '.ladder .grid tbody tr td.' + buys);
         cells[cells.length - 1].click();
     }""")
     page.wait_for_selector('.toast', timeout=8000)
