@@ -815,15 +815,34 @@
     });
     // The pair type decides which legs have an expiry, so the form
     // follows it as it is changed.
-    node.querySelector('.ladder-settings').addEventListener(
-      'input', function (e) {
-        // Which legs have an expiry follows the pair type, and it must
-        // follow it as it is CHANGED — not only when the pane opens.
-        if (e.target.classList.contains('ls-pair-type')) {
-          var pane = node.querySelector('.ladder-settings');
-          fairKindFields(pane, {pair_type: e.target.value});
-        }
-      });
+    ['input', 'change'].forEach(function (event) {
+      node.querySelector('.ladder-settings').addEventListener(
+        event, function (e) {
+          /* THIS CONTROL NOW BELONGS TO THE OPERATOR.
+           *
+           * The pane is shown at once and FILLED when two reads come
+           * back, and that fill used to write over every field
+           * unconditionally. An operator quick enough to change
+           * something in between had it silently reverted - and the
+           * form then saved the OLD value, because the box no longer
+           * said what they had chosen. On a desk running four
+           * terminals that gap is not small.
+           *
+           * Marked here, honoured in the fill. Both events, because a
+           * checkbox reports `change` where a select reports both.
+           */
+          if (e.target && e.target.dataset) {
+            e.target.dataset.touched = '1';
+          }
+          // Which legs have an expiry follows the pair type, and it
+          // must follow it as it is CHANGED — not only when the pane
+          // opens.
+          if (e.target.classList.contains('ls-pair-type')) {
+            var pane = node.querySelector('.ladder-settings');
+            fairKindFields(pane, {pair_type: e.target.value});
+          }
+        });
+    });
 
     node.querySelector('.lock-scroll').addEventListener('change', function (e) {
       setLocked(key, e.target.checked);
@@ -1205,6 +1224,12 @@
     if (!pane) { return; }
     pane.hidden = false;
     node.querySelector('.ls-pair').textContent = key;
+    // A FRESH OPEN OWES NOTHING TO THE LAST ONE. Cleared here, before
+    // the reads go out, so that only an edit made during THIS open can
+    // hold off the fill below.
+    Array.prototype.forEach.call(
+      pane.querySelectorAll('input, select, textarea'),
+      function (input) { input.dataset.touched = ''; });
     Promise.all([
       fetch('/api/pairs').then(function (r) { return r.json(); }),
       fetch('/api/settings').then(function (r) { return r.json(); })
@@ -1221,7 +1246,9 @@
         if (field === 'algo_window' && own === undefined) {
           own = saved.show_fair_window;              // the old name
         }
-        input.dataset.touched = '';
+        // Edited since this pane opened: leave it alone. What the
+        // operator chose outranks what the file said a moment ago.
+        if (input.dataset.touched) { return; }
         if (kind === 'check') {
           input.checked = !!(own === undefined || own === null
             ? live[entry[4] || field] : own);
@@ -1257,8 +1284,14 @@
         }
         input.value = (own === null || own === undefined) ? '' : own;
       });
-      fairKindFields(pane, {pair_type: saved.pair_type
-        || live.pair_type || 'SPOT_FUTURE'});
+      // ...and the expiry rows follow whatever the pair-type control
+      // NOW says. Reading `saved` here would put the note and the
+      // enabled/disabled rows back to the file's answer even though
+      // the control beside them is left showing the operator's.
+      var typeBox = pane.querySelector('.ls-pair-type');
+      fairKindFields(pane, {pair_type:
+        (typeBox && typeBox.dataset.touched && typeBox.value)
+          || saved.pair_type || live.pair_type || 'SPOT_FUTURE'});
       clipNote(pane, live);
       measuredSlippageInto(pane);
     }).catch(function (e) {

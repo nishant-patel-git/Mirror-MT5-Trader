@@ -3549,6 +3549,99 @@ def test_a_stalled_engine_is_not_called_a_dead_one(page):
         ".textContent.indexOf('STALLED') < 0", timeout=WAIT)
 
 
+def slow_pane_reads(page, ms=1200):
+    """Make the two reads that FILL the ladder settings pane arrive
+    late, as a loaded desk does.
+
+    The pane is shown at once and filled when /api/pairs and
+    /api/settings come back. On this container those land in a few
+    milliseconds and the gap is invisible; on a desk running four MT5
+    terminals it is not. Widening it on purpose is the only way to test
+    what happens inside it.
+    """
+    page.evaluate("""(ms) => {
+        if (!window.__slowReal) { window.__slowReal = window.fetch; }
+        const real = window.__slowReal;
+        window.fetch = function (url, options) {
+            const u = String(url);
+            if (u.indexOf('/api/pairs') < 0 && u.indexOf('/api/settings') < 0) {
+                return real(url, options);
+            }
+            return new Promise(function (done) {
+                setTimeout(function () { done(real(url, options)); }, ms);
+            });
+        };
+    }""", ms)
+
+
+def restore_pane_reads(page):
+    page.evaluate("() => { if (window.__slowReal) "
+                  "{ window.fetch = window.__slowReal; } }")
+
+
+def test_a_slow_read_does_not_revert_what_the_operator_just_chose(page):
+    """The pane opens INSTANTLY and fills when two reads come back, and
+    that fill used to write over every field unconditionally.
+
+    An operator quick enough to change something in the gap had their
+    choice silently reverted — and Apply then saved the OLD value,
+    because the box no longer said what they had picked. Pair type is
+    the worst one to lose: it decides which legs carry an expiry and
+    whether there is a fair spread to quote at all.
+
+    Found as a flaky test rather than as a bug report: on a loaded CI
+    runner the reads landed after the click and the assertion below
+    failed, which is the same thing happening to a trader on a busy
+    desk.
+    """
+    slow_pane_reads(page)
+    try:
+        open_ladder(page)
+        page.click('.ladder .ladder-cog')
+        page.wait_for_selector('.ladder .ls-pair-type', timeout=WAIT)
+
+        page.select_option('.ladder .ls-pair-type', 'FUTURE_FUTURE')
+        assert page.input_value('.ladder .ls-pair-type') == 'FUTURE_FUTURE'
+
+        # Let the late reads land ON TOP of the choice.
+        page.wait_for_timeout(2500)
+
+        assert page.input_value('.ladder .ls-pair-type') == 'FUTURE_FUTURE', (
+            'the late read reverted the pair type the operator chose')
+        # ...and the rows that follow the pair type followed the
+        # OPERATOR, not the file: a note saying one thing over a
+        # control saying another is how the wrong value gets saved.
+        assert 'two futures' in page.text_content('.ladder .ls-pairtype')
+        assert page.locator('.ladder .ls-expiry-a').is_enabled()
+    finally:
+        page.click('.ladder .ls-close')
+        restore_pane_reads(page)
+
+
+def test_control_a_field_nobody_touched_is_still_filled_from_the_file(page):
+    """The control. "Do not overwrite what the operator changed" must
+    not become "do not fill the form at all" — a pane that opens empty
+    would be a far worse bug than the one being fixed, and every box
+    here is a real number: a commission, a slippage allowance, a
+    target. So: same slow reads, nothing touched, and the values still
+    arrive."""
+    slow_pane_reads(page)
+    try:
+        open_ladder(page)
+        page.click('.ladder .ladder-cog')
+        page.wait_for_selector('.ladder .ls-pair-type', timeout=WAIT)
+        # Touch NOTHING. Wait for the same late reads.
+        page.wait_for_timeout(2500)
+
+        assert page.input_value('.ladder .ls-pair-type') != '', (
+            'the pane never filled — the guard is swallowing the fill')
+        assert page.input_value('.ladder .ls-slip') != ''
+        assert page.text_content('.ladder .ls-pairtype') != ''
+    finally:
+        page.click('.ladder .ls-close')
+        restore_pane_reads(page)
+
+
 def test_the_pair_type_is_declared_and_the_expiries_follow_it(page):
     """Two futures with two expiries are NOT a calendar. UKOILV6
     against USOILV6 is Brent against WTI: two different instruments
