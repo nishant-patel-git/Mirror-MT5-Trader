@@ -115,12 +115,26 @@ jobs:
     # is worth exactly nothing, and one that is always red is worse than
     # nothing because it teaches the desk to ignore a red mark.
     #
-    # Measured in a constrained container: 7-12 of ~143 fail per run,
-    # a DIFFERENT set each time, on code that is not being changed —
-    # timing flake, not real failures. GitHub's runners are better
-    # resourced and may well be stable. Watch this job for a week or
-    # two: if it comes back green consistently, make it required. If it
-    # stays flaky, fix the flaky tests before promoting it.
+    # Measured in a constrained container: a handful of ~143 fail per
+    # run, a DIFFERENT set each time, on code that is not being
+    # changed — timing flake. A full run does come back 143 green, so
+    # the flake is real and so is the suite.
+    #
+    # BUT: "it is all flake" was believed one round too long, and six
+    # STALE tests hid behind it for weeks — reproducible every single
+    # run, and in isolation. Four still asserted the TOUCH click
+    # mapping after TT became the shipped default, and one counted the
+    # rows of the leg book before the H->L / L->H hint row was added
+    # between them. Every one of those was the test being out of date,
+    # not the app; nobody looked, because the job was known to be red.
+    #
+    # So the rule for reading this job: a failure that repeats on the
+    # SAME test across runs is not flake, whatever the rest of the list
+    # is doing. Check it before shrugging at the colour.
+    #
+    # Watch this job: if it comes back green consistently on GitHub's
+    # better-resourced runners, make it required. If it stays flaky,
+    # fix the flaky tests before promoting it.
     steps:
       - uses: actions/checkout@v4
 
@@ -138,5 +152,15 @@ jobs:
       - name: Install Chromium
         run: playwright install --with-deps chromium
 
+      # BOTH files that need a browser, not just the UI one.
+      #
+      # tests/test_end_to_end.py drives click -> engine -> broker in a
+      # real Chromium, and it was running NOWHERE: this job named only
+      # test_ui_browser.py, and in the two jobs that do run the whole
+      # suite there is no Chromium, so its twelve tests hit
+      # `pytest.skip('chromium unavailable')` and reported green. Six
+      # of them were in fact broken. A test that is skipped everywhere
+      # is not coverage, and it is worse than no test because the count
+      # at the bottom of the run looks the same.
       - name: Run the browser suite
-        run: pytest tests/test_ui_browser.py -q
+        run: pytest tests/test_ui_browser.py tests/test_end_to_end.py -q
