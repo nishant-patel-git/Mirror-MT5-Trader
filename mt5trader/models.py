@@ -10,6 +10,8 @@ import time
 import uuid
 from enum import Enum
 
+from . import sizing
+
 
 class OrderSide(Enum):
     """A side on ONE leg — what an MT5 order does."""
@@ -269,10 +271,20 @@ class SpreadPosition:
         if fraction <= 0.0:
             return self.quantity
         left = 1.0 - fraction
-        self.quantity *= left
+        # TIDIED, because this is a REPEATED multiplication.
+        #
+        # Every other subtraction that walks a click down a stack of
+        # positions already goes through `sizing.tidy`; this one did
+        # not, and it is the one that runs again on the same number
+        # every time another piece comes off. Two part-closes off a ten
+        # left 6.999999999999999 spreads open - on the panel, in the
+        # size of the next closing order, and in the `share` the one
+        # after that is computed from. Dust that is merely ugly at the
+        # second close is a position nobody can flatten at the tenth.
+        self.quantity = sizing.tidy(self.quantity * left)
         for fill in (self.leg_a, self.leg_b):
             if fill is not None:
-                fill.volume *= left
+                fill.volume = sizing.tidy(fill.volume * left)
         if realized is not None:
             # ACCUMULATED, not replaced: a position closed in three
             # pieces earned its P&L in three pieces.

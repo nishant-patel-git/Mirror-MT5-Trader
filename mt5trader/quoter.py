@@ -735,10 +735,45 @@ class Quoter:
             return None
         group.reason = None
 
+        # WHAT THIS GROUP ASKED FOR, NOT THE WHOLE TICKET.
+        #
+        # The bug this replaces cost a trader ten times the size they
+        # clicked. A ladder click for 1 spread over an older 10-spread
+        # ticket arms a closing order for 1 — `positions_to_reduce`
+        # takes the oldest ticket only as far as the click reaches, and
+        # `arm` records that 1 on the synthetic. Then the level was
+        # reached and THIS call closed `position` with no quantity at
+        # all, which means all of it. The part-close intent was built
+        # correctly and thrown away one line before it was used.
+        #
+        # Live: a 0.01 click against a 0.10 ticket from the previous
+        # day took the whole 0.10 off, at a level chosen for a 0.01
+        # trade. The trader's own 0.01 stayed open.
+        #
+        # It reached BOTH modes, because both rest through here: LIMIT
+        # at any level, and MARKET clicked away from the touch. Only a
+        # MARKET click AT the touch was right, because that path goes
+        # through `reduce_first`, which has always passed its `take`.
+        #
+        # None when the group covers the whole ticket — AutoRouting's
+        # target, CLOSE ALL, a click at or over the position's size.
+        # Those take the unchanged full-close path, where the volumes
+        # come from the broker's own book rather than from a share we
+        # computed, and no rounding enters a close that needs none.
+        held = float(position.quantity or 0.0)
+        wanted = group.quantity
+        part = None if wanted >= held - 1e-9 else wanted
+
+        # STILL the whole position, and deliberately so: `fraction`
+        # below is measured against the WHOLE ticket by
+        # `_closed_fraction`, so this is what turns it back into
+        # spreads. Reading `wanted` here would under-settle a part
+        # close by the square of the share.
         quantity = position.quantity
         try:
             answer = self.executor.close_position(
                 pair, position, md, reason=self._close_reason(group),
+                quantity=part,
                 # This module owns these orders; it settles them itself
                 # below. Letting the close disarm them would mark a
                 # close that WORKED as 'cancelled', and would delete the
