@@ -1296,6 +1296,28 @@ class Coordinator:
                 self.quoter.disarm_auto(
                     position.position_id,
                     f'the trader clicked {level:g} to close this instead')
+            # CAN THE BROKER TRADE THIS PIECE AT ALL?
+            #
+            # Asked HERE, on the click, because this is the last moment
+            # a refusal is useful. `take` is a share of an older ticket,
+            # and a share does not have to be a tradable volume: 0.01
+            # lots of a future whose step is 0.10 is not an order. An
+            # exit armed at that size cannot ever fire, and the trader
+            # would be watching a price that can never get them out -
+            # which is the failure at the far end from closing too
+            # much, and quieter.
+            #
+            # The refusal carries the broker's own volume step and the
+            # size that WOULD work, because the trader's next move is to
+            # click a bigger one.
+            #
+            # Stopping here rather than skipping to the next ticket is
+            # the same rule `reduce_first` follows: the rest of the
+            # queue is no longer the queue the trader would have
+            # closed.
+            usable, why = self.executor.can_part_close(pair, position, take)
+            if not usable:
+                return armed, max(left, 0.0), closed, why
             # AS FAR AS THE CLICK REACHES, not the whole ticket. A
             # BUY 100 over a 1,200 short rests a close for 100 of it
             # and opens NOTHING; before this it armed the small old

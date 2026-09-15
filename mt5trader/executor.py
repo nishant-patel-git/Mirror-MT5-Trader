@@ -564,6 +564,34 @@ class PairExecutor:
 
         return self._settle_close(pair, position, results, md, reason)
 
+    def can_part_close(self, pair, position, quantity):
+        """(True, None) when this PIECE can be traded on both legs.
+
+        Asked BEFORE a reducing click rests, so the refusal lands on the
+        click that caused it instead of on a level hours later.
+
+        A part-close is quantised to what both brokers can trade, and
+        the piece can simply be too small: 0.01 lots of a future whose
+        step is 0.10 is not an order. Once a resting close is armed at
+        that size there is no good outcome left - firing it closes
+        nothing while reporting success, and the trader is watching a
+        price that can never get them out. The only honest moment to
+        say so is the click.
+
+        A full close is always allowed through: it never needs a share,
+        and a close is never withheld.
+        """
+        held = float(position.quantity or 0.0)
+        try:
+            wanted = float(quantity)
+        except (TypeError, ValueError):
+            return True, None
+        if held <= 0 or wanted >= held - 1e-9:
+            return True, None
+        share = max(0.0, min(1.0, wanted / held))
+        volumes, refusal = self._part_close_volumes(pair, position, share)
+        return (volumes is not None), refusal
+
     def _part_close_volumes(self, pair, position, share):
         """Both legs' volumes for a PART close, or (None, why not).
 
