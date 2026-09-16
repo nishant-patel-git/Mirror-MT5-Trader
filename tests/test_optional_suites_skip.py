@@ -23,6 +23,7 @@ This runs pytest in a subprocess against a playwright that raises
 exactly that ImportError, and requires a clean exit.
 """
 
+import os
 import re
 import subprocess
 import sys
@@ -49,7 +50,26 @@ REPO = Path(__file__).resolve().parent.parent
 
 def collect(extra_path=None):
     """Collect the gate's own suite in a subprocess; (rc, output)."""
-    env = {'PATH': '/usr/bin:/bin', 'HOME': '/tmp'}
+    # THE REAL ENVIRONMENT, with only PYTHONPATH changed.
+    #
+    # Built from scratch first - {'PATH': '/usr/bin:/bin', ...} - which
+    # is a POSIX box's environment and nothing else's. On Windows,
+    # dropping SystemRoot takes Winsock with it, so the child could not
+    # even `import asyncio`:
+    #
+    #     OSError: [WinError 10106] The requested service provider
+    #     could not be loaded or initialized
+    #
+    # Collection then errored for a reason that had nothing to do with
+    # what is under test, and THIS FILE would have failed the gate on
+    # every Windows desk - the exact failure it was written to prevent.
+    # Caught by the `pytest on Windows` job, which is the whole reason
+    # that job exists.
+    #
+    # PYTHONPATH is popped before it is set so a parent run that
+    # already has one cannot leak into the control.
+    env = dict(os.environ)
+    env.pop('PYTHONPATH', None)
     if extra_path is not None:
         env['PYTHONPATH'] = str(extra_path)
     done = subprocess.run(
