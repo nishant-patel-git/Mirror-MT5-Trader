@@ -22,7 +22,36 @@ from pathlib import Path
 
 import pytest
 
-playwright_api = pytest.importorskip('playwright.sync_api')
+# SKIPPED ON ANY ImportError, NOT JUST A MISSING MODULE.
+#
+# This suite is optional everywhere it matters: a trading desk has no
+# browser and does not need one, and `pytest tests/ -q` is the gate
+# START-TRADING and UPDATE.BAT run before they will let the machine
+# trade. An optional suite must therefore SKIP on a desk, never error.
+#
+# `pytest.importorskip` alone stopped doing that. Since pytest 9.1 it
+# defaults to catching ModuleNotFoundError only, and requirements.txt
+# asks for `pytest>=8.0.0`, so a desk installed today gets 9.1 and the
+# new behaviour without anyone choosing it.
+#
+# Live on a locked-down desk: Windows Application Control blocked
+# `_greenlet.pyd`, which playwright imports. That is a plain
+# ImportError, not a missing module -
+#
+#     ImportError: DLL load failed while importing _greenlet:
+#     An Application Control policy has blocked this file.
+#
+# - so it was re-raised, collection ERRORED, the gate failed, and
+# UPDATE.BAT rolled the machine back off a good version. The engine was
+# fine. Nothing could reach it.
+#
+# Written as try/except rather than `exc_type=ImportError` because that
+# parameter only exists from pytest 8.2, and this has to hold across
+# every version the fleet might install.
+try:
+    import playwright.sync_api as playwright_api
+except ImportError as exc:                 # missing, or a blocked DLL
+    pytest.skip(f'playwright unavailable: {exc}', allow_module_level=True)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
