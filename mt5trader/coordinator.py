@@ -126,6 +126,12 @@ class Coordinator:
         self._stale_logged = {}
         #: pair key -> when a stale pair last re-subscribed itself
         self._auto_refreshed = {}
+        #: pair key -> why this pair has NO price at all, while it has
+        #: none. Missing is not stale: a stale pair still has a book to
+        #: read, a dark one has nothing, and the ladder has to say which
+        #: it is looking at.
+        self._dark = {}
+        self._dark_logged = {}
         self._loop_interval = None
         self._last_poll = None
         self._stop = threading.Event()
@@ -498,8 +504,25 @@ class Coordinator:
             tick_a = ticks.get((pair.account_a, pair.symbol_a))
             tick_b = ticks.get((pair.account_b, pair.symbol_b))
             if not tick_a or not tick_b:
+                # NO PRICE IS NOT NOTHING TO DO.
+                #
+                # This was a bare `continue`, and it was the whole of
+                # the 2026-09-16 naked leg. Skipping here skipped
+                # EVERYTHING below it: the staleness log, the automatic
+                # re-subscribe, and `quoter.work` - the only place that
+                # asks whether a resting order has filled. A pending is
+                # a real order at the broker; it filled at 18:47, was
+                # never noticed, and was hedged at 19:00 the instant a
+                # tick returned. Twelve minutes fifty-one seconds naked,
+                # in silence.
+                #
+                # The dark path now does MORE than the stale one, not
+                # less: it says so, it tries to fix itself, and it
+                # watches what is already at the broker.
                 self.market[key] = None
+                self._go_dark(key, pair, tick_a, tick_b)
                 continue
+            self._dark.pop(key, None)
             md = compute_spread(pair, tick_a, tick_b, pair.hedge_ratio,
                                 clock=self.clock)
             self.quote_ages.observe(key, md)
@@ -908,6 +931,44 @@ class Coordinator:
                 stats = None
         self._session_cache[(account, symbol)] = (now, stats)
         return stats
+
+    def _go_dark(self, key, pair, tick_a, tick_b):
+        """A leg has no price at all. Say it, try to fix it, WATCH it.
+
+        Missing is worse than stale and used to be treated as less: a
+        stale pair is logged, auto-refreshed and worked; a dark pair was
+        skipped in silence, orders and all. Whatever the cause - the
+        terminal dropping a subscription, the broker, the LP, the line,
+        the PC - the consequences here are identical and so is the
+        answer.
+
+        A close is never touched from here. `watch_dark` leaves closing
+        groups alone: they rest nothing at the broker, and a guard must
+        never prevent a close.
+        """
+        dark = [name for name, tick in (('A', tick_a), ('B', tick_b))
+                if not tick]
+        symbols = {'A': pair.symbol_a, 'B': pair.symbol_b}
+        reason = ('no price for leg ' + ' and leg '.join(
+            f'{leg} ({symbols[leg]})' for leg in dark) +
+            ' — this pair is DARK: nothing is placed, and anything '
+            'already resting is pulled')
+        self._dark[key] = reason
+
+        every = float(self.config.get('STALE_LOG_EVERY_SEC', 60.0))
+        now = self.clock()
+        if now - self._dark_logged.get(key, 0.0) >= every:
+            self._dark_logged[key] = now
+            logging.critical('%s: %s', key, reason)
+
+        # Same self-repair the stale path gets. A dropped subscription
+        # is the commonest cause and re-subscribing is what fixes it;
+        # withholding that from the WORSE case made no sense.
+        self._auto_refresh(key, None)
+
+        # ...and the part that matters for money: a pending already at
+        # the broker is still live and still fillable.
+        self.quoter.watch_dark(pair, reason)
 
     def _auto_refresh(self, key, md):
         """Re-subscribe a stale pair by itself, now and then.
@@ -1967,6 +2028,10 @@ class Coordinator:
                 'spread_units': sizing.spread_units(
                     pair.clip_lots_b, (pair.meta_b or {}).get('contract_size')),
                 'market': md,
+                # WHY there is no market, when there is none. Without
+                # this the ladder simply shows dashes, which reads as a
+                # quiet market rather than a blind one.
+                'dark_reason': self._dark.get(key),
                 'short_spread': (md or {}).get('short_spread'),
                 'long_spread': (md or {}).get('long_spread'),
                 # What the CARRY says this spread should be, from the

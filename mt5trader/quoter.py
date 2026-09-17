@@ -225,6 +225,10 @@ class Quoter:
         #: The last market seen per pair, so an auto-close can be marked
         #: at the touch it was decided on rather than at nothing.
         self._markets = {}
+        #: (pair key, ticket) -> when we last shouted that this order
+        #: could not be read. An unreadable leg is re-read three times a
+        #: second and a CRITICAL at that rate buries what matters.
+        self._unreadable_said = {}
         #: Called with a position whenever THIS module changes it, so it
         #: reaches the database. Set by the coordinator, like
         #: `executor.before_close`.
@@ -305,6 +309,63 @@ class Quoter:
             event = self._rest_or_repeg(pair, md, group)
             if event:
                 events.append(event)
+        return events
+
+    def watch_dark(self, pair, reason):
+        """This pair has NO PRICE. Watch what is already at the broker.
+
+        THE 2026-09-16 NAKED LEG IS THIS METHOD'S REASON TO EXIST.
+
+        When a leg's tick went missing the coordinator skipped the pair
+        outright, so `work()` never ran, so nothing ever asked whether
+        the OTHER leg's pending had filled. It had: four lots sat naked
+        for twelve minutes and fifty-one seconds, and were hedged in one
+        second the moment a tick came back.
+
+        No price is a reason to stop PLACING. It is the opposite of a
+        reason to stop WATCHING - a pending is a real order at the
+        broker and fills whether or not we can see a price for it. So:
+
+          - FILLS are checked. If one is found the ordinary path runs:
+            hedge it, and if the hedge cannot be sent (the dark leg is
+            usually the one it would be sent to) unwind by ticket. The
+            trader ends flat in seconds instead of naked for minutes.
+          - The pending is PULLED. We cannot hedge what we cannot price,
+            so an order that might fill into that is an order that
+            should not be resting. `_pull` hedges a fill that races the
+            cancel, and keeps the ticket if the broker cannot be reached.
+          - Nothing is placed and nothing is re-pegged. There is no
+            price to peg to.
+          - CLOSING groups are left alone entirely. They rest nothing at
+            the broker, and a close is never withheld or pulled.
+
+        The cost is queue position: the order is re-rested when the feed
+        returns. That is the right trade - the alternative is a fill we
+        cannot hedge.
+        """
+        events = []
+        for key, group in list(self.groups.items()):
+            if group.pair_key != pair.key:
+                continue
+            if group.closing:
+                group.reason = reason
+                continue
+            if group.ticket is not None:
+                event = self._check_fill(pair, None, group)
+                if event:
+                    events.append(event)
+                    if key not in self.groups:
+                        continue
+            if group.ticket is not None:
+                answer = self._pull(pair, group, reason) or {}
+                if answer.get('action'):
+                    # It filled as we pulled it; `_pull` hedged it and
+                    # this is that event, not a clean pull.
+                    events.append(answer)
+                else:
+                    events.append({'group': key, 'action': 'pulled_dark',
+                                   'reason': reason})
+            group.reason = reason
         return events
 
     def _wanted_volume(self, pair, group, md=None):
@@ -490,7 +551,26 @@ class Quoter:
             logging.critical("%s: pending at %s FILLED as it was cancelled — "
                              "hedging it", pair.key, group.level)
             return self._on_fill(pair, group, state)
-        group.ticket = None
+        # A CANCEL THAT WAS NEVER DELIVERED MUST NOT ERASE THE TICKET.
+        #
+        # This cleared it unconditionally. On a broker we could not
+        # reach, that forgot a pending which is still live and still
+        # fillable - and once the ticket is gone nothing checks it
+        # again, which is precisely how a leg goes on with nobody
+        # watching. Keeping it means the next pass reads it, pulls it
+        # again, and hedges it if it filled meanwhile.
+        #
+        # "Could not reach" only. An order the broker says is simply no
+        # longer there is gone, and holding its ticket for ever would
+        # wedge the group.
+        if state.get('cancelled') or state.get('readable', True) is not False:
+            group.ticket = None
+        else:
+            logging.critical(
+                '%s: could not reach the broker to pull order %s at %s (%s) '
+                '- KEEPING the ticket: it may still be live and fillable.',
+                pair.key, group.ticket, group.level,
+                state.get('error') or 'no answer')
         return state
 
     def _check_fill(self, pair, md, group):
@@ -502,9 +582,50 @@ class Quoter:
         if leg is None:
             return None
         state = leg.order_state(group.ticket)
+        # UNREADABLE IS NOT UNFILLED.
+        #
+        # The whole of the 2026-09-16 naked leg is in this distinction.
+        # A pending is a REAL order at the broker: it fills whether or
+        # not we can see it. So "I could not ask" must never be spent as
+        # "it has not filled" - that answer tells the caller to carry
+        # on, and carrying on is the one thing that cannot be right.
+        #
+        # Nothing is closed or sent from here: with no answer there is
+        # nothing to act on. It is SAID - on the ladder and, at CRITICAL,
+        # in the log - and the level is left alone for the next pass,
+        # which is the only honest move.
+        if state.get('readable', True) is False:
+            why = state.get('error') or 'the leg could not be read'
+            group.reason = (f'cannot tell whether this order has filled: '
+                            f'{why} — NOT assuming it has not')
+            self._say_unreadable(pair, group, why)
+            return None
+        # It answered. Forget that it once did not, so the next outage
+        # on this order is shouted about at once rather than swallowed
+        # by a rate limit set half an hour ago - and so this dict does
+        # not grow a row per ticket for the life of the process.
+        self._unreadable_said.pop((pair.key, group.ticket), None)
         if not state.get('filled_volume'):
             return None
         return self._on_fill(pair, group, state)
+
+    #: How often one unreadable order may shout. A leg that cannot be
+    #: read is read again three times a second, and a CRITICAL line at
+    #: that rate buries the one thing worth seeing.
+    UNREADABLE_LOG_EVERY_SEC = 30.0
+
+    def _say_unreadable(self, pair, group, why):
+        now = self.executor.clock()
+        key = (pair.key, group.ticket)
+        if now - self._unreadable_said.get(key, 0.0) < \
+                self.UNREADABLE_LOG_EVERY_SEC:
+            return
+        self._unreadable_said[key] = now
+        logging.critical(
+            '%s: order %s at %s CANNOT BE READ (%s). It is a real pending at '
+            'the broker and may already have filled - this system cannot '
+            'tell, and is NOT treating it as unfilled.',
+            pair.key, group.ticket, group.level, why)
 
     def _on_fill(self, pair, group, state):
         """The quoting leg filled. Cross the other leg NOW.
