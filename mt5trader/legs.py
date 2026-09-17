@@ -378,15 +378,30 @@ class RemoteLeg:
 
     def cancel_order(self, ticket):
         reply = self._request({'cmd': 'cancel_order', 'ticket': ticket})
-        return reply or {'ok': False, 'cancelled': False, 'filled_volume': 0.0,
+        # `readable` FALSE: we did not reach the broker, so we know
+        # NOTHING about this pending - not that it is gone, and not that
+        # it is still there. `_pull` keeps the ticket on this answer
+        # rather than forgetting a pending that is still live.
+        return reply or {'ok': False, 'readable': False,
+                         'cancelled': False, 'filled_volume': 0.0,
                          'price': None, 'position_tickets': [],
+                         'filled_at': None, 'server_offset_sec': None,
                          'still_open': True, 'error': 'IPC failure'}
 
     def order_state(self, ticket):
         reply = self._request({'cmd': 'order_state', 'ticket': ticket})
-        return reply or {'ok': False, 'filled_volume': 0.0, 'price': None,
-                         'position_tickets': [], 'still_open': True,
-                         'error': 'IPC failure'}
+        # `readable` FALSE, not a filled volume of zero.
+        #
+        # The caller has to tell "this order has not filled" from "I
+        # could not ask". They are opposite instructions: one says carry
+        # on, the other says stop and pull. This dict carried 0.0 and
+        # the reader looked no further, so an unreachable leg read as a
+        # quiet one - see quoter._check_fill.
+        return reply or {'ok': False, 'readable': False,
+                         'filled_volume': 0.0, 'price': None,
+                         'position_tickets': [],
+                         'filled_at': None, 'server_offset_sec': None,
+                         'still_open': True, 'error': 'IPC failure'}
 
     def close_ticket(self, symbol, ticket, volume, entry_side,
                      slippage_points=1.0, comment=""):

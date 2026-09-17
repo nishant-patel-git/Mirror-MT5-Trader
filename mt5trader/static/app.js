@@ -2882,7 +2882,8 @@
   function positionsTable() {
     var html = '<table><thead><tr><th>Pair</th><th>Side</th><th>Net</th>' +
       '<th>Avg entry</th><th>Mark</th><th>Open P&amp;L</th><th>Mode</th>' +
-      '<th>Slip</th><th>Click→on</th><th>Legs</th><th></th></tr></thead><tbody>';
+      '<th>Slip</th><th>Click→on</th><th>Naked</th><th>Legs</th>' +
+      '<th></th></tr></thead><tbody>';
     var any = false;
     eachPosition(function (key, row, position) {
       any = true;
@@ -2900,6 +2901,18 @@
                         position.click_to_on_ms === undefined
                         ? DASH : Math.round(position.click_to_on_ms) + 'ms') +
         '</td>';
+      //: HOW LONG ONE LEG WAS ON BY ITSELF, on the broker's own clock.
+      //: Click→on beside it starts when this process NOTICED the fill,
+      //: so on a resting order it can read 1s on a leg that was alone
+      //: for twelve minutes. This is the column that cannot be
+      //: flattered by looking late; over a second it is marked, and
+      //: unmeasured stays a dash rather than becoming a comfortable 0.
+      html += '<td' + (position.naked_ms > 1000 ? ' class="down"' : '') +
+        '>' + (position.naked_ms === null || position.naked_ms === undefined
+          ? DASH
+          : (position.naked_ms >= 1000
+            ? (position.naked_ms / 1000).toFixed(1) + 's'
+            : Math.round(position.naked_ms) + 'ms')) + '</td>';
       html += '<td>' + legText(position.leg_a) + ' / ' +
         legText(position.leg_b) + '</td>';
       html += '<td><button class="btn close-position">Flatten</button></td>';
@@ -2964,11 +2977,21 @@
         'zero.</div>';
     }
     var bad = Math.abs(check.difference) > 0.01;
+    /* GROSS against GROSS, and the row SAYS so. MT5's own profit
+     * carries no commission and no swap, so comparing it against our
+     * net total put the whole round trip's commission into the
+     * difference for ever — a red row about a disagreement that does
+     * not exist. The net figure, which is the one on every other
+     * panel, is shown beside it and is never the thing compared. */
+    var net = (check.ours_net === null || check.ours_net === undefined)
+      ? '' : '<td>ours after commission</td><td>' + money(check.ours_net) +
+        '</td>';
     return '<table><tbody><tr' + (bad ? ' class="mismatch"' : '') +
-      '><td>our total</td><td>' + money(check.ours) +
+      '><td>our total (gross)</td><td>' + money(check.ours) +
       '</td><td>MT5’s own</td><td>' + money(check.theirs) +
       '</td><td>difference</td><td>' + money(check.difference) +
-      '</td><td>' + agoText(check.at) + '</td></tr></tbody></table>';
+      '</td>' + net +
+      '<td>' + agoText(check.at) + '</td></tr></tbody></table>';
   }
 
   function agoText(at) {

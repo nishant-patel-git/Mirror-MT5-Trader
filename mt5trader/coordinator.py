@@ -126,6 +126,12 @@ class Coordinator:
         self._stale_logged = {}
         #: pair key -> when a stale pair last re-subscribed itself
         self._auto_refreshed = {}
+        #: pair key -> why this pair has NO price at all, while it has
+        #: none. Missing is not stale: a stale pair still has a book to
+        #: read, a dark one has nothing, and the ladder has to say which
+        #: it is looking at.
+        self._dark = {}
+        self._dark_logged = {}
         self._loop_interval = None
         self._last_poll = None
         self._stop = threading.Event()
@@ -498,8 +504,25 @@ class Coordinator:
             tick_a = ticks.get((pair.account_a, pair.symbol_a))
             tick_b = ticks.get((pair.account_b, pair.symbol_b))
             if not tick_a or not tick_b:
+                # NO PRICE IS NOT NOTHING TO DO.
+                #
+                # This was a bare `continue`, and it was the whole of
+                # the 2026-09-16 naked leg. Skipping here skipped
+                # EVERYTHING below it: the staleness log, the automatic
+                # re-subscribe, and `quoter.work` - the only place that
+                # asks whether a resting order has filled. A pending is
+                # a real order at the broker; it filled at 18:47, was
+                # never noticed, and was hedged at 19:00 the instant a
+                # tick returned. Twelve minutes fifty-one seconds naked,
+                # in silence.
+                #
+                # The dark path now does MORE than the stale one, not
+                # less: it says so, it tries to fix itself, and it
+                # watches what is already at the broker.
                 self.market[key] = None
+                self._go_dark(key, pair, tick_a, tick_b)
                 continue
+            self._dark.pop(key, None)
             md = compute_spread(pair, tick_a, tick_b, pair.hedge_ratio,
                                 clock=self.clock)
             self.quote_ages.observe(key, md)
@@ -909,6 +932,44 @@ class Coordinator:
         self._session_cache[(account, symbol)] = (now, stats)
         return stats
 
+    def _go_dark(self, key, pair, tick_a, tick_b):
+        """A leg has no price at all. Say it, try to fix it, WATCH it.
+
+        Missing is worse than stale and used to be treated as less: a
+        stale pair is logged, auto-refreshed and worked; a dark pair was
+        skipped in silence, orders and all. Whatever the cause - the
+        terminal dropping a subscription, the broker, the LP, the line,
+        the PC - the consequences here are identical and so is the
+        answer.
+
+        A close is never touched from here. `watch_dark` leaves closing
+        groups alone: they rest nothing at the broker, and a guard must
+        never prevent a close.
+        """
+        dark = [name for name, tick in (('A', tick_a), ('B', tick_b))
+                if not tick]
+        symbols = {'A': pair.symbol_a, 'B': pair.symbol_b}
+        reason = ('no price for leg ' + ' and leg '.join(
+            f'{leg} ({symbols[leg]})' for leg in dark) +
+            ' — this pair is DARK: nothing is placed, and anything '
+            'already resting is pulled')
+        self._dark[key] = reason
+
+        every = float(self.config.get('STALE_LOG_EVERY_SEC', 60.0))
+        now = self.clock()
+        if now - self._dark_logged.get(key, 0.0) >= every:
+            self._dark_logged[key] = now
+            logging.critical('%s: %s', key, reason)
+
+        # Same self-repair the stale path gets. A dropped subscription
+        # is the commonest cause and re-subscribing is what fixes it;
+        # withholding that from the WORSE case made no sense.
+        self._auto_refresh(key, None)
+
+        # ...and the part that matters for money: a pending already at
+        # the broker is still live and still fillable.
+        self.quoter.watch_dark(pair, reason)
+
     def _auto_refresh(self, key, md):
         """Re-subscribe a stale pair by itself, now and then.
 
@@ -1030,7 +1091,41 @@ class Coordinator:
         click and a ladder click at the same price are the same order.
         """
         with self.lock:
-            return self._click(pair_key, side, level, quantity)
+            answer = self._click(pair_key, side, level, quantity)
+            self._log_click(pair_key, side, level, quantity, answer)
+            return answer
+
+    def _log_click(self, pair_key, side, level, quantity, answer):
+        """One line per click: what was asked for, and what came of it.
+
+        A placement used to write NOTHING. The ladder showed it, so
+        nobody added a line - and then "which cell did he click, and was
+        it LIMIT or MARKET?" could only be answered by reading the
+        database and doing arithmetic on the slippage. The trader who
+        was told his order filled where he never clicked waited a day
+        for that answer.
+
+        The INTENT is logged even when the click was refused, because a
+        refusal is exactly the case where nothing else records what was
+        asked for. Never raises: a click is not going to fail over its
+        own log line.
+        """
+        try:
+            pair = self.config.pairs.get(pair_key)
+            mode = getattr(getattr(pair, 'order_type', None), 'value', '?')
+            if quantity is None and pair is not None:
+                quantity = pair.default_quantity
+            outcome = 'refused' if answer.get('refused') else (
+                'taken' if answer.get('ok') else 'failed')
+            logging.info(
+                'CLICK %s %s %s qty %s at %s -> %s%s', pair_key,
+                getattr(side, 'value', side), mode,
+                '?' if quantity is None else f'{float(quantity):g}',
+                '?' if level is None else f'{float(level):g}',
+                outcome,
+                f" ({answer['reason']})" if answer.get('reason') else '')
+        except Exception as e:                # never lose a click to a log
+            logging.debug('could not log the click: %s', e)
 
     def _click(self, pair_key, side, level, quantity=None):
         pair = self.config.pairs.get(pair_key)
@@ -1756,8 +1851,27 @@ class Coordinator:
             measured and max(measured) - min(measured) > 60)
         return block
 
-    def pnl_check(self, ours, accounts, started):
-        """Our open P&L against MT5's own — BOTH AS OF ONE MOMENT.
+    def pnl_check(self, ours, accounts, started, ours_net=None):
+        """Our open P&L against MT5's own — BOTH AS OF ONE MOMENT, AND
+        BOTH THE SAME KIND OF NUMBER.
+
+        GROSS against GROSS. MT5's `profit` is the floating P&L on the
+        two prices and nothing else: it carries no commission and no
+        swap. Ours was the NET figure - commission for both ends of both
+        legs already taken off by `mark_fees` - so the difference
+        carried the whole round trip's commission as a permanent,
+        structural gap that no market could ever close. On a desk paying
+        $3.50 a lot a side that is a row sitting red all session over a
+        disagreement that does not exist.
+
+        It was invisible here only because these accounts are billed at
+        $0.00 a lot. A number that is right only while a setting is zero
+        is not right.
+
+        The NET total is still what the trader is shown everywhere else,
+        and it is carried here too (`ours_net`) so the panel can show
+        both and say which one was compared. Nothing about the P&L a
+        trader reads has changed - only what this row compares it to.
 
         A disagreement here means one of us is wrong about real money,
         so it has to be shown. But the two halves are read on different
@@ -1799,7 +1913,13 @@ class Coordinator:
             theirs += float(profit)
         self._pnl_check = {
             'at': started,
+            #: GROSS, because `theirs` is gross. The comparison is the
+            #: whole point of the row and it has to be like for like.
             'ours': ours,
+            #: ...and the net figure beside it, which is the number on
+            #: every other panel. Shown, never compared.
+            'ours_net': ours_net,
+            'basis': 'gross',
             'theirs': theirs,
             'difference': (None if ours is None or theirs is None
                            else ours - theirs),
@@ -1834,6 +1954,11 @@ class Coordinator:
         #: unmeasured-is-not-zero rule each pair uses: one position
         #: that cannot be marked makes the TOTAL unknown, not smaller.
         ours = 0.0
+        #: The same total WITHOUT commission, which is the only thing
+        #: MT5's own `profit` can honestly be compared against. Same
+        #: unmeasured-is-not-zero rule: one position that cannot be
+        #: marked makes it unknown, not smaller.
+        ours_gross = 0.0
         for key, pair in self.config.pairs.items():
             md = self.market.get(key)
             sizes = self.implied_depth(pair)
@@ -1853,6 +1978,7 @@ class Coordinator:
             buys, sells = self.book.working_counts(key)
             positions = []
             open_pnl = 0.0
+            open_gross = 0.0
             for position in self.book.positions(key):
                 gross, net_pnl, closing = mark_position(
                     position, md, settings)
@@ -1878,6 +2004,10 @@ class Coordinator:
                     open_pnl = None
                 elif open_pnl is not None:
                     open_pnl += net_pnl
+                if gross is None:
+                    open_gross = None
+                elif open_gross is not None:
+                    open_gross += gross
             row_exit = takeprofit.describe(
                 pair, md, settings,
                 margin_per_spread=margin.get('money'),
@@ -1895,6 +2025,10 @@ class Coordinator:
                     ours = None
                 elif ours is not None:
                     ours += open_pnl
+                if open_gross is None:
+                    ours_gross = None
+                elif ours_gross is not None:
+                    ours_gross += open_gross
             pairs[key] = {
                 'key': key, 'name': pair.name, 'enabled': pair.enabled,
                 'account_a': pair.account_a, 'account_b': pair.account_b,
@@ -1967,6 +2101,10 @@ class Coordinator:
                 'spread_units': sizing.spread_units(
                     pair.clip_lots_b, (pair.meta_b or {}).get('contract_size')),
                 'market': md,
+                # WHY there is no market, when there is none. Without
+                # this the ladder simply shows dashes, which reads as a
+                # quiet market rather than a blind one.
+                'dark_reason': self._dark.get(key),
                 'short_spread': (md or {}).get('short_spread'),
                 'long_spread': (md or {}).get('long_spread'),
                 # What the CARRY says this spread should be, from the
@@ -2046,7 +2184,10 @@ class Coordinator:
         return {
             'at': started,
             #: Our open P&L against MT5's own, BOTH AS OF ONE MOMENT.
-            'pnl_check': self.pnl_check(ours, accounts, started),
+            # GROSS goes in, because MT5's own profit is gross. The
+            # net total travels beside it for the panel to show.
+            'pnl_check': self.pnl_check(ours_gross, accounts, started,
+                                        ours_net=ours),
             # What a click does, and how fast it is drained — the UI
             # arms itself from the ENGINE's answer, never from its own
             # idea of what the trader last selected.

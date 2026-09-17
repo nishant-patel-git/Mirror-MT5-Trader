@@ -225,6 +225,10 @@ class Quoter:
         #: The last market seen per pair, so an auto-close can be marked
         #: at the touch it was decided on rather than at nothing.
         self._markets = {}
+        #: (pair key, ticket) -> when we last shouted that this order
+        #: could not be read. An unreadable leg is re-read three times a
+        #: second and a CRITICAL at that rate buries what matters.
+        self._unreadable_said = {}
         #: Called with a position whenever THIS module changes it, so it
         #: reaches the database. Set by the coordinator, like
         #: `executor.before_close`.
@@ -305,6 +309,63 @@ class Quoter:
             event = self._rest_or_repeg(pair, md, group)
             if event:
                 events.append(event)
+        return events
+
+    def watch_dark(self, pair, reason):
+        """This pair has NO PRICE. Watch what is already at the broker.
+
+        THE 2026-09-16 NAKED LEG IS THIS METHOD'S REASON TO EXIST.
+
+        When a leg's tick went missing the coordinator skipped the pair
+        outright, so `work()` never ran, so nothing ever asked whether
+        the OTHER leg's pending had filled. It had: four lots sat naked
+        for twelve minutes and fifty-one seconds, and were hedged in one
+        second the moment a tick came back.
+
+        No price is a reason to stop PLACING. It is the opposite of a
+        reason to stop WATCHING - a pending is a real order at the
+        broker and fills whether or not we can see a price for it. So:
+
+          - FILLS are checked. If one is found the ordinary path runs:
+            hedge it, and if the hedge cannot be sent (the dark leg is
+            usually the one it would be sent to) unwind by ticket. The
+            trader ends flat in seconds instead of naked for minutes.
+          - The pending is PULLED. We cannot hedge what we cannot price,
+            so an order that might fill into that is an order that
+            should not be resting. `_pull` hedges a fill that races the
+            cancel, and keeps the ticket if the broker cannot be reached.
+          - Nothing is placed and nothing is re-pegged. There is no
+            price to peg to.
+          - CLOSING groups are left alone entirely. They rest nothing at
+            the broker, and a close is never withheld or pulled.
+
+        The cost is queue position: the order is re-rested when the feed
+        returns. That is the right trade - the alternative is a fill we
+        cannot hedge.
+        """
+        events = []
+        for key, group in list(self.groups.items()):
+            if group.pair_key != pair.key:
+                continue
+            if group.closing:
+                group.reason = reason
+                continue
+            if group.ticket is not None:
+                event = self._check_fill(pair, None, group)
+                if event:
+                    events.append(event)
+                    if key not in self.groups:
+                        continue
+            if group.ticket is not None:
+                answer = self._pull(pair, group, reason) or {}
+                if answer.get('action'):
+                    # It filled as we pulled it; `_pull` hedged it and
+                    # this is that event, not a clean pull.
+                    events.append(answer)
+                else:
+                    events.append({'group': key, 'action': 'pulled_dark',
+                                   'reason': reason})
+            group.reason = reason
         return events
 
     def _wanted_volume(self, pair, group, md=None):
@@ -490,7 +551,26 @@ class Quoter:
             logging.critical("%s: pending at %s FILLED as it was cancelled — "
                              "hedging it", pair.key, group.level)
             return self._on_fill(pair, group, state)
-        group.ticket = None
+        # A CANCEL THAT WAS NEVER DELIVERED MUST NOT ERASE THE TICKET.
+        #
+        # This cleared it unconditionally. On a broker we could not
+        # reach, that forgot a pending which is still live and still
+        # fillable - and once the ticket is gone nothing checks it
+        # again, which is precisely how a leg goes on with nobody
+        # watching. Keeping it means the next pass reads it, pulls it
+        # again, and hedges it if it filled meanwhile.
+        #
+        # "Could not reach" only. An order the broker says is simply no
+        # longer there is gone, and holding its ticket for ever would
+        # wedge the group.
+        if state.get('cancelled') or state.get('readable', True) is not False:
+            group.ticket = None
+        else:
+            logging.critical(
+                '%s: could not reach the broker to pull order %s at %s (%s) '
+                '- KEEPING the ticket: it may still be live and fillable.',
+                pair.key, group.ticket, group.level,
+                state.get('error') or 'no answer')
         return state
 
     def _check_fill(self, pair, md, group):
@@ -502,9 +582,50 @@ class Quoter:
         if leg is None:
             return None
         state = leg.order_state(group.ticket)
+        # UNREADABLE IS NOT UNFILLED.
+        #
+        # The whole of the 2026-09-16 naked leg is in this distinction.
+        # A pending is a REAL order at the broker: it fills whether or
+        # not we can see it. So "I could not ask" must never be spent as
+        # "it has not filled" - that answer tells the caller to carry
+        # on, and carrying on is the one thing that cannot be right.
+        #
+        # Nothing is closed or sent from here: with no answer there is
+        # nothing to act on. It is SAID - on the ladder and, at CRITICAL,
+        # in the log - and the level is left alone for the next pass,
+        # which is the only honest move.
+        if state.get('readable', True) is False:
+            why = state.get('error') or 'the leg could not be read'
+            group.reason = (f'cannot tell whether this order has filled: '
+                            f'{why} — NOT assuming it has not')
+            self._say_unreadable(pair, group, why)
+            return None
+        # It answered. Forget that it once did not, so the next outage
+        # on this order is shouted about at once rather than swallowed
+        # by a rate limit set half an hour ago - and so this dict does
+        # not grow a row per ticket for the life of the process.
+        self._unreadable_said.pop((pair.key, group.ticket), None)
         if not state.get('filled_volume'):
             return None
         return self._on_fill(pair, group, state)
+
+    #: How often one unreadable order may shout. A leg that cannot be
+    #: read is read again three times a second, and a CRITICAL line at
+    #: that rate buries the one thing worth seeing.
+    UNREADABLE_LOG_EVERY_SEC = 30.0
+
+    def _say_unreadable(self, pair, group, why):
+        now = self.executor.clock()
+        key = (pair.key, group.ticket)
+        if now - self._unreadable_said.get(key, 0.0) < \
+                self.UNREADABLE_LOG_EVERY_SEC:
+            return
+        self._unreadable_said[key] = now
+        logging.critical(
+            '%s: order %s at %s CANNOT BE READ (%s). It is a real pending at '
+            'the broker and may already have filled - this system cannot '
+            'tell, and is NOT treating it as unfilled.',
+            pair.key, group.ticket, group.level, why)
 
     def _on_fill(self, pair, group, state):
         """The quoting leg filled. Cross the other leg NOW.
@@ -564,6 +685,12 @@ class Quoter:
                 new_id('HEDGE'))
         elapsed_ms = (self.executor.clock() - started) * 1000.0
         self.hedge_times.append(elapsed_ms)
+        # HOW LONG THE LEG WAS ACTUALLY ALONE, from the broker's stamp
+        # on the fill rather than from the moment we noticed it. Those
+        # were 12m51s apart on 2026-09-16 and the report showed the
+        # ONE SECOND, which is the number that made a catastrophe look
+        # like a clean trade.
+        naked_ms = self._naked_ms(state)
 
         tickets = list(state.get('position_tickets') or [])
         quote_fill = {'ok': True, 'filled_volume': filled,
@@ -576,6 +703,9 @@ class Quoter:
             # ticket, on a hedging account.
             reason = (f"the hedge was rejected: {cross.get('error')} — "
                       f"unwinding leg {group.leg.upper()}")
+            if naked_ms is not None:
+                reason = (f'{reason} (that leg was alone for '
+                          f'{naked_ms / 1000.0:.1f}s)')
             logging.critical("%s: %s", pair.key, reason)
             # THE UNWIND'S ANSWER IS READ, and this is the worse of the
             # two places it was thrown away.
@@ -619,12 +749,12 @@ class Quoter:
             return {'group': (group.pair_key, group.side.value, group.level,
                               group.position_id),
                     'action': 'hedge_rejected', 'reason': reason,
-                    'naked': naked}
+                    'naked': naked, 'naked_ms': naked_ms}
 
         fills = ({'a': cross, 'b': quote_fill} if group.leg == 'b'
                  else {'a': quote_fill, 'b': cross})
         position = self._book_fill(pair, group, fills, contract_a, contract_b,
-                                   elapsed_ms)
+                                   elapsed_ms, naked_ms)
         self._settle_orders(group, position.quantity)
         # NOTHING IS REDUCED HERE, deliberately.
         #
@@ -642,7 +772,28 @@ class Quoter:
         return {'group': (group.pair_key, group.side.value, group.level,
                           group.position_id),
                 'action': 'filled', 'position': position.position_id,
-                'hedge_ms': elapsed_ms}
+                'hedge_ms': elapsed_ms, 'naked_ms': naked_ms}
+
+    def _naked_ms(self, state, at=None):
+        """From the BROKER's fill stamp to now, in ms. None if unknown.
+
+        `filled_at` is the server's wall clock encoded as an epoch, so
+        the measured offset has to come off it before it can be
+        subtracted from ours - the two are in different time zones and
+        the difference is hours, not milliseconds.
+
+        None when either half is missing, and never a zero: an
+        unmeasured naked window rendered as 0ms is the report telling
+        the desk that nothing happened.
+        """
+        stamp = state.get('filled_at')
+        offset = state.get('server_offset_sec')
+        if not stamp or offset is None:
+            return None
+        now = self.executor.clock() if at is None else at
+        # Clamped at zero rather than allowed negative: a clock that
+        # disagrees by a second should read "instant", not "-1000ms".
+        return max(0.0, (now - (float(stamp) - float(offset))) * 1000.0)
 
     def _pull_residual(self, pair, group, state, filled, ticket):
         """Pull what is left of a partially filled pending.
@@ -957,6 +1108,25 @@ class Quoter:
         for key, group in list(self.groups.items()):
             if group.position_id != position_id:
                 continue
+            # THE REMAINDER GOES WITH IT, AND IS SAID SO.
+            #
+            # A reducing click bigger than the position it covered
+            # holds the difference here until the close goes through
+            # (`QuoteGroup.open_after`). Dropping it when the position
+            # is gone is deliberate - the click said "cover this and
+            # open the rest", something else covered it, and putting a
+            # naked position on by itself minutes later is the last
+            # thing anyone wants from a ladder - but `_work_closing`
+            # says so on its own path and this one did not. A trader
+            # who clicked 100 over a 93 saw the 7 simply never appear.
+            #
+            # It is NOT scaled to what was closed. The click named an
+            # absolute size, not a proportion of somebody else's fill.
+            if group.open_after > 0:
+                logging.info(
+                    '%s: %s — the %g spread(s) that click would have opened '
+                    'afterwards are dropped with it', group.pair_key,
+                    reason, group.open_after)
             pair = self.config.pairs.get(group.pair_key)
             if pair is not None:
                 self._pull(pair, group, reason)
@@ -1000,7 +1170,7 @@ class Quoter:
             self.groups.pop(key, None)
 
     def _book_fill(self, pair, group, fills, contract_a, contract_b,
-                   elapsed_ms):
+                   elapsed_ms, naked_ms=None):
         leg_a_side, leg_b_side = group.side.leg_sides()
         leg_a = LegFill(pair.account_a, pair.symbol_a, leg_a_side,
                         fills['a'].get('filled_volume') or 0.0,
@@ -1027,6 +1197,8 @@ class Quoter:
             OrderType.LIMIT, sizing.spread_units(leg_b.volume, contract_b),
             clock=self.executor.clock)
         position.click_to_on_ms = elapsed_ms
+        # The one that cannot be flattered by how late we looked.
+        position.naked_ms = naked_ms
         # Scored against the level the trader NAMED: a maker fill's
         # benchmark is the clicked level, not the touch it crossed.
         position.entry_slippage = slippage(group.level, entry_spread,

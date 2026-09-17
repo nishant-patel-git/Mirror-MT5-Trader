@@ -1183,16 +1183,53 @@ class BrokerSession:
         # did not prevent a fill is a distinct event and has to stay
         # visible in the report, not be smoothed into a normal fill.
         from_position = False
+        # DID THE TERMINAL ANSWER AT ALL?
+        #
+        # MetaTrader5 returns None when it could not ask (terminal link
+        # down, symbol gone, IPC upset) and an EMPTY TUPLE when it asked
+        # and there was nothing. `or ()` erased that difference, so a
+        # terminal that answered nothing read exactly like an order that
+        # had not filled - a confident "no" built out of silence.
+        #
+        # Live 2026-09-16: a quoting leg's pending filled while this
+        # returned 0.0, the hedge never fired, and four lots sat naked
+        # for twelve minutes. `filled_volume` STAYS 0.0 - `cancel_pending`
+        # compares it against 0 and a None there would skip its own
+        # leaked-fill re-read - so the honesty goes in a flag of its own.
+        readable = False
+        # WHEN THE BROKER SAYS IT FILLED, on the broker's own clock.
+        #
+        # Without this the only fill time anyone had was the moment WE
+        # noticed, and those are not the same instant: on 2026-09-16
+        # they were twelve minutes and fifty-one seconds apart. The
+        # report showed a one-second hedge on a trade that was naked
+        # the whole time, because it timed itself from the noticing.
+        #
+        # MT5 stamps a deal with the SERVER's wall clock encoded as an
+        # epoch, so the offset has to travel with it or the subtraction
+        # is done between two different time zones. Both stay None when
+        # they cannot be established: unmeasured is not zero, and a
+        # guessed naked window is worse than an honest blank.
+        filled_at = None
         try:
-            deals = mt5.history_deals_get(ticket=ticket) or ()
+            raw_deals = mt5.history_deals_get(ticket=ticket)
+            readable = raw_deals is not None
+            deals = raw_deals or ()
             for deal in deals:
                 if deal.order != ticket:
                     continue
                 filled += deal.volume
                 notional += deal.volume * deal.price
+                stamp = int(getattr(deal, 'time', 0) or 0)
+                if stamp:
+                    # The LAST deal of a partial fill: the leg is naked
+                    # until the whole of it is hedged.
+                    filled_at = max(filled_at or 0, stamp)
                 if deal.position_id and deal.position_id not in position_tickets:
                     position_tickets.append(deal.position_id)
-            still_open = bool(mt5.orders_get(ticket=ticket))
+            raw_orders = mt5.orders_get(ticket=ticket)
+            readable = readable or raw_orders is not None
+            still_open = bool(raw_orders)
             if not filled and not still_open:
                 # Gone from the book with no deal recorded yet. MT5
                 # turns a filled pending into a POSITION carrying the
@@ -1205,22 +1242,38 @@ class BrokerSession:
                 # flattens at once: live 2026-08-10 a 120-second hold
                 # closed in nine seconds because of it. The position IS
                 # the fill; report it as one.
-                for position in (mt5.positions_get(ticket=int(ticket))
-                                 or ()):
+                raw_positions = mt5.positions_get(ticket=int(ticket))
+                readable = readable or raw_positions is not None
+                for position in (raw_positions or ()):
                     filled += position.volume
                     notional += position.volume * position.price_open
+                    stamp = int(getattr(position, 'time', 0) or 0)
+                    if stamp:
+                        filled_at = max(filled_at or 0, stamp)
                     if position.ticket not in position_tickets:
                         position_tickets.append(position.ticket)
                         from_position = True
         except Exception as e:
-            return {'ok': False, 'filled_volume': filled, 'price': None,
+            return {'ok': False, 'readable': False,
+                    'filled_volume': filled, 'price': None,
                     'position_tickets': position_tickets,
+                    'filled_at': None, 'server_offset_sec': None,
                     'still_open': False, 'error': str(e)}
         vwap = notional / filled if filled > 0 else None
-        return {'ok': True, 'filled_volume': filled, 'price': vwap,
+        # Only on a FILL. This is read three times a second per resting
+        # order and the offset costs a tick; a fill is rare and is the
+        # only time the answer is used.
+        offset = self.server_time_offset_sec() if filled > 0 and filled_at \
+            else None
+        return {'ok': True, 'readable': readable,
+                'filled_volume': filled, 'price': vwap,
                 'position_tickets': position_tickets,
                 'from_position': from_position,
-                'still_open': still_open, 'error': None}
+                'filled_at': filled_at if filled > 0 else None,
+                'server_offset_sec': offset,
+                'still_open': still_open,
+                'error': None if readable else
+                'the terminal answered nothing about this order'}
 
     def close_position_ticket(self, symbol, ticket, volume, entry_side,
                               slippage_points=1.0, comment=""):
