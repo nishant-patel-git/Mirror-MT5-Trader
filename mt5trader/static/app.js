@@ -2977,11 +2977,21 @@
         'zero.</div>';
     }
     var bad = Math.abs(check.difference) > 0.01;
+    /* GROSS against GROSS, and the row SAYS so. MT5's own profit
+     * carries no commission and no swap, so comparing it against our
+     * net total put the whole round trip's commission into the
+     * difference for ever — a red row about a disagreement that does
+     * not exist. The net figure, which is the one on every other
+     * panel, is shown beside it and is never the thing compared. */
+    var net = (check.ours_net === null || check.ours_net === undefined)
+      ? '' : '<td>ours after commission</td><td>' + money(check.ours_net) +
+        '</td>';
     return '<table><tbody><tr' + (bad ? ' class="mismatch"' : '') +
-      '><td>our total</td><td>' + money(check.ours) +
+      '><td>our total (gross)</td><td>' + money(check.ours) +
       '</td><td>MT5’s own</td><td>' + money(check.theirs) +
       '</td><td>difference</td><td>' + money(check.difference) +
-      '</td><td>' + agoText(check.at) + '</td></tr></tbody></table>';
+      '</td>' + net +
+      '<td>' + agoText(check.at) + '</td></tr></tbody></table>';
   }
 
   function agoText(at) {

@@ -1108,6 +1108,25 @@ class Quoter:
         for key, group in list(self.groups.items()):
             if group.position_id != position_id:
                 continue
+            # THE REMAINDER GOES WITH IT, AND IS SAID SO.
+            #
+            # A reducing click bigger than the position it covered
+            # holds the difference here until the close goes through
+            # (`QuoteGroup.open_after`). Dropping it when the position
+            # is gone is deliberate - the click said "cover this and
+            # open the rest", something else covered it, and putting a
+            # naked position on by itself minutes later is the last
+            # thing anyone wants from a ladder - but `_work_closing`
+            # says so on its own path and this one did not. A trader
+            # who clicked 100 over a 93 saw the 7 simply never appear.
+            #
+            # It is NOT scaled to what was closed. The click named an
+            # absolute size, not a proportion of somebody else's fill.
+            if group.open_after > 0:
+                logging.info(
+                    '%s: %s — the %g spread(s) that click would have opened '
+                    'afterwards are dropped with it', group.pair_key,
+                    reason, group.open_after)
             pair = self.config.pairs.get(group.pair_key)
             if pair is not None:
                 self._pull(pair, group, reason)

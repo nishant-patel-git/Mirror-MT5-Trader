@@ -336,7 +336,13 @@ def page(server):
             browser = pw.chromium.launch(executable_path=chromium_path())
         except Exception as e:                    # no browser on this box
             pytest.skip(f'chromium unavailable: {e}')
-        page = browser.new_page()
+        # PINNED, because half this file measures pixels. Playwright's
+        # default viewport is not a promise, and a desk that is narrower
+        # on one machine than another makes `clampTo` bite on a drag
+        # here and not there - which is a test that fails by geography
+        # rather than by fault. Seen on Windows, where the default came
+        # out smaller than on this box.
+        page = browser.new_page(viewport={'width': 1400, 'height': 900})
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
         page.on('console', lambda message: errors.append(message.text)
@@ -1275,14 +1281,135 @@ def add_account(page, name, endpoint, login=''):
 # -- moving the windows ---------------------------------------------------
 
 def drag(page, selector, dx, dy, steps=8):
-    """Drag one window by its title bar, the way a hand does it."""
-    bar = page.locator(selector + ' .titlebar').first
-    box = bar.bounding_box()
-    start = (box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
+    """Drag one window by its title bar, the way a hand does it.
+
+    The drop runs `writeLayout()` and a full `render()`, and a render
+    can re-place the window. Reading the box the instant the button
+    comes up therefore reads a position that is about to change - never
+    on this box, sometimes on a slower one. So the move SETTLES before
+    this returns: the same pixels twice in a row, or the wait times out
+    and says so.
+    """
+    settle(page, selector)
+    start = grab_point(page, selector)
     page.mouse.move(*start)
     page.mouse.down()
     page.mouse.move(start[0] + dx, start[1] + dy, steps=steps)
+    assert started(page, selector), (
+        'the press missed the title bar, so nothing was dragged')
     page.mouse.up()
+    settle(page, selector)
+
+
+def press(page, selector, x, y):
+    """Put the pointer down and CHECK the window took it.
+
+    `render()` re-lays every window three times a second and strips the
+    inline geometry while it does — so a coordinate measured a moment
+    ago can be pointing at empty desk by the time the button goes down.
+    The press then hits nothing, the interaction never starts, and the
+    assertion downstream reports a drag that moved 0px as a drag bug.
+
+    Both `startDrag`'s resize branch and `startResize` mark the window
+    `.dragging` on pointerdown, so whether the press landed is a
+    question with an answer. Ask it.
+    """
+    page.mouse.move(x, y)
+    page.mouse.down()
+
+
+def started(page, selector):
+    return page.locator(selector + '.dragging').count() == 1
+
+
+def grab_point(page, selector):
+    """A spot on the title bar that is NOT a control.
+
+    `startDrag` bails out on `button, select, input, a` so the widgets
+    in the bar keep working — which means grabbing its CENTRE only
+    drags while the centre happens to be clear. The bar carries a
+    route, a mode badge and the window buttons, and how much room they
+    leave depends on the window's width, which is whatever the last
+    resize test left in this browser's saved layout.
+
+    So the drag was silently not starting at all: the window never
+    floated, the assertion measured an unrelated re-tidy, and it
+    depended on the order the tests ran in. Pick a point that is clear,
+    and say so if none is.
+    """
+    at = page.evaluate(
+        """(sel) => {
+            const bar = document.querySelector(sel + ' .titlebar');
+            const box = bar.getBoundingClientRect();
+            const y = box.y + box.height / 2;
+            for (let x = box.x + 6; x < box.x + box.width - 4; x += 6) {
+                const node = document.elementFromPoint(x, y);
+                if (!node || !bar.contains(node)) { continue; }
+                if (node.closest('button, select, input, a')) { continue; }
+                return {x: x, y: y};
+            }
+            return null;
+        }""", selector)
+    assert at is not None, (
+        f'every point on {selector} title bar is a control, so nothing '
+        f'could start a drag')
+    return (at['x'], at['y'])
+
+
+def settle(page, selector):
+    """Wait until this element has stopped moving."""
+    page.wait_for_function(
+        """(sel) => {
+            const node = document.querySelector(sel);
+            // NOTHING TO SETTLE IS SETTLED. Several tests tidy a desk
+            // with no ladder on it, and waiting for an element that was
+            // never there to stop moving is a ten-second timeout and a
+            // failure about nothing.
+            if (!node) { return true; }
+            const now = node.getBoundingClientRect();
+            // Keyed by SELECTOR: two settles in a row would otherwise
+            // compare one element against the other's last position and
+            // call a desk still that never was.
+            window.__settleWas = window.__settleWas || {};
+            const was = window.__settleWas[sel];
+            window.__settleWas[sel] = {x: now.left, y: now.top,
+                                       w: now.width, h: now.height};
+            return !!was && Math.abs(was.x - now.left) < 0.5 &&
+                   Math.abs(was.y - now.top) < 0.5 &&
+                   Math.abs(was.w - now.width) < 0.5 &&
+                   Math.abs(was.h - now.height) < 0.5;
+        }""", arg=selector, timeout=WAIT)
+    page.evaluate("(sel) => { if (window.__settleWas) "
+                  "{ delete window.__settleWas[sel]; } }", selector)
+
+
+#: HOLD THE SNAPSHOT STILL.
+#:
+#: Several tests inject a snapshot and render it. The page also polls
+#: `/api/status` every refresh, and a poll that lands between the
+#: injection and the assertion REPLACES the whole snapshot - so the
+#: injected row simply vanishes and the wait times out. It never
+#: happens on a fast box because the assertion wins the race; it
+#: happens on a loaded one, which is why this looked like a Windows
+#: problem.
+#:
+#: The stub answers every poll with whatever is in `state.snapshot`
+#: RIGHT NOW, so the page goes on polling and rendering exactly as it
+#: does in life, and can never overwrite what the test put there.
+HOLD_THE_SNAPSHOT = """() => {
+    window.__realFetch = window.__realFetch || window.fetch;
+    window.fetch = function (url, options) {
+        if (String(url).indexOf('/api/status') >= 0) {
+            return Promise.resolve(new Response(
+              JSON.stringify(window.MT5Trader.state.snapshot || {}),
+              {status: 200, headers: {'Content-Type': 'application/json'}}));
+        }
+        return window.__realFetch(url, options);
+    };
+}"""
+
+RELEASE_THE_SNAPSHOT = ("() => { if (window.__realFetch) "
+                        "{ window.fetch = window.__realFetch; } }")
 
 
 def tidy(page):
@@ -1319,8 +1446,42 @@ def open_ladder(page):
         if (window.__realFetch) { window.fetch = window.__realFetch; }
         const toasts = document.getElementById('toasts');
         if (toasts) { toasts.innerHTML = ''; }
+        // ...AND THE DESK'S OWN GEOMETRY. `scroll_desk` appends a
+        // spacer and scrolls sideways; if the test that did it fails
+        // before its cleanup, every later test in this shared page
+        // inherits a narrower visible desk and a non-zero scrollLeft.
+        // Both feed straight into `clampTo`, so a drag that fits on a
+        // clean desk silently stops short on a dirty one - which is
+        // precisely the window-drag flake, and it depends on the order
+        // the tests happened to run in.
+        const pad = document.getElementById('__spacer');
+        if (pad) { pad.remove(); }
+        const desk = document.getElementById('desktop');
+        if (desk) { desk.scrollLeft = 0; desk.scrollTop = 0; }
     }""")
     page.wait_for_selector('.window.ladder .titlebar', timeout=WAIT)
+
+
+def room_to_drag(page, selector):
+    """How far this window can travel before the clamp stops it.
+
+    `clampTo` keeps a window inside the VISIBLE desk. A test that just
+    asks for 220px is asserting there are 220px to give, which depends
+    on the viewport, on what else is open and on whatever the last test
+    left behind - and when there are not, the window stops short and
+    the test reports a drag bug that is not there.
+    """
+    return page.evaluate(
+        """(sel) => {
+            const node = document.querySelector(sel);
+            const desk = document.getElementById('desktop');
+            const box = node.getBoundingClientRect();
+            const deskBox = desk.getBoundingClientRect();
+            return {
+              right: (deskBox.left + desk.clientWidth - 8) - box.left,
+              down: (deskBox.top + desk.clientHeight - 24) - box.top,
+            };
+        }""", selector)
 
 
 def test_a_window_goes_where_it_is_dragged_and_is_still_there_after_a_reload(
@@ -1330,6 +1491,12 @@ def test_a_window_goes_where_it_is_dragged_and_is_still_there_after_a_reload(
     under the trader."""
     open_ladder(page)
     tidy(page)
+    room = room_to_drag(page, '.window.ladder')
+    # Asserted, not assumed. If the desk really is too small the test
+    # says THAT, instead of reporting a drag that stopped short as a
+    # drag that went the wrong way.
+    assert room['right'] > 240 and room['down'] > 150, (
+        f'the desk has no room to drag into: {room}')
     before = page.locator('.window.ladder').first.bounding_box()
 
     drag(page, '.window.ladder', 220, 130)
@@ -1609,16 +1776,30 @@ def test_a_window_is_freely_expandable_from_its_corner(page):
     difference between seeing the market and scrolling for it."""
     open_ladder(page)
     tidy(page)
+    # SETTLED BEFORE MEASURED. A refresh re-lays the window and strips
+    # its inline geometry, so a grip coordinate read a moment too early
+    # points at empty desk when the button goes down - the resize never
+    # starts and the window is reported as having grown by 0px.
+    settle(page, '.window.ladder')
     before = page.locator('.window.ladder').first.bounding_box()
+    # `size()` clamps a window to the desk, so "200 wider" is only 200
+    # wider when there are 200 to give. Asserted rather than assumed,
+    # so a desk too narrow to prove anything says THAT.
+    desk = page.evaluate(
+        "() => document.getElementById('desktop').clientWidth")
+    assert before['x'] + before['width'] + 200 < desk, (
+        f'the desk has no room to grow into: {before}, desk {desk}')
     grip = page.locator('.window.ladder .grip').first.bounding_box()
 
     # Wider, and SHORTER: a window is never taller than the desktop it
     # is on — a ladder whose bottom rows are off screen is a ladder the
     # trader cannot click.
-    page.mouse.move(grip['x'] + 6, grip['y'] + 6)
-    page.mouse.down()
+    press(page, '.window.ladder', grip['x'] + 6, grip['y'] + 6)
+    assert started(page, '.window.ladder'), (
+        'the press missed the grip, so this proves nothing about resizing')
     page.mouse.move(grip['x'] + 206, grip['y'] - 144, steps=8)
     page.mouse.up()
+    settle(page, '.window.ladder')
 
     after = page.locator('.window.ladder').first.bounding_box()
     assert after['width'] - before['width'] == pytest.approx(200, abs=8)
@@ -4795,65 +4976,92 @@ def test_a_partial_commission_total_says_how_many_fills_it_covers(page):
                       "{ window.fetch = window.__realFetch; } }")
 
 
+def show_pnl_check(page, check):
+    """Put one pnl_check row on the monitor and hold it there."""
+    page.evaluate(HOLD_THE_SNAPSHOT)
+    page.evaluate("""(check) => {
+        const UI = window.MT5Trader;
+        UI.state.snapshot.at = 1000.0;
+        UI.state.snapshot.pnl_check = check;
+        UI.state.open = [UI.panelId('monitor')];
+        UI.state.monitorTab = 'positions';
+        UI.render();
+    }""", check)
+
+
 def test_the_pnl_row_reports_when_the_two_halves_were_read_together(page):
     """Our total against MT5's own. Both come from the ENGINE now, from
     one moment, and the row says when — so a figure a few seconds old is
     never mistaken for live."""
-    page.evaluate("""() => {
-        const UI = window.MT5Trader;
-        UI.state.snapshot.at = 1000.0;
-        UI.state.snapshot.pnl_check = {at: 996.0, ours: 7.0, theirs: 7.0,
-                                       difference: 0.0};
-        UI.state.open = [UI.panelId('monitor')];
-        UI.state.monitorTab = 'positions';
-        UI.render();
-    }""")
-    page.wait_for_function(
-        "() => document.querySelector('.monitor').textContent"
-        ".indexOf('read together') >= 0", timeout=WAIT)
-    text = page.text_content('.monitor')
+    try:
+        show_pnl_check(page, {'at': 996.0, 'ours': 7.0, 'theirs': 7.0,
+                              'difference': 0.0, 'ours_net': 3.5,
+                              'basis': 'gross'})
+        page.wait_for_function(
+            "() => document.querySelector('.monitor').textContent"
+            ".indexOf('read together') >= 0", timeout=WAIT)
+        text = page.text_content('.monitor')
 
-    assert 'read together 4s ago' in text
-    # Agreement is not a fault: the row must NOT be red.
-    assert page.locator('.monitor tr.mismatch').count() == 0, (
-        'two totals that agree were flagged as a disagreement')
+        assert 'read together 4s ago' in text
+        # Agreement is not a fault: the row must NOT be red.
+        assert page.locator('.monitor tr.mismatch').count() == 0, (
+            'two totals that agree were flagged as a disagreement')
+    finally:
+        page.evaluate(RELEASE_THE_SNAPSHOT)
+
+
+def test_the_row_says_it_compared_GROSS_and_shows_the_net_beside_it(page):
+    """MT5's own profit carries no commission, so the thing compared
+    against it must not carry commission either — and the row has to
+    SAY which of the two numbers it used, or a trader reading 'our
+    total' against the P&L on every other panel sees two figures that
+    differ and no reason why."""
+    try:
+        show_pnl_check(page, {'at': 1000.0, 'ours': 7.0, 'theirs': 7.0,
+                              'difference': 0.0, 'ours_net': -1.0,
+                              'basis': 'gross'})
+        page.wait_for_function(
+            "() => document.querySelector('.monitor').textContent"
+            ".indexOf('gross') >= 0", timeout=WAIT)
+        text = page.text_content('.monitor')
+
+        assert 'our total (gross)' in text
+        assert 'ours after commission' in text and '-$1.00' in text
+        assert page.locator('.monitor tr.mismatch').count() == 0, (
+            'the commission was compared and reported as a disagreement')
+    finally:
+        page.evaluate(RELEASE_THE_SNAPSHOT)
 
 
 def test_control_a_real_disagreement_is_still_flagged_red(page):
     """The control. The row exists to catch a genuine gap; a fix that
     simply stopped reddening would remove the check entirely."""
-    page.evaluate("""() => {
-        const UI = window.MT5Trader;
-        UI.state.snapshot.at = 1000.0;
-        UI.state.snapshot.pnl_check = {at: 1000.0, ours: 7.0,
-                                       theirs: -21.0, difference: 28.0};
-        UI.state.open = [UI.panelId('monitor')];
-        UI.state.monitorTab = 'positions';
-        UI.render();
-    }""")
-    page.wait_for_function(
-        "() => document.querySelectorAll('.monitor tr.mismatch').length > 0",
-        timeout=WAIT)
+    try:
+        show_pnl_check(page, {'at': 1000.0, 'ours': 7.0, 'theirs': -21.0,
+                              'difference': 28.0, 'ours_net': 3.5,
+                              'basis': 'gross'})
+        page.wait_for_function(
+            "() => document.querySelectorAll('.monitor tr.mismatch')"
+            ".length > 0", timeout=WAIT)
 
-    assert '$28.00' in page.text_content('.monitor tr.mismatch')
+        assert '$28.00' in page.text_content('.monitor tr.mismatch')
+    finally:
+        page.evaluate(RELEASE_THE_SNAPSHOT)
 
 
 def test_an_unreadable_account_leaves_the_row_UNMEASURED(page):
     """Unmeasured is not zero: an account that could not be read does
     not make the difference nil, it makes it unknown."""
-    page.evaluate("""() => {
-        const UI = window.MT5Trader;
-        UI.state.snapshot.at = 1000.0;
-        UI.state.snapshot.pnl_check = {at: 1000.0, ours: 7.0,
-                                       theirs: null, difference: null};
-        UI.state.open = [UI.panelId('monitor')];
-        UI.state.monitorTab = 'positions';
-        UI.render();
-    }""")
-    page.wait_for_function(
-        "() => document.querySelector('.monitor').textContent"
-        ".indexOf('nothing to reconcile') >= 0", timeout=WAIT)
-    text = page.text_content('.monitor')
+    try:
+        show_pnl_check(page, {'at': 1000.0, 'ours': 7.0, 'theirs': None,
+                              'difference': None, 'ours_net': 3.5,
+                              'basis': 'gross'})
+        page.wait_for_function(
+            "() => document.querySelector('.monitor').textContent"
+            ".indexOf('nothing to reconcile') >= 0", timeout=WAIT)
+        text = page.text_content('.monitor')
 
-    assert 'unmeasured, not zero' in text
-    assert '$0.00' not in text.split('nothing to reconcile')[0][-120:]
+        assert 'unmeasured, not zero' in text
+        assert '$0.00' not in text.split('nothing to reconcile')[0][-120:]
+    finally:
+        page.evaluate(RELEASE_THE_SNAPSHOT)

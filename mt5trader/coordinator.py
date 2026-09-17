@@ -1851,8 +1851,27 @@ class Coordinator:
             measured and max(measured) - min(measured) > 60)
         return block
 
-    def pnl_check(self, ours, accounts, started):
-        """Our open P&L against MT5's own — BOTH AS OF ONE MOMENT.
+    def pnl_check(self, ours, accounts, started, ours_net=None):
+        """Our open P&L against MT5's own — BOTH AS OF ONE MOMENT, AND
+        BOTH THE SAME KIND OF NUMBER.
+
+        GROSS against GROSS. MT5's `profit` is the floating P&L on the
+        two prices and nothing else: it carries no commission and no
+        swap. Ours was the NET figure - commission for both ends of both
+        legs already taken off by `mark_fees` - so the difference
+        carried the whole round trip's commission as a permanent,
+        structural gap that no market could ever close. On a desk paying
+        $3.50 a lot a side that is a row sitting red all session over a
+        disagreement that does not exist.
+
+        It was invisible here only because these accounts are billed at
+        $0.00 a lot. A number that is right only while a setting is zero
+        is not right.
+
+        The NET total is still what the trader is shown everywhere else,
+        and it is carried here too (`ours_net`) so the panel can show
+        both and say which one was compared. Nothing about the P&L a
+        trader reads has changed - only what this row compares it to.
 
         A disagreement here means one of us is wrong about real money,
         so it has to be shown. But the two halves are read on different
@@ -1894,7 +1913,13 @@ class Coordinator:
             theirs += float(profit)
         self._pnl_check = {
             'at': started,
+            #: GROSS, because `theirs` is gross. The comparison is the
+            #: whole point of the row and it has to be like for like.
             'ours': ours,
+            #: ...and the net figure beside it, which is the number on
+            #: every other panel. Shown, never compared.
+            'ours_net': ours_net,
+            'basis': 'gross',
             'theirs': theirs,
             'difference': (None if ours is None or theirs is None
                            else ours - theirs),
@@ -1929,6 +1954,11 @@ class Coordinator:
         #: unmeasured-is-not-zero rule each pair uses: one position
         #: that cannot be marked makes the TOTAL unknown, not smaller.
         ours = 0.0
+        #: The same total WITHOUT commission, which is the only thing
+        #: MT5's own `profit` can honestly be compared against. Same
+        #: unmeasured-is-not-zero rule: one position that cannot be
+        #: marked makes it unknown, not smaller.
+        ours_gross = 0.0
         for key, pair in self.config.pairs.items():
             md = self.market.get(key)
             sizes = self.implied_depth(pair)
@@ -1948,6 +1978,7 @@ class Coordinator:
             buys, sells = self.book.working_counts(key)
             positions = []
             open_pnl = 0.0
+            open_gross = 0.0
             for position in self.book.positions(key):
                 gross, net_pnl, closing = mark_position(
                     position, md, settings)
@@ -1973,6 +2004,10 @@ class Coordinator:
                     open_pnl = None
                 elif open_pnl is not None:
                     open_pnl += net_pnl
+                if gross is None:
+                    open_gross = None
+                elif open_gross is not None:
+                    open_gross += gross
             row_exit = takeprofit.describe(
                 pair, md, settings,
                 margin_per_spread=margin.get('money'),
@@ -1990,6 +2025,10 @@ class Coordinator:
                     ours = None
                 elif ours is not None:
                     ours += open_pnl
+                if open_gross is None:
+                    ours_gross = None
+                elif ours_gross is not None:
+                    ours_gross += open_gross
             pairs[key] = {
                 'key': key, 'name': pair.name, 'enabled': pair.enabled,
                 'account_a': pair.account_a, 'account_b': pair.account_b,
@@ -2145,7 +2184,10 @@ class Coordinator:
         return {
             'at': started,
             #: Our open P&L against MT5's own, BOTH AS OF ONE MOMENT.
-            'pnl_check': self.pnl_check(ours, accounts, started),
+            # GROSS goes in, because MT5's own profit is gross. The
+            # net total travels beside it for the panel to show.
+            'pnl_check': self.pnl_check(ours_gross, accounts, started,
+                                        ours_net=ours),
             # What a click does, and how fast it is drained — the UI
             # arms itself from the ENGINE's answer, never from its own
             # idea of what the trader last selected.

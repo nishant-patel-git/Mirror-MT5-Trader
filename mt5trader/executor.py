@@ -450,6 +450,33 @@ class PairExecutor:
         # done — which is not the same as having closed nothing.
         found = sum(float(by_ticket[str(t)]['volume'])
                     for t in tickets if str(t) in by_ticket)
+        if tickets and not found:
+            # NOT ONE OF OUR TICKETS IS THERE. That is normally true —
+            # something closed them first — and it is also exactly what
+            # ONE bad read looks like, and this answer is believed:
+            # `_closed_fraction` books the position as fully closed on
+            # it, and `_unwind_what_went_on` reports "nothing naked" on
+            # it. Both would be a live leg struck off our own books
+            # while the money sits at the broker.
+            #
+            # So it is READ AGAIN before it is believed. One extra call,
+            # on a path that is rare, to turn a conclusion drawn from a
+            # single answer into one drawn from two.
+            again = runner.positions(symbol)
+            if again is None:
+                return {'ok': False, 'found': None,
+                        'error': f'{symbol}: our tickets were not in the '
+                                 f'first read and the broker could not be '
+                                 f'read again; nothing was closed'}
+            by_ticket = {str(p['ticket']): p for p in again}
+            found = sum(float(by_ticket[str(t)]['volume'])
+                        for t in tickets if str(t) in by_ticket)
+            if not found:
+                logging.warning(
+                    '%s: none of tickets %s are at the broker on two '
+                    'consecutive reads — treating them as already closed, '
+                    'because nothing else can be concluded.', symbol,
+                    ', '.join(str(t) for t in tickets))
         remaining = None if volume is None else float(volume)
         closed, errors = [], []
         # Newest first, so a partial unwind takes off the piece that was
@@ -484,10 +511,17 @@ class PairExecutor:
                 errors.append(f"{ticket}: {result.get('error')}")
         done = sum(float(c['volume'] or 0.0) for c in closed)
         if errors:
-            return {'ok': False, 'closed': closed,
+            return {'ok': False, 'closed': closed, 'found': found,
                     'left': max(0.0, found - done),
                     'error': '; '.join(errors)}
         return {'ok': True, 'closed': closed,
+                #: What the broker HELD of our tickets when we looked.
+                #: `left` alone cannot tell "we closed all of it" from
+                #: "there was none of it to close" - both are zero - and
+                #: those two have to be distinguishable by the caller,
+                #: because one of them means a close happened and the
+                #: other means nothing did.
+                'found': found,
                 #: Of OUR tickets, what is still open at the broker
                 #: after this. Zero means the leg is done, however
                 #: little was closed to get there.
