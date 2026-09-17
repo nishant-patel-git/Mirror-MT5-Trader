@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS positions (
     entry_slippage  REAL,
     exit_slippage   REAL,
     click_to_on_ms  REAL,
+    naked_ms        REAL,       -- one leg alone, on the BROKER's clock
     leg_a           TEXT,       -- JSON: account, symbol, side, volume,
     leg_b           TEXT        --       price, tickets, contract size
 );
@@ -157,6 +158,27 @@ class Store:
             os.makedirs(directory, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(SCHEMA)
+            self._add_missing_columns(connection)
+
+    #: Columns added after the first release. `CREATE TABLE IF NOT
+    #: EXISTS` does nothing to a table that already exists, so a desk
+    #: that has been running since before a column was added would open
+    #: its own database and get "no such column" on the first write -
+    #: with a live position in hand. Additive only: nothing here drops,
+    #: renames or re-types anything, so an older build reading the same
+    #: file still works.
+    LATER_COLUMNS = (
+        ('positions', 'naked_ms', 'REAL'),
+    )
+
+    def _add_missing_columns(self, connection):
+        for table, column, kind in self.LATER_COLUMNS:
+            have = {row['name'] for row in
+                    connection.execute(f'PRAGMA table_info({table})')}
+            if not have or column in have:
+                continue
+            connection.execute(
+                f'ALTER TABLE {table} ADD COLUMN {column} {kind}')
 
     # -- positions: the state a restart recovers ---------------------------
 
@@ -174,15 +196,15 @@ class Store:
                    (position_id, pair_key, side, quantity, entry_spread,
                     exit_spread, spread_units, order_type, opened_at,
                     closed_at, close_reason, realized_pnl, entry_slippage,
-                    exit_slippage, click_to_on_ms, leg_a, leg_b)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    exit_slippage, click_to_on_ms, naked_ms, leg_a, leg_b)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (row['position_id'], row['pair_key'], row['side'],
                  row['quantity'], row['entry_spread'], row['exit_spread'],
                  row['spread_units'], row['order_type'], row['opened_at'],
                  row['closed_at'], row['close_reason'], row['realized_pnl'],
                  row['entry_slippage'], row['exit_slippage'],
-                 row['click_to_on_ms'], json.dumps(row['leg_a']),
-                 json.dumps(row['leg_b'])))
+                 row['click_to_on_ms'], row.get('naked_ms'),
+                 json.dumps(row['leg_a']), json.dumps(row['leg_b'])))
         return position
 
     def remember_tickets(self, rows):

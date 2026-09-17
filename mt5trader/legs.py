@@ -385,6 +385,7 @@ class RemoteLeg:
         return reply or {'ok': False, 'readable': False,
                          'cancelled': False, 'filled_volume': 0.0,
                          'price': None, 'position_tickets': [],
+                         'filled_at': None, 'server_offset_sec': None,
                          'still_open': True, 'error': 'IPC failure'}
 
     def order_state(self, ticket):
@@ -398,8 +399,9 @@ class RemoteLeg:
         # quiet one - see quoter._check_fill.
         return reply or {'ok': False, 'readable': False,
                          'filled_volume': 0.0, 'price': None,
-                         'position_tickets': [], 'still_open': True,
-                         'error': 'IPC failure'}
+                         'position_tickets': [],
+                         'filled_at': None, 'server_offset_sec': None,
+                         'still_open': True, 'error': 'IPC failure'}
 
     def close_ticket(self, symbol, ticket, volume, entry_side,
                      slippage_points=1.0, comment=""):

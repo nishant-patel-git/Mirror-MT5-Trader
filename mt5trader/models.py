@@ -235,6 +235,17 @@ class SpreadPosition:
         self.entry_slippage = None
         self.exit_slippage = None
         self.click_to_on_ms = None
+        #: How long ONE leg was on by itself, measured from the
+        #: BROKER'S stamp on the fill to the hedge coming back.
+        #:
+        #: `click_to_on_ms` cannot answer this on the LIMIT path: its
+        #: clock starts when this process NOTICED the fill, so a fill
+        #: nobody looked at for twelve minutes still reports a
+        #: one-second hedge. That is exactly what the report said on
+        #: 2026-09-16. None when the broker's stamp could not be read -
+        #: unmeasured is not zero, and a naked window shown as 0ms is
+        #: the report saying nothing happened.
+        self.naked_ms = None
         #: True when this came back from the database at startup rather
         #: than being watched happen.
         self.recovered = False
@@ -344,6 +355,7 @@ class SpreadPosition:
             'entry_slippage': self.entry_slippage,
             'exit_slippage': self.exit_slippage,
             'click_to_on_ms': self.click_to_on_ms,
+            'naked_ms': self.naked_ms,
             'recovered': self.recovered,
             'confirmed': self.confirmed,
             'leg_a': self.leg_a.to_dict() if self.leg_a else None,
@@ -374,6 +386,7 @@ class SpreadPosition:
         position.entry_slippage = raw.get('entry_slippage')
         position.exit_slippage = raw.get('exit_slippage')
         position.click_to_on_ms = raw.get('click_to_on_ms')
+        position.naked_ms = raw.get('naked_ms')
         #: Recovered from disk rather than seen happen. The monitor says
         #: so until the reconciler has confirmed both legs at the broker.
         position.recovered = True

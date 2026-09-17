@@ -2882,7 +2882,8 @@
   function positionsTable() {
     var html = '<table><thead><tr><th>Pair</th><th>Side</th><th>Net</th>' +
       '<th>Avg entry</th><th>Mark</th><th>Open P&amp;L</th><th>Mode</th>' +
-      '<th>Slip</th><th>Click→on</th><th>Legs</th><th></th></tr></thead><tbody>';
+      '<th>Slip</th><th>Click→on</th><th>Naked</th><th>Legs</th>' +
+      '<th></th></tr></thead><tbody>';
     var any = false;
     eachPosition(function (key, row, position) {
       any = true;
@@ -2900,6 +2901,18 @@
                         position.click_to_on_ms === undefined
                         ? DASH : Math.round(position.click_to_on_ms) + 'ms') +
         '</td>';
+      //: HOW LONG ONE LEG WAS ON BY ITSELF, on the broker's own clock.
+      //: Click→on beside it starts when this process NOTICED the fill,
+      //: so on a resting order it can read 1s on a leg that was alone
+      //: for twelve minutes. This is the column that cannot be
+      //: flattered by looking late; over a second it is marked, and
+      //: unmeasured stays a dash rather than becoming a comfortable 0.
+      html += '<td' + (position.naked_ms > 1000 ? ' class="down"' : '') +
+        '>' + (position.naked_ms === null || position.naked_ms === undefined
+          ? DASH
+          : (position.naked_ms >= 1000
+            ? (position.naked_ms / 1000).toFixed(1) + 's'
+            : Math.round(position.naked_ms) + 'ms')) + '</td>';
       html += '<td>' + legText(position.leg_a) + ' / ' +
         legText(position.leg_b) + '</td>';
       html += '<td><button class="btn close-position">Flatten</button></td>';

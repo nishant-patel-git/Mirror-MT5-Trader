@@ -108,6 +108,13 @@ class FakeBroker:
         self.deals = []
         #: Seconds the broker's clock runs ahead of ours.
         self.server_offset_sec = 3 * 3600
+        #: Our own clock, so a test can put a fill in the past. The real
+        #: one stamps every deal and position with the SERVER's wall
+        #: clock; the fake does too (`_stamp`), because the whole point
+        #: of the naked-window measurement is that those two clocks are
+        #: hours apart and the offset has to come off before they can be
+        #: subtracted.
+        self.now = time.time
 
     # -- helpers for tests -------------------------------------------------
 
@@ -123,6 +130,17 @@ class FakeBroker:
         self.sent.append(entry)
         self.timeline.append(entry)
         return entry
+
+    def _stamp(self):
+        """The broker's wall clock, as MT5 encodes it on a deal."""
+        return int(self.now() + self.server_offset_sec)
+
+    def back_date(self, ticket, seconds):
+        """This position filled `seconds` ago and nobody noticed.
+
+        The shape of 2026-09-16, in one line a test can read.
+        """
+        self.positions[int(ticket)]['filled_at'] -= int(seconds)
 
     def _ticket(self):
         self.next_ticket += 1
@@ -270,7 +288,8 @@ class FakeBroker:
             self.positions[ticket] = {
                 'ticket': ticket, 'symbol': symbol, 'side': side.value,
                 'volume': dealt, 'price_open': price, 'magic': magic,
-                'comment': comment, 'profit': 0.0}
+                'comment': comment, 'profit': 0.0,
+                'filled_at': self._stamp()}
             self._record_deal(symbol, side.value, dealt, price, 'open',
                               comment, ticket, magic)
             # The TICKET comes back with the refusal, exactly as
@@ -283,7 +302,7 @@ class FakeBroker:
         self.positions[ticket] = {
             'ticket': ticket, 'symbol': symbol, 'side': side.value,
             'volume': volume, 'price_open': price, 'magic': magic,
-            'comment': comment, 'profit': 0.0}
+            'comment': comment, 'profit': 0.0, 'filled_at': self._stamp()}
         self._record_deal(symbol, side.value, volume, price, 'open', comment,
                           ticket, magic)
         return OrderResult(True, requested_price=price, executed_price=price,
@@ -296,6 +315,8 @@ class FakeBroker:
             return {'ok': True, 'filled_volume': position['volume'],
                     'price': position['price_open'],
                     'position_tickets': [position['ticket']],
+                    'filled_at': position.get('filled_at'),
+                    'server_offset_sec': self.server_offset_sec,
                     'still_open': pending is not None, 'error': None}
         # A CLOSING pending leaves no position behind — only a deal, as
         # the real one does. Read it the same way the broker does.
@@ -308,9 +329,15 @@ class FakeBroker:
             return {'ok': True, 'filled_volume': volume, 'price': price,
                     'position_tickets': [d['position_id'] for d in deals
                                          if d.get('position_id')],
+                    'filled_at': max(int(d['filled_at'] / 1000)
+                                     for d in deals),
+                    'server_offset_sec': self.server_offset_sec,
                     'still_open': pending is not None, 'error': None}
+        # No fill, so no fill time. None, never a zero - the reader has
+        # to be able to tell "not filled" from "filled at the epoch".
         return {'ok': True, 'filled_volume': 0.0, 'price': None,
                 'position_tickets': [], 'still_open': pending is not None,
+                'filled_at': None, 'server_offset_sec': None,
                 'error': None}
 
     def close_position_ticket(self, symbol, ticket, volume, entry_side,
@@ -398,7 +425,8 @@ class FakeBroker:
             'ticket': int(ticket), 'symbol': pending['symbol'],
             'side': pending['side'], 'volume': volume,
             'price_open': pending['price'], 'magic': MAGIC_NUMBER,
-            'comment': pending['comment'], 'profit': 0.0}
+            'comment': pending['comment'], 'profit': 0.0,
+            'filled_at': self._stamp()}
         return int(ticket)
 
     def _close_against(self, pending, closes, filled, order_ticket):
@@ -438,7 +466,8 @@ class FakeBroker:
             'ticket': int(ticket), 'symbol': pending['symbol'],
             'side': pending['side'], 'volume': filled,
             'price_open': pending['price'], 'magic': MAGIC_NUMBER,
-            'comment': pending['comment'], 'profit': 0.0}
+            'comment': pending['comment'], 'profit': 0.0,
+            'filled_at': self._stamp()}
         return int(ticket)
 
     def pending_orders_by_magic(self, symbol=None):

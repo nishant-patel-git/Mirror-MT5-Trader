@@ -1197,6 +1197,20 @@ class BrokerSession:
         # compares it against 0 and a None there would skip its own
         # leaked-fill re-read - so the honesty goes in a flag of its own.
         readable = False
+        # WHEN THE BROKER SAYS IT FILLED, on the broker's own clock.
+        #
+        # Without this the only fill time anyone had was the moment WE
+        # noticed, and those are not the same instant: on 2026-09-16
+        # they were twelve minutes and fifty-one seconds apart. The
+        # report showed a one-second hedge on a trade that was naked
+        # the whole time, because it timed itself from the noticing.
+        #
+        # MT5 stamps a deal with the SERVER's wall clock encoded as an
+        # epoch, so the offset has to travel with it or the subtraction
+        # is done between two different time zones. Both stay None when
+        # they cannot be established: unmeasured is not zero, and a
+        # guessed naked window is worse than an honest blank.
+        filled_at = None
         try:
             raw_deals = mt5.history_deals_get(ticket=ticket)
             readable = raw_deals is not None
@@ -1206,6 +1220,11 @@ class BrokerSession:
                     continue
                 filled += deal.volume
                 notional += deal.volume * deal.price
+                stamp = int(getattr(deal, 'time', 0) or 0)
+                if stamp:
+                    # The LAST deal of a partial fill: the leg is naked
+                    # until the whole of it is hedged.
+                    filled_at = max(filled_at or 0, stamp)
                 if deal.position_id and deal.position_id not in position_tickets:
                     position_tickets.append(deal.position_id)
             raw_orders = mt5.orders_get(ticket=ticket)
@@ -1228,6 +1247,9 @@ class BrokerSession:
                 for position in (raw_positions or ()):
                     filled += position.volume
                     notional += position.volume * position.price_open
+                    stamp = int(getattr(position, 'time', 0) or 0)
+                    if stamp:
+                        filled_at = max(filled_at or 0, stamp)
                     if position.ticket not in position_tickets:
                         position_tickets.append(position.ticket)
                         from_position = True
@@ -1235,12 +1257,20 @@ class BrokerSession:
             return {'ok': False, 'readable': False,
                     'filled_volume': filled, 'price': None,
                     'position_tickets': position_tickets,
+                    'filled_at': None, 'server_offset_sec': None,
                     'still_open': False, 'error': str(e)}
         vwap = notional / filled if filled > 0 else None
+        # Only on a FILL. This is read three times a second per resting
+        # order and the offset costs a tick; a fill is rare and is the
+        # only time the answer is used.
+        offset = self.server_time_offset_sec() if filled > 0 and filled_at \
+            else None
         return {'ok': True, 'readable': readable,
                 'filled_volume': filled, 'price': vwap,
                 'position_tickets': position_tickets,
                 'from_position': from_position,
+                'filled_at': filled_at if filled > 0 else None,
+                'server_offset_sec': offset,
                 'still_open': still_open,
                 'error': None if readable else
                 'the terminal answered nothing about this order'}

@@ -685,6 +685,12 @@ class Quoter:
                 new_id('HEDGE'))
         elapsed_ms = (self.executor.clock() - started) * 1000.0
         self.hedge_times.append(elapsed_ms)
+        # HOW LONG THE LEG WAS ACTUALLY ALONE, from the broker's stamp
+        # on the fill rather than from the moment we noticed it. Those
+        # were 12m51s apart on 2026-09-16 and the report showed the
+        # ONE SECOND, which is the number that made a catastrophe look
+        # like a clean trade.
+        naked_ms = self._naked_ms(state)
 
         tickets = list(state.get('position_tickets') or [])
         quote_fill = {'ok': True, 'filled_volume': filled,
@@ -697,6 +703,9 @@ class Quoter:
             # ticket, on a hedging account.
             reason = (f"the hedge was rejected: {cross.get('error')} — "
                       f"unwinding leg {group.leg.upper()}")
+            if naked_ms is not None:
+                reason = (f'{reason} (that leg was alone for '
+                          f'{naked_ms / 1000.0:.1f}s)')
             logging.critical("%s: %s", pair.key, reason)
             # THE UNWIND'S ANSWER IS READ, and this is the worse of the
             # two places it was thrown away.
@@ -740,12 +749,12 @@ class Quoter:
             return {'group': (group.pair_key, group.side.value, group.level,
                               group.position_id),
                     'action': 'hedge_rejected', 'reason': reason,
-                    'naked': naked}
+                    'naked': naked, 'naked_ms': naked_ms}
 
         fills = ({'a': cross, 'b': quote_fill} if group.leg == 'b'
                  else {'a': quote_fill, 'b': cross})
         position = self._book_fill(pair, group, fills, contract_a, contract_b,
-                                   elapsed_ms)
+                                   elapsed_ms, naked_ms)
         self._settle_orders(group, position.quantity)
         # NOTHING IS REDUCED HERE, deliberately.
         #
@@ -763,7 +772,28 @@ class Quoter:
         return {'group': (group.pair_key, group.side.value, group.level,
                           group.position_id),
                 'action': 'filled', 'position': position.position_id,
-                'hedge_ms': elapsed_ms}
+                'hedge_ms': elapsed_ms, 'naked_ms': naked_ms}
+
+    def _naked_ms(self, state, at=None):
+        """From the BROKER's fill stamp to now, in ms. None if unknown.
+
+        `filled_at` is the server's wall clock encoded as an epoch, so
+        the measured offset has to come off it before it can be
+        subtracted from ours - the two are in different time zones and
+        the difference is hours, not milliseconds.
+
+        None when either half is missing, and never a zero: an
+        unmeasured naked window rendered as 0ms is the report telling
+        the desk that nothing happened.
+        """
+        stamp = state.get('filled_at')
+        offset = state.get('server_offset_sec')
+        if not stamp or offset is None:
+            return None
+        now = self.executor.clock() if at is None else at
+        # Clamped at zero rather than allowed negative: a clock that
+        # disagrees by a second should read "instant", not "-1000ms".
+        return max(0.0, (now - (float(stamp) - float(offset))) * 1000.0)
 
     def _pull_residual(self, pair, group, state, filled, ticket):
         """Pull what is left of a partially filled pending.
@@ -1121,7 +1151,7 @@ class Quoter:
             self.groups.pop(key, None)
 
     def _book_fill(self, pair, group, fills, contract_a, contract_b,
-                   elapsed_ms):
+                   elapsed_ms, naked_ms=None):
         leg_a_side, leg_b_side = group.side.leg_sides()
         leg_a = LegFill(pair.account_a, pair.symbol_a, leg_a_side,
                         fills['a'].get('filled_volume') or 0.0,
@@ -1148,6 +1178,8 @@ class Quoter:
             OrderType.LIMIT, sizing.spread_units(leg_b.volume, contract_b),
             clock=self.executor.clock)
         position.click_to_on_ms = elapsed_ms
+        # The one that cannot be flattered by how late we looked.
+        position.naked_ms = naked_ms
         # Scored against the level the trader NAMED: a maker fill's
         # benchmark is the clicked level, not the touch it crossed.
         position.entry_slippage = slippage(group.level, entry_spread,

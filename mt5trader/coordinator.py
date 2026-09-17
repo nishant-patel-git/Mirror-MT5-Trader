@@ -1091,7 +1091,41 @@ class Coordinator:
         click and a ladder click at the same price are the same order.
         """
         with self.lock:
-            return self._click(pair_key, side, level, quantity)
+            answer = self._click(pair_key, side, level, quantity)
+            self._log_click(pair_key, side, level, quantity, answer)
+            return answer
+
+    def _log_click(self, pair_key, side, level, quantity, answer):
+        """One line per click: what was asked for, and what came of it.
+
+        A placement used to write NOTHING. The ladder showed it, so
+        nobody added a line - and then "which cell did he click, and was
+        it LIMIT or MARKET?" could only be answered by reading the
+        database and doing arithmetic on the slippage. The trader who
+        was told his order filled where he never clicked waited a day
+        for that answer.
+
+        The INTENT is logged even when the click was refused, because a
+        refusal is exactly the case where nothing else records what was
+        asked for. Never raises: a click is not going to fail over its
+        own log line.
+        """
+        try:
+            pair = self.config.pairs.get(pair_key)
+            mode = getattr(getattr(pair, 'order_type', None), 'value', '?')
+            if quantity is None and pair is not None:
+                quantity = pair.default_quantity
+            outcome = 'refused' if answer.get('refused') else (
+                'taken' if answer.get('ok') else 'failed')
+            logging.info(
+                'CLICK %s %s %s qty %s at %s -> %s%s', pair_key,
+                getattr(side, 'value', side), mode,
+                '?' if quantity is None else f'{float(quantity):g}',
+                '?' if level is None else f'{float(level):g}',
+                outcome,
+                f" ({answer['reason']})" if answer.get('reason') else '')
+        except Exception as e:                # never lose a click to a log
+            logging.debug('could not log the click: %s', e)
 
     def _click(self, pair_key, side, level, quantity=None):
         pair = self.config.pairs.get(pair_key)
