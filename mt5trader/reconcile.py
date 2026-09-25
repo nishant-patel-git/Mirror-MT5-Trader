@@ -128,13 +128,28 @@ class Reconciler:
         report = {'at': self.last_run, 'orphans': [], 'ghosts': [],
                   'closed': [], 'escalated': [],
                   'unknown_accounts': list(self.unknown_accounts)}
-
-        report['unclaimed'] = [dict(row) for row in self.unclaimed.values()]
         report['book_complete'] = self.book_complete
 
         for account, positions in broker.items():
             for ticket, position in positions.items():
                 if (account, ticket) in known or ticket in known_ids:
+                    # IT IS IN THE BOOK. If it was ever listed as
+                    # unexplained, that listing is now wrong and has to
+                    # go - a warning nobody can clear is a warning
+                    # everybody learns to ignore.
+                    #
+                    # This is the ordinary life of a resting order, not
+                    # an edge case. The broker fills a pending on ITS
+                    # clock; we see it on our next poll and book the
+                    # pair a moment later. A reconcile pass landing in
+                    # that gap sees a position carrying our own comment
+                    # that the book does not hold yet, and correctly
+                    # refuses to touch it. Nothing then took the note
+                    # back down, so one entirely normal second left a
+                    # PERMANENT false alarm against a healthy, hedged
+                    # leg - with "Close it" as the only button offered,
+                    # which would have made the other leg naked.
+                    self._claimed(account, ticket)
                     continue
                 key = (account, ticket)
                 if key in self.escalated:
@@ -144,6 +159,12 @@ class Reconciler:
                     # the screen for a person; it is not ours to close.
                     continue
                 if is_ours(position):
+                    if not self.book_complete:
+                        # Recovery has not finished, so "not in the
+                        # book" means nothing yet. Listing it here
+                        # would accuse the book of losing something
+                        # before the book has been read.
+                        continue
                     """OURS, and the book lost it. Never close it.
 
                     A trader put a spread on and watched both legs
@@ -227,7 +248,26 @@ class Reconciler:
                     f"after {strikes} checks")
                 logging.critical("%s: %s", position.pair_key,
                                  position.close_reason)
+        # BUILT LAST, from what this pass actually found.
+        #
+        # It used to be built before the scan, so a new unexplained
+        # position was reported one whole pass late and a cleared one
+        # stayed on screen for a pass after it was resolved. The screen
+        # was always describing the previous twenty seconds.
+        report['unclaimed'] = [dict(row) for row in self.unclaimed.values()]
         return report
+
+    def _claimed(self, account, ticket):
+        """This ticket is accounted for. Take back any note about it.
+
+        Only ever REMOVES a warning, and only for a ticket the book (or
+        our own ledger) can now explain. A position nobody can explain
+        is untouched, stays listed, and is still never auto-closed.
+        """
+        if self.unclaimed.pop((account, str(ticket)), None) is not None:
+            logging.info(
+                '%s:%s is in the book again - clearing the unexplained '
+                'position notice.', account, ticket)
 
     def known_tickets(self):
         """Every (account, ticket) our OPEN positions hold.

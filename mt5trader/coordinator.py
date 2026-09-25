@@ -1559,6 +1559,24 @@ class Coordinator:
             if row is None:
                 return {'ok': False, 'reason': f'{account}:{ticket} is not '
                                                f'on the unclaimed list'}
+            # A TICKET THE BOOK HOLDS IS NOT UNEXPLAINED, whatever a
+            # stale notice says. This is the hedged leg of a live
+            # spread: closing it leaves the OTHER leg naked, which
+            # turns a cosmetic fault into an outright position the
+            # trader never asked for. The one button the screen offered
+            # for this position was this one.
+            #
+            # `close_position` on the pair is how a trader gets out of
+            # a spread; this is only ever for something nothing
+            # accounts for.
+            if (account, str(ticket)) in self.reconciler.known_tickets():
+                self.reconciler.unclaimed.pop((account, str(ticket)), None)
+                return {'ok': False, 'refused': True, 'reason': (
+                    f'{account}:{ticket} IS in the book — it is a leg of a '
+                    f'live position, not an unexplained one. Closing it '
+                    f'alone would leave the other leg naked. The notice '
+                    f'was stale and has been cleared; use Flatten on the '
+                    f'position itself.')}
             leg = self.legs.get(account)
             if leg is None:
                 return {'ok': False, 'reason': f"no leg runner for {account}"}

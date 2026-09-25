@@ -102,6 +102,18 @@
   // reads as the size having been changed on the way to the broker. The
   // engine tidies the arithmetic now; this makes sure nothing on the
   // way to the screen can put the dust back.
+  //: Below this, a net position is FLAT. Three 0.01 buys covered by
+  //: three 0.01 sells leaves -3.4e-18 in binary floating point, and
+  //: `if (!net)` is false for that - so the ladder offered to close a
+  //: position that does not exist and printed a seventeen-digit
+  //: nothing where it should have said "flat". The engine sweeps this
+  //: too; the screen must not depend on that being perfect.
+  var FLAT_EPSILON = 1e-9;
+
+  function isFlat(net) {
+    return !net || Math.abs(net) < FLAT_EPSILON;
+  }
+
   function qty(value) {
     if (value === null || value === undefined || value === '') return DASH;
     var number = Number(value);
@@ -1509,13 +1521,13 @@
       toast('type the spread level to close at, beside the button');
       return;
     }
-    if (!row.net_position) {
+    if (isFlat(row.net_position)) {
       toast((row.name || key) + ' is already flat — nothing to close');
       return;
     }
     ask('Rest a closing order at ' + fmt(level, 4) + '?',
         (row.name || key) + '\n' +
-        (row.net_position > 0 ? '+' : '') + row.net_position +
+        (row.net_position > 0 ? '+' : '') + qty(row.net_position) +
         ' spreads open.\n\nOne working order per position, at that ' +
         'level, by ticket. It WAITS there — nothing crosses now, and ' +
         'there is no stop. CLOSE ALL is the one that crosses.',
@@ -1548,14 +1560,14 @@
 
   function flatten(key) {
     var row = state.snapshot.pairs[key] || {};
-    if (!row.net_position) {
+    if (isFlat(row.net_position)) {
       toast((row.name || key) + ' is already flat');
       return;
     }
     // Flattening is irreversible and it is the button pressed in a
     // hurry, so it asks — but with one key, and only once.
     ask('Flatten ' + (row.name || key) + '?',
-        (row.net_position > 0 ? '+' : '') + row.net_position +
+        (row.net_position > 0 ? '+' : '') + qty(row.net_position) +
         ' spreads, at market, by ticket. This cannot be undone.',
         'Flatten now', function () { send('flatten_pair', {pair: key}); });
   }
@@ -1850,8 +1862,8 @@
     var feed = node.querySelector('.feed');
     feed.textContent = market.feed_badge || DASH;
     feed.className = 'feed ' + badgeClass(market.feed_badge);
-    node.querySelector('.pos').textContent = row.net_position
-      ? (row.net_position > 0 ? '+' : '') + row.net_position + ' @ ' +
+    node.querySelector('.pos').textContent = !isFlat(row.net_position)
+      ? (row.net_position > 0 ? '+' : '') + qty(row.net_position) + ' @ ' +
         fmt(row.avg_entry, 4)
       : 'flat';
     var pnl = node.querySelector('.pnl');
@@ -2890,7 +2902,7 @@
       html += '<tr data-position="' + position.position_id + '">';
       html += '<td>' + (row.name || key) + '</td>';
       html += '<td>' + position.side + '</td>';
-      html += '<td>' + position.quantity + '</td>';
+      html += '<td>' + qty(position.quantity) + '</td>';
       html += '<td>' + fmt(position.entry_spread, 4) + '</td>';
       html += '<td>' + fmt(position.closing_spread, 4) + '</td>';
       html += '<td class="' + (position.net_pnl > 0 ? 'up' : 'down') + '">' +
@@ -2929,14 +2941,14 @@
 
   function legText(leg) {
     if (!leg) { return DASH; }
-    return leg.side + ' ' + leg.volume + ' @ ' + fmt(leg.price, 2);
+    return leg.side + ' ' + qty(leg.volume) + ' @ ' + fmt(leg.price, 2);
   }
 
   function legDetail(leg, label) {
     if (!leg) { return 'leg ' + label + ': ' + DASH; }
     return 'leg ' + label + ' ' + leg.symbol + ' on ' + leg.account +
       ' · tickets ' + (leg.position_tickets.join(', ') || DASH) +
-      ' · ' + leg.volume + ' lots × ' +
+      ' · ' + qty(leg.volume) + ' lots × ' +
       (leg.contract_size || DASH) + '/lot';
   }
 
@@ -3352,7 +3364,7 @@
       report.worst.forEach(function (row) {
         html += '<tr><td>' + (row.pair_key || DASH) + '</td>';
         html += '<td>' + (row.side || DASH) + '</td>';
-        html += '<td>' + row.quantity + '</td>';
+        html += '<td>' + qty(row.quantity) + '</td>';
         html += '<td>' + (row.order_type || DASH) + '</td>';
         html += slipPoints(row.entry_points);
         html += slipMoney(row.entry_money);

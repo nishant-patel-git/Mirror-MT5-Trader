@@ -216,7 +216,19 @@ class SpreadPosition:
         self.position_id = new_id('POS')
         self.pair_key = pair_key
         self.side = SpreadSide(side)
-        self.quantity = float(quantity)       # in spreads
+        # TIDIED HERE, once, for every path that builds a position.
+        #
+        # A LIMIT fill computes this as `leg_b.volume / clip_lots_b`,
+        # and binary floats do not divide cleanly: 0.01 / 0.1 is
+        # 0.09999999999999999, which is what the Net column printed -
+        # seventeen digits where the trader typed two. Nothing was
+        # wrong with the trade; the number was just never swept.
+        #
+        # Doing it in the constructor covers the market path, the limit
+        # path, the adopt path and a position rebuilt from the database
+        # at restart, so no future caller can reintroduce it. It
+        # changes no quantity anybody could type (9 decimal places).
+        self.quantity = sizing.tidy(quantity)  # in spreads
         self.leg_a = leg_a_fill
         self.leg_b = leg_b_fill
         #: Anchored on the EXECUTED fills, never on the mid the decision
