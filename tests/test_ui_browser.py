@@ -1515,6 +1515,55 @@ def test_a_window_goes_where_it_is_dragged_and_is_still_there_after_a_reload(
     tidy(page)
 
 
+def ladder_pos_text(page, net, avg=8.2351):
+    """Render one ladder footer with this net position, and read it."""
+    page.evaluate(HOLD_THE_SNAPSHOT)
+    page.evaluate("""([net, avg]) => {
+        const UI = window.MT5Trader;
+        const key = Object.keys(UI.state.snapshot.pairs)[0];
+        UI.state.snapshot.pairs[key].net_position = net;
+        UI.state.snapshot.pairs[key].avg_entry = avg;
+        UI.state.open = [UI.panelId('ladder', key)];
+        UI.render();
+    }""", [net, avg])
+    return page.text_content('.window.ladder .pos')
+
+
+def test_a_net_position_never_reaches_the_screen_with_its_binary_dust(page):
+    """`0.01 / 0.1` is 0.09999999999999999, and a LIMIT fill sizes a
+    position exactly that way. The engine sweeps it now — this makes
+    sure nothing on the way to the screen can put it back."""
+    try:
+        text = ladder_pos_text(page, 0.09999999999999999)
+        assert text.strip().startswith('+0.1 @'), text
+        assert '0999' not in text, text
+    finally:
+        page.evaluate(RELEASE_THE_SNAPSHOT)
+
+
+def test_a_net_of_dust_reads_FLAT_rather_than_a_tiny_number(page):
+    """Three 0.01 buys covered by three 0.01 sells leaves -3.4e-18.
+    `if (!net)` is false for that, so the ladder printed a
+    seventeen-digit nothing and offered to close a position that is not
+    there."""
+    try:
+        assert ladder_pos_text(page, -3.469446951953614e-18).strip() == 'flat'
+        assert ladder_pos_text(page, 0.0).strip() == 'flat'
+    finally:
+        page.evaluate(RELEASE_THE_SNAPSHOT)
+
+
+def test_CONTROL_a_real_position_still_shows_its_size_and_entry(page):
+    """The control. A screen that simply said "flat" more often would
+    pass the test above and hide live money."""
+    try:
+        text = ladder_pos_text(page, -0.01, 8.2351)
+        assert '-0.01' in text and '8.2351' in text, text
+        assert ladder_pos_text(page, 0.000001).strip() != 'flat'
+    finally:
+        page.evaluate(RELEASE_THE_SNAPSHOT)
+
+
 def scroll_desk(page, spacer_px=400, to=100):
     """Put the desk into the state the bug needed: SCROLLED SIDEWAYS.
 

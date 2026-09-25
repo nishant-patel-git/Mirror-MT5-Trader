@@ -268,7 +268,21 @@ class Book:
             if position.entry_spread is not None:
                 weighted += position.entry_spread * position.quantity
                 volume += position.quantity
-        return net, (weighted / volume if volume else None)
+        # SWEPT, because this is a RUNNING SUM and running sums are
+        # where binary dust collects. Three 0.01 buys covered by three
+        # 0.01 sells is -3.469446951953614e-18, not zero - and the
+        # ladder printed exactly that where it should have said FLAT,
+        # because a number that tiny is still not zero to an `if`.
+        # The trader who reported "0.000000001122411 when 3-4 positions
+        # are open" was looking at this.
+        #
+        # `+ 0.0` turns the -0.0 that rounding can leave into 0.0, so
+        # nothing downstream renders a negative nothing.
+        net = sizing.tidy(net) + 0.0
+        if not volume:
+            # An average of no trades is not zero (spec §11).
+            return net, None
+        return net, sizing.tidy(weighted / volume)
 
     def last_print(self, pair_key):
         prints = self.prints.get(pair_key) or []
