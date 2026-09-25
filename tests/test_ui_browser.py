@@ -1516,17 +1516,54 @@ def test_a_window_goes_where_it_is_dragged_and_is_still_there_after_a_reload(
 
 
 def ladder_pos_text(page, net, avg=8.2351):
-    """Render one ladder footer with this net position, and read it."""
+    """Render one ladder footer with this net position, and read it.
+
+    PUTS THE SNAPSHOT BACK. These tests write into the shared page's
+    live snapshot, and a held snapshot means the poll cannot wash the
+    edit out again - so an edit left behind is an edit every later test
+    in this module inherits. Mine took the fair-window tests down until
+    this restored what it changed.
+    """
     page.evaluate(HOLD_THE_SNAPSHOT)
     page.evaluate("""([net, avg]) => {
         const UI = window.MT5Trader;
         const key = Object.keys(UI.state.snapshot.pairs)[0];
-        UI.state.snapshot.pairs[key].net_position = net;
-        UI.state.snapshot.pairs[key].avg_entry = avg;
+        const pair = UI.state.snapshot.pairs[key];
+        window.__posWas = window.__posWas || {
+            net: pair.net_position, avg: pair.avg_entry,
+            open: (UI.state.open || []).slice()};
+        pair.net_position = net;
+        pair.avg_entry = avg;
         UI.state.open = [UI.panelId('ladder', key)];
         UI.render();
     }""", [net, avg])
     return page.text_content('.window.ladder .pos')
+
+
+def restore_the_ladder(page):
+    """Undo everything `ladder_pos_text` wrote, then let the poll run."""
+    page.evaluate("""() => {
+        const UI = window.MT5Trader;
+        const was = window.__posWas;
+        if (was) {
+            const key = Object.keys(UI.state.snapshot.pairs)[0];
+            UI.state.snapshot.pairs[key].net_position = was.net;
+            UI.state.snapshot.pairs[key].avg_entry = was.avg;
+            UI.state.open = was.open;
+            delete window.__posWas;
+        }
+        if (window.__realFetch) { window.fetch = window.__realFetch; }
+        UI.render();
+    }""")
+    # ...and let a REAL poll land, so the next test starts from the
+    # server's snapshot rather than from the one this test wrote. The
+    # held stub meant nothing else would ever wash it out.
+    page.wait_for_function(
+        """() => {
+            const UI = window.MT5Trader;
+            const key = Object.keys((UI.state.snapshot || {}).pairs || {})[0];
+            return !!key && !window.__posWas;
+        }""", timeout=WAIT)
 
 
 def test_a_net_position_never_reaches_the_screen_with_its_binary_dust(page):
@@ -1538,7 +1575,7 @@ def test_a_net_position_never_reaches_the_screen_with_its_binary_dust(page):
         assert text.strip().startswith('+0.1 @'), text
         assert '0999' not in text, text
     finally:
-        page.evaluate(RELEASE_THE_SNAPSHOT)
+        restore_the_ladder(page)
 
 
 def test_a_net_of_dust_reads_FLAT_rather_than_a_tiny_number(page):
@@ -1550,7 +1587,7 @@ def test_a_net_of_dust_reads_FLAT_rather_than_a_tiny_number(page):
         assert ladder_pos_text(page, -3.469446951953614e-18).strip() == 'flat'
         assert ladder_pos_text(page, 0.0).strip() == 'flat'
     finally:
-        page.evaluate(RELEASE_THE_SNAPSHOT)
+        restore_the_ladder(page)
 
 
 def test_CONTROL_a_real_position_still_shows_its_size_and_entry(page):
@@ -1561,7 +1598,7 @@ def test_CONTROL_a_real_position_still_shows_its_size_and_entry(page):
         assert '-0.01' in text and '8.2351' in text, text
         assert ladder_pos_text(page, 0.000001).strip() != 'flat'
     finally:
-        page.evaluate(RELEASE_THE_SNAPSHOT)
+        restore_the_ladder(page)
 
 
 def scroll_desk(page, spacer_px=400, to=100):
