@@ -2856,7 +2856,7 @@ def test_the_window_is_ONE_choice_on_the_ladder_it_belongs_to(page):
     assert page.locator('.ladder .ls-algo-window').count() == 0
     options = page.eval_on_selector(
         '.ladder .ls-algo', 'el => [...el.options].map(o => o.value)')
-    assert options == ['NONE', 'FAIR_SPREAD', 'ALGO']
+    assert options == ['NONE', 'FAIR_SPREAD', 'ALGO', 'ALGO_LIVE']
     # The group says out loud what the Algo is NOT.
     note = ' '.join(page.text_content(
         '.ladder .ls-group:has(.ls-algo) .lsf-note').split())
@@ -5147,3 +5147,102 @@ def test_in_a_position_the_Algo_names_the_entry_and_draws_the_bar(page):
     page.wait_for_function(
         "() => document.querySelector('.window.fairwin .algo-sl-row')"
         ".hidden", timeout=WAIT)
+
+
+#: Capture every engine command the page sends, answering each as the
+#: engine would — so a test can read exactly what was asked for.
+SPY_ON_COMMANDS = """(answer) => {
+    window.__realFetch = window.__realFetch || window.fetch;
+    window.__commands = [];
+    window.__answer = answer || {ok: true};
+    window.fetch = function (url, options) {
+        const u = String(url);
+        const json = (body) => Promise.resolve(new Response(
+            JSON.stringify(body),
+            {status: 200, headers: {'Content-Type': 'application/json'}}));
+        if (u.indexOf('/api/command') >= 0 && options) {
+            window.__commands.push(JSON.parse(options.body));
+            return json({ok: true, id: 'c' + window.__commands.length});
+        }
+        if (u.indexOf('/api/result/') >= 0) {
+            return json({ok: true, data: window.__answer});
+        }
+        if (u.indexOf('/api/pairs/') >= 0 && options &&
+            options.method === 'POST') {
+            return json({ok: true, notes: []});
+        }
+        return window.__realFetch(url, options);
+    };
+}"""
+
+
+def algo_commands(page):
+    return [c for c in page.evaluate('() => window.__commands')
+            if c['kind'] == 'set_algo']
+
+
+def test_going_LIVE_asks_first_and_sends_nothing_until_confirmed(page):
+    open_ladder(page)
+    page.evaluate(SPY_ON_COMMANDS)
+    try:
+        page.click('.ladder .ladder-cog')
+        page.wait_for_selector('.ladder .ls-algo', timeout=WAIT)
+        page.select_option('.ladder .ls-algo', 'ALGO_LIVE')
+        page.click('.ladder .ls-save')
+        page.wait_for_selector('#modal:not(.hidden)', timeout=WAIT)
+        assert 'LIVE' in page.text_content('#modal-title')
+        assert 'REAL orders' in page.text_content('#modal-body')
+        assert algo_commands(page) == []            # nothing sent yet
+
+        page.click('#modal-confirm')
+        page.wait_for_function(
+            "() => window.__commands.some(c => c.kind === 'set_algo')",
+            timeout=WAIT)
+        [command] = algo_commands(page)
+        assert command['payload']['mode'] == 'LIVE'
+        assert command['payload']['confirmed'] is True
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch; }')
+
+
+def test_a_dry_run_is_not_asked_about(page):
+    """The control: the Algo in dry run sends nothing, so it asks
+    nothing."""
+    open_ladder(page)
+    page.evaluate(SPY_ON_COMMANDS)
+    try:
+        page.click('.ladder .ladder-cog')
+        page.wait_for_selector('.ladder .ls-algo', timeout=WAIT)
+        page.select_option('.ladder .ls-algo', 'ALGO')
+        page.click('.ladder .ls-save')
+        page.wait_for_function(
+            "() => window.__commands.some(c => c.kind === 'set_algo')",
+            timeout=WAIT)
+        [command] = algo_commands(page)
+        assert command['payload']['mode'] == 'DRY_RUN'
+        assert page.locator('#modal:not(.hidden)').count() == 0
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch; }')
+
+
+def test_leaving_LIVE_with_a_position_offers_close_or_hand_over(page):
+    open_ladder(page)
+    page.evaluate(SPY_ON_COMMANDS, {
+        'ok': False, 'choose': ['close', 'manual'],
+        'reason': 'the Algo holds 1 position(s) on XAUUSD_|GC1226'})
+    try:
+        page.evaluate(
+            "() => window.MT5Trader.setAlgo('XAUUSD_|GC1226', 'NONE')")
+        page.wait_for_selector('#modal:not(.hidden)', timeout=WAIT)
+        assert page.is_visible('#modal-alt')
+        assert 'Hand it to manual' in page.text_content('#modal-alt')
+        page.evaluate("() => { window.__answer = {ok: true}; }")
+        page.click('#modal-alt')
+        page.wait_for_function(
+            "() => window.__commands.filter(c => c.kind === 'set_algo')"
+            ".length === 2", timeout=WAIT)
+        assert algo_commands(page)[-1]['payload']['off_action'] == 'manual'
+        # The second answer is gone again for every other question.
+        assert not page.is_visible('#modal-alt')
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch; }')

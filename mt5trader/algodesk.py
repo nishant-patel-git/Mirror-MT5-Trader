@@ -3,24 +3,27 @@
 `algo.AlgoSignal` decides; `bands.SpreadCandles` measures; this module
 feeds them on every poll and hands what they decide to a SINK.
 
-**The sink is the seam execution will use.** Today there is one,
-`RecordingSink`: an intent — "enter, selling the spread", "exit
-POS-12, profit target" — is written to the audit trail, kept for the
-screen, and logged. It sends nothing. When execution is asked for, an
-execution sink takes the same intents to the executor (MARKET both
-legs, closes by TICKET) and nothing upstream of it changes. Until then
-`MODES` holds DRY_RUN alone and asking for anything else is refused.
+**Two sinks, one seam.** Every intent — "enter, selling the spread",
+"exit POS-12, profit target" — goes to `RecordingSink`: written to the
+audit trail, kept for the screen, logged. In LIVE mode it ALSO goes to
+the live sink (`algoexec.LiveSink`), which sends it: MARKET both legs
+to enter, a close by TICKET to exit, through the same executor a
+manual click uses. Nothing in this module can reach an order itself;
+`tests/test_algo.py` reads it as code to keep it that way.
 
 Rules this module keeps:
 
 - **The switch is per ladder, in memory, and OFF at every start.** It
   is never written to the config: an algo nobody turned on today is an
   algo nobody is watching.
-- **Manual trading is untouched.** `manual_order_refusal` is the one
-  place the click path will consult when execution exists ("the Algo
-  is trading this ladder — manual orders are off"). Today it returns
-  None for every ladder, always: the trader asked for the signal
-  beside the ladder, with their own clicks unaffected.
+- **Algo or Manual, never both.** `manual_order_refusal` is what the
+  click path consults: while a ladder's Algo is LIVE, a NEW manual
+  order on it is refused in words. In DRY_RUN it refuses nothing. A
+  close is never refused here — CLOSE ALL, flatten and closing a
+  position by hand do not come through it.
+- **The day's limits** — trades, a losing run, the money lost — stop
+  ENTRIES for the rest of the broker's day and say which. Exits carry
+  on whatever is hit.
 - **History first, then the live tape.** Turning a ladder on loads its
   saved candles and asks MT5 for its bars, so the band is there at
   once. If the terminals will not answer — or a broker's clock is not
@@ -39,23 +42,26 @@ from . import bands
 #: How often a ladder that is still short of candles asks MT5 again.
 BACKFILL_RETRY_SEC = 60.0
 
+#: How long after an exit that was SENT and did not close it is sent
+#: again. Not every poll: a close the broker refuses three times a
+#: second is a flood, not a retry.
+EXIT_RETRY_SEC = 5.0
+
 
 class RecordingSink:
     """Today's only sink: record the intent, show it, send nothing."""
 
-    mode = algo_module.DRY_RUN
-
     def __init__(self, store=None):
         self.store = store
 
-    def handle(self, pair_key, intent):
-        detail = dict(intent, mode=self.mode)
+    def handle(self, pair_key, intent, mode=algo_module.DRY_RUN):
+        detail = dict(intent, mode=mode)
         z = intent.get('z')
         logging.info('[ALGO %s] %s %s %s z=%s spread=%s (%s, nothing sent)',
                      pair_key, intent.get('action'), intent.get('side'),
                      intent.get('reason') or '',
                      '—' if z is None else f'{z:+.2f}',
-                     intent.get('spread'), self.mode)
+                     intent.get('spread'), mode)
         if self.store is not None:
             try:
                 self.store.event('algo_signal', pair_key, **detail)
@@ -63,11 +69,38 @@ class RecordingSink:
                 logging.error('could not record an Algo signal: %s', e)
         return detail
 
+    def outcome(self, pair_key, intent, answer):
+        """What became of a LIVE intent, in the audit trail beside it."""
+        logging.info('[ALGO %s] %s %s -> %s %s', pair_key,
+                     intent.get('action'), intent.get('side'),
+                     'done' if answer.get('ok') else 'FAILED',
+                     answer.get('reason') or answer.get('position_id') or '')
+        if self.store is not None:
+            try:
+                self.store.event('algo_order', pair_key,
+                                 action=intent.get('action'),
+                                 side=intent.get('side'),
+                                 position_id=(answer.get('position_id')
+                                              or intent.get('position_id')),
+                                 ok=bool(answer.get('ok')),
+                                 reason=answer.get('reason'))
+            except Exception as e:
+                logging.error('could not record an Algo order: %s', e)
+
 
 class _Run:
     """One ladder's Algo while it is on."""
 
-    def __init__(self, signature, params, anchor, started_at):
+    def __init__(self, signature, params, anchor, started_at,
+                 mode=algo_module.DRY_RUN):
+        self.mode = mode
+        #: Positions this Algo owns: opened by it, or ALGO-tagged and
+        #: adopted when it was turned on. Watched so a close — by the
+        #: Algo, by the trader, by the overnight rule — is counted.
+        self.mine = set()
+        #: position id -> when an exit for it last FAILED.
+        self.retry = {}
+        self.day = {'date': None, 'trades': 0, 'losses_row': 0, 'pnl': 0.0}
         self.signature = signature
         self.params = params
         self.candles = bands.SpreadCandles(params['timeframe_min'] * 60.0,
@@ -84,13 +117,18 @@ class AlgoDesk:
     """Every ladder's Algo switch, and the Algo on the ones that are on."""
 
     def __init__(self, legs, store=None, clock=None, offset_for=None,
-                 sink=None):
+                 sink=None, live=None, result_of=None):
         self.legs = legs
         self.store = store
         self.clock = clock
         #: account name -> the broker's measured offset from UTC, or None.
         self.offset_for = offset_for or (lambda name: None)
         self.sink = sink or RecordingSink(store)
+        #: The LIVE sink (`algoexec.LiveSink`), or None — then LIVE is
+        #: refused, because there is nothing to send with.
+        self.live = live
+        #: position id -> its realized P&L once closed, or None.
+        self.result_of = result_of or (lambda position_id: None)
         self._runs = {}
 
     # -- the switch ---------------------------------------------------------
@@ -98,16 +136,40 @@ class AlgoDesk:
     def is_on(self, key):
         return key in self._runs
 
-    def turn_on(self, pair, mode=algo_module.DRY_RUN):
-        """Switch one ladder's Algo on. Refused, in words, if it cannot be."""
+    def mode(self, key):
+        run = self._runs.get(key)
+        return run.mode if run else None
+
+    def turn_on(self, pair, mode=algo_module.DRY_RUN, confirmed=False,
+                adopt=()):
+        """Switch one ladder's Algo on, or change its mode. Refused, in
+        words, if it cannot be.
+
+        LIVE sends real orders, so it is never a default and never
+        implied: it needs `confirmed`, every time. `adopt` is the ladder's
+        ALGO-tagged positions, which this Algo manages from now on.
+        """
+        mode = str(mode or algo_module.DRY_RUN).upper()
         if mode not in algo_module.MODES:
             return {'ok': False, 'pair': pair.key,
-                    'reason': f'{mode} is not available — the Algo signals '
-                              f'only; it does not trade yet'}
-        if not self.is_on(pair.key):
-            self._runs[pair.key] = self._new_run(pair)
-            logging.info('[ALGO %s] ON (%s)', pair.key, mode)
-        return {'ok': True, 'pair': pair.key, 'on': True, 'mode': mode}
+                    'reason': f'{mode} is not a mode — DRY_RUN or LIVE'}
+        if mode == algo_module.LIVE:
+            if self.live is None:
+                return {'ok': False, 'pair': pair.key,
+                        'reason': 'LIVE is not available on this engine'}
+            if not confirmed:
+                return {'ok': False, 'pair': pair.key, 'confirm': True,
+                        'reason': 'LIVE sends real orders to both accounts '
+                                  '— it has to be confirmed'}
+        run = self._runs.get(pair.key)
+        if run is None:
+            run = self._runs[pair.key] = self._new_run(pair)
+        run.mode = mode
+        run.mine.update(adopt or ())
+        logging.info('[ALGO %s] ON (%s)%s', pair.key, mode,
+                     f' — adopted {len(adopt)} position(s)' if adopt else '')
+        return {'ok': True, 'pair': pair.key, 'on': True, 'mode': mode,
+                'adopted': list(adopt or ())}
 
     def turn_off(self, key):
         was = self._runs.pop(key, None)
@@ -116,14 +178,24 @@ class AlgoDesk:
         return {'ok': True, 'pair': key, 'on': False}
 
     def manual_order_refusal(self, key):
-        """Why a MANUAL order on this ladder is refused, or None.
+        """Why a NEW manual order on this ladder is refused, or None.
 
-        Always None today: the Algo only signals, and the trader keeps
-        their clicks. When execution arrives, this is where "Algo or
-        Manual, never both" is enforced — on the ORDER PATH, never only
-        on the screen — and a close is still never refused.
+        "Algo or Manual, never both", enforced on the ORDER PATH — not
+        only on the screen, where a keyboard shortcut or a second
+        browser would walk round it. Only LIVE refuses: in DRY_RUN the
+        Algo sends nothing and the trader keeps the ladder.
         """
-        return None
+        run = self._runs.get(key)
+        if run is None or run.mode != algo_module.LIVE:
+            return None
+        return ('the Algo is trading this ladder (LIVE) — manual orders are '
+                'off. CLOSE ALL and the positions list still close; turn the '
+                'Algo off to trade by hand.')
+
+    def owned(self, key):
+        """The position ids this ladder's Algo owns now."""
+        run = self._runs.get(key)
+        return set(run.mine) if run else set()
 
     # -- every poll ---------------------------------------------------------
 
@@ -144,6 +216,15 @@ class AlgoDesk:
             run.params = params
             run.signal.params = params
         now = self.clock()
+        gates = dict(gates or {})
+        self._settle_day(run, gates.get('day'), positions)
+        halt = self._halt(run, positions)
+        if halt:
+            gates['halt'] = halt
+        for position_id, failed_at in list(run.retry.items()):
+            if now - failed_at >= EXIT_RETRY_SEC:
+                del run.retry[position_id]
+                run.signal.exit_failed(position_id)
         if md and md.get('mid_spread') is not None \
                 and not md.get('jump_reason'):
             # A price the jump guard is holding back is not fed to the
@@ -156,10 +237,77 @@ class AlgoDesk:
         body = run.signal.evaluate(now, md, run.candles.stats(), positions,
                                    gates)
         for intent in body['intents']:
-            recorded = self.sink.handle(pair.key, intent)
+            recorded = self.sink.handle(pair.key, intent, run.mode)
+            if run.mode == algo_module.LIVE:
+                answer = self._send(pair, run, intent, now)
+                self.sink.outcome(pair.key, intent, answer)
+                recorded = dict(recorded, done=bool(answer.get('ok')),
+                                result=answer.get('reason'))
+            elif intent['action'] == 'ENTER':
+                run.day['trades'] += 1         # a dry run counts as one
             run.recent.appendleft(dict(recorded, at=now))
+        body['halt'] = halt
         run.body = body
         return body
+
+    def _send(self, pair, run, intent, now):
+        """Hand a LIVE intent to the live sink, and keep score."""
+        try:
+            if intent['action'] == 'ENTER':
+                answer = self.live.enter(pair, intent['side'],
+                                         run.params['algo_qty'])
+            else:
+                answer = self.live.leave(pair, intent['position_id'],
+                                         intent.get('reason'))
+        except Exception as e:                   # never stop the poll
+            logging.exception('[ALGO %s] send failed: %s', pair.key, e)
+            answer = {'ok': False, 'reason': f'the engine raised: {e}'}
+        if intent['action'] == 'ENTER':
+            if answer.get('ok'):
+                run.day['trades'] += 1
+                if answer.get('position_id'):
+                    run.mine.add(answer['position_id'])
+            else:
+                run.signal.entry_failed(now)
+        elif not answer.get('ok'):
+            run.retry[intent['position_id']] = now
+        return answer
+
+    def _settle_day(self, run, day, positions):
+        """A new broker day clears the counts; a position of ours that
+        has gone is scored."""
+        if day is not None and day != run.day['date']:
+            run.day = {'date': day, 'trades': 0, 'losses_row': 0, 'pnl': 0.0}
+        open_ids = {p['position_id'] for p in positions or ()}
+        for gone in run.mine - open_ids:
+            run.mine.discard(gone)
+            run.retry.pop(gone, None)
+            pnl = self.result_of(gone)
+            if pnl is None:
+                continue                      # unmeasured is not a loss
+            run.day['pnl'] += pnl
+            run.day['losses_row'] = run.day['losses_row'] + 1 if pnl < 0 \
+                else 0
+
+    def _halt(self, run, positions):
+        """Which of the day's limits stops entries now, in words, or None."""
+        p, day = run.params, run.day
+        if p['max_trades_day'] and day['trades'] >= p['max_trades_day']:
+            return (f"{day['trades']} Algo trades today — the day's limit "
+                    f"is {p['max_trades_day']}")
+        if p['max_losses_row'] and day['losses_row'] >= p['max_losses_row']:
+            return (f"{day['losses_row']} losing Algo trades in a row — "
+                    f"paused for the day")
+        if p['daily_loss_limit']:
+            open_pnl = 0.0
+            for position in positions or ():
+                if position['position_id'] in run.mine:
+                    open_pnl += position.get('net_pnl') or 0.0
+            total = day['pnl'] + open_pnl
+            if total <= -abs(p['daily_loss_limit']):
+                return (f"Algo P&L today {total:,.2f} — past the "
+                        f"-{abs(p['daily_loss_limit']):,.2f} limit")
+        return None
 
     def block(self, key):
         """What the screen shows for one ladder's Algo, or None if off."""
@@ -169,7 +317,8 @@ class AlgoDesk:
         body = dict(run.body or {'algo': algo_module.ALGO, 'state': 'STARTING',
                                  'params': dict(run.params)})
         body.pop('intents', None)
-        body.update(on=True, mode=self.sink.mode, history=dict(run.history),
+        body.update(on=True, mode=run.mode, day=dict(run.day),
+                    owned=sorted(run.mine), history=dict(run.history),
                     recent=list(run.recent), started_at=run.started_at,
                     timeframe_min=run.params['timeframe_min'],
                     length=run.params['length'])

@@ -1,23 +1,18 @@
 """The algos, and the switch that says which one is running.
 
-This system is a MANUAL ladder with a SIGNAL beside it. The rule this
+This system is a MANUAL ladder with an Algo beside it. The rule this
 module is where it would be lost:
 
-    Signals may be computed and shown. Nothing places an order by
-    itself — no automatic entries, no automatic exits, nothing that
-    re-enters by itself.
+    Nothing places an order by itself — except a ladder's Algo in LIVE,
+    which a person switched on and confirmed, today, and which then has
+    that ladder to itself.
 
-So what follows DECIDES and says what it would do. **It does not place,
-modify or cancel an order, and nothing in this file touches the manual
-path** — a click on the ladder behaves identically whether an algo is
-selected or not, and whether it is saying BUY or nothing at all. A test
-reads this file as code and fails the build if it can reach a broker.
-
-What it decides leaves as an INTENT — "enter, selling the spread",
-"exit position POS-12, profit target" — handed to a sink (`algodesk`).
-Today the only sink records the intent and shows it. Execution, when
-it is asked for, is a second sink behind the same seam; nothing in here
-changes when it arrives.
+What follows DECIDES and says what it would do. **It does not place,
+modify or cancel an order itself** — a test reads this file as code and
+fails the build if it can reach a broker. What it decides leaves as an
+INTENT — "enter, selling the spread", "exit position POS-12, profit
+target" — handed to `algodesk`, which records it, and in LIVE hands it
+to `algoexec`, the one module that sends.
 
 One algo per ladder, and NONE by default:
 
@@ -69,11 +64,13 @@ FAIR_SPREAD = 'FAIR_SPREAD'
 ALGO = 'ALGO'
 ALGOS = (NONE, FAIR_SPREAD, ALGO)
 
-#: How the Algo's intents are handled. Only DRY_RUN exists: intents are
-#: recorded and shown, never sent. A LIVE mode is the step that has to
-#: be asked for — it is refused here until it is.
+#: How the Algo's intents are handled. DRY_RUN records and shows them
+#: and sends nothing. LIVE also sends them: MARKET both legs to enter,
+#: closes by TICKET to exit. LIVE is confirmed every time it is switched
+#: on, and while it is on the ladder takes no new MANUAL orders.
 DRY_RUN = 'DRY_RUN'
-MODES = (DRY_RUN,)
+LIVE = 'LIVE'
+MODES = (DRY_RUN, LIVE)
 
 #: What kind of pair this is, which decides the fair-value arithmetic.
 SPOT_FUTURE = 'SPOT_FUTURE'
@@ -153,6 +150,17 @@ DEFAULT_PARAMS = {
     'stop_loss_pct': 2.0,
     #: Show the SL <- entry -> TP bar while a position is on.
     'progress_bar': True,
+    #: What ONE Algo trade is, in spreads (one spread = the ladder's
+    #: Leg A lots / Leg B lots). Its own number, so a trader changing the
+    #: keypad cannot resize the Algo by accident.
+    'algo_qty': 1.0,
+    # The day's limits. Any one of them stops ENTRIES for the rest of
+    # the broker's day, and says which; exits always carry on. 0 = off.
+    'max_trades_day': 10,
+    #: In money, the session's Algo P&L — closed plus open — at or below
+    #: minus this. Off until a desk sets its own number.
+    'daily_loss_limit': 0.0,
+    'max_losses_row': 3,
     # The three optional exits — every one OFF until a ladder asks.
     'stop_z_on': False,
     'stop_z': 4.0,
@@ -163,7 +171,8 @@ DEFAULT_PARAMS = {
 
 _BOOLS = ('stop_z_on', 'reversion_on', 'time_stop_on', 'stop_loss_on',
           'progress_bar')
-_INTS = ('timeframe_min', 'length', 'confirm_ticks', 'time_stop_candles')
+_INTS = ('timeframe_min', 'length', 'confirm_ticks', 'time_stop_candles',
+         'max_trades_day', 'max_losses_row')
 
 
 def clean_params(raw):
@@ -196,6 +205,8 @@ def clean_params(raw):
     out['time_stop_candles'] = max(1, out['time_stop_candles'])
     if out['entry_z'] <= 0:
         out['entry_z'] = DEFAULT_PARAMS['entry_z']
+    if out['algo_qty'] <= 0:
+        out['algo_qty'] = DEFAULT_PARAMS['algo_qty']
     return out
 
 
@@ -218,6 +229,8 @@ def check_params(raw):
                             + ', '.join(str(t) for t in TIMEFRAMES))
         elif key == 'entry_z' and number <= 0:
             problems.append('entry z must be above 0')
+        elif key == 'algo_qty' and number <= 0:
+            problems.append('Algo qty must be above 0')
         elif number < 0:
             problems.append(f'{key} cannot be negative')
     return problems
@@ -266,7 +279,8 @@ class AlgoSignal:
           exist.
         - `gates`: {'health': why the price cannot be trusted, or None;
           'cutoff_min': minutes to the session cutoff, negative past
-          it, None unmeasured}.
+          it, None unmeasured; 'halt': a day's limit that has been hit,
+          in words, or None}.
         """
         p = self.params
         gates = gates or {}
@@ -394,6 +408,9 @@ class AlgoSignal:
             return 'no price on one leg'
         if gates.get('health'):
             return gates['health']
+        if gates.get('halt'):
+            # A day's limit: the trades, the loss, the losing run.
+            return gates['halt']
         if not body['ready']:
             return (body.get('note') or
                     f"collecting candles {body.get('count') or 0}"
@@ -411,6 +428,18 @@ class AlgoSignal:
                 return (f'z {z:+.2f} is past the {p["max_entry_z"]:g} cap — '
                         f'a blow-out, not a stretch')
         return None
+
+    def entry_failed(self, now):
+        """An entry that was SENT and did not go on. The cooldown starts,
+        and the signal may fire again after it — not on the next poll,
+        which would send the same refused order three times a second."""
+        self._entry_live = None
+        self._start_cooldown(now)
+
+    def exit_failed(self, position_id):
+        """An exit that was sent and did not close: report it again, so
+        it is retried. The desk paces the retries."""
+        self._exits_live.pop(position_id, None)
 
     def _start_cooldown(self, now):
         minutes = self.params['cooldown_min']

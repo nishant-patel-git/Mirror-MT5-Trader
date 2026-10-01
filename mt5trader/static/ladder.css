@@ -1991,3 +1991,6 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
   font-size: 9px;
   color: var(--muted, #666);
 }
+
+/* The Algo window's heading while the Algo is LIVE: it trades. */
+.fairwin .rail-label.algo-live { color: #c0392b; font-weight: 700; }

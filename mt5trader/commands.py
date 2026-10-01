@@ -339,14 +339,18 @@ class CommandRunner:
         return {'applied': applied}
 
     def _do_set_algo(self, payload):
-        """NONE / FAIR_SPREAD / ALGO for one ladder.
+        """NONE / FAIR_SPREAD / ALGO for one ladder, and ALGO's mode.
 
-        ALGO switches the ladder's Algo ON in the running engine: it
-        signals and records, it sends nothing, and it is off again after
-        a restart. Refused in words — never silently ignored.
+        ALGO switches the ladder's Algo ON in the running engine, off
+        again after a restart. `mode` DRY_RUN signals and records; LIVE
+        trades, and needs `confirmed` every time. Leaving LIVE while it
+        holds a position needs `off_action`: 'close' or 'manual'.
+        Refused in words — never silently ignored.
         """
-        return self.coordinator.set_algo(payload['pair'],
-                                         payload.get('algo'))
+        return self.coordinator.set_algo(
+            payload['pair'], payload.get('algo'), mode=payload.get('mode'),
+            confirmed=bool(payload.get('confirmed')),
+            off_action=payload.get('off_action'))
 
     def _do_set_pair(self, payload):
         """Mode / TIF / overnight / increment / quantity, per ladder.

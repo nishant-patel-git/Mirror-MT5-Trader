@@ -26,14 +26,17 @@ from.
   makes every live position look like an orphan; the reconciler
   auto-closes nothing until recovery says the book is complete, and
   never touches a position it cannot explain.
-- **Signals, never automatic orders.** A signal may be computed and
-  shown (the Algo: per ladder, OFF at every start, DRY_RUN only).
-  Nothing places, modifies or cancels an order by itself — no
-  automatic entries or exits, nothing that re-enters by itself. The
-  Algo's intents go to a sink that only records them; letting one
-  trade is a separate step that has to be asked for, and
-  `tests/test_algo.py` fails the build if the Algo's modules can reach
-  an order.
+- **Automatic orders come ONLY from a ladder's Algo in LIVE.** LIVE is
+  per ladder, confirmed every time it is switched on, and OFF after
+  every restart; DRY_RUN signals and sends nothing. While a ladder is
+  LIVE it takes NO new manual orders (closes still work), and LIVE is
+  refused on a ladder holding a manual position or a working order.
+  The Algo trades through the same executor a click uses: MARKET both
+  legs in, closes by TICKET. `algo.py`, `bands.py` and `algodesk.py`
+  decide and must not reach an order; `algoexec.py` is the one module
+  that sends, and only via the coordinator — `tests/test_algo.py`
+  fails the build otherwise. Nothing else places, modifies or cancels
+  an order by itself.
 
 ## Conventions that are easy to lose in a refactor
 

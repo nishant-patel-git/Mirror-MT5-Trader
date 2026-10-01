@@ -215,3 +215,16 @@ def test_a_ladder_running_NONE_computes_nothing_at_all(config, pair, legs):
     coordinator.poll_once()
     block = coordinator.snapshot()['pairs'][pair.key]['algo_block']
     assert block['algo'] == 'FAIR_SPREAD' and 'fair' in block
+
+
+def test_the_live_sink_reaches_orders_ONLY_through_the_coordinator():
+    """The one Algo module that may trade does it through the two
+    coordinator methods a manual click's executor sits behind — never a
+    broker, a leg or the executor directly."""
+    names, imports = _code_names('mt5trader/algoexec.py')
+    assert imports == set(), imports
+    assert names & {'broker', 'legs', 'executor', 'order_send',
+                    'send_market_order', 'close_ticket', 'place_limit'} \
+        == set()
+    calls = {n for n in names if n.startswith('algo_')}
+    assert calls == {'algo_enter', 'algo_exit'}, calls

@@ -1,8 +1,9 @@
 # MT5-Trader
 
 A **spread price-ladder trading terminal for MetaTrader 5** — a manual tool,
-with an optional per-ladder **Algo signal** beside it. No automatic entries or
-exits: the signal says what it would do, and the trader decides. A human looks at a ladder
+with an optional per-ladder **Algo**: in dry run it only signals; in LIVE,
+switched on and confirmed by a person, it trades that ladder by its rules and
+the ladder takes no manual orders while it does. A human looks at a ladder
 of spread prices, clicks a price, and an order exists at that price.
 
 Each ladder trades one pair of instruments across **two MT5 accounts** (Leg A on
@@ -144,11 +145,20 @@ exactly as before — it adds a reading, not a lock.
   the band level, the hint line says what the Algo says. No new window.
 - **Record.** Every signal goes to the audit trail; *Algo signals CSV* on the
   Fills tab exports them, with what an exit would have made after costs.
-- **Execution later.** What the Algo decides leaves as an intent to a sink.
-  Today's sink records it and sends nothing (DRY_RUN is the only mode).
-  Execution is a second sink behind the same seam, plus the order-path lock
-  (`AlgoDesk.manual_order_refusal`) — positions already carry a MANUAL/ALGO
-  source tag for it.
+- **Dry run or LIVE.** *Algo — dry run* records signals and sends nothing.
+  *Algo — LIVE* (confirmed every time) trades: MARKET both legs in, closes by
+  ticket, through the same executor a click uses, at its own **Algo qty**
+  (spreads; one spread = the ladder's Leg A / Leg B lots — 0.01 for testing).
+  One position at a time.
+- **Algo or Manual, never both.** While a ladder is LIVE a new manual order on
+  it is refused on the engine, in words; CLOSE ALL and the positions list still
+  close. LIVE is refused while the ladder holds a manual position or a working
+  order. Turning LIVE off with a position asks: close it now, or hand it to
+  manual. A restart comes back OFF; the Algo's position is shown as not
+  managed until LIVE adopts it again.
+- **The day's limits** stop entries (never exits) for the rest of the day: max
+  trades (10), losses in a row (3), and a daily loss limit (off until set). A
+  refused entry waits out the cooldown; a failed exit is retried every 5s.
 
 ## One click is one order
 

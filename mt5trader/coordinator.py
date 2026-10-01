@@ -25,16 +25,17 @@ from . import algo as algo_module, atomicfile, carry, \
     sizing, takeprofit
 from . import book as book_module
 from .algodesk import AlgoDesk
+from .algoexec import LiveSink
 from .book import Book
 from .database import Store
 from .executor import PairExecutor, mark_position
-from .models import (MAGIC_NUMBER, LegFill, OrderType, SpreadPosition,
-                     SpreadSide)
+from .models import (ALGO_SOURCE, MAGIC_NUMBER, MANUAL, LegFill, OrderType,
+                     SpreadPosition, SpreadSide)
 from .quoter import Quoter, quoting_leg
 from .reconcile import Reconciler
 from .session import SessionClock, day_orders, overnight_action
 from .spread import (LevelSigma, QuoteAgeTracker, SpreadJumpTracker,
-                     compute_spread, stale_quote)
+                     compute_spread, executable_spread, stale_quote)
 
 
 #: Settings whose only consumer is a panel or a display rule, so a save
@@ -145,10 +146,13 @@ class Coordinator:
         #: the snapshot so a broken pair is VISIBLE rather than absent
         #: (spec §17: never hide a broken row).
         self.errors = {}
-        #: Each ladder's Algo switch, OFF for every ladder at start. It
-        #: signals and records; it sends nothing (see `algodesk`).
+        #: Each ladder's Algo switch, OFF for every ladder at start.
+        #: DRY_RUN signals and records; LIVE also trades, through
+        #: `algo_enter` / `algo_exit` below (see `algodesk`, `algoexec`).
         self.algos = AlgoDesk(legs, store=store, clock=clock,
-                              offset_for=self._offset_of)
+                              offset_for=self._offset_of,
+                              live=LiveSink(self),
+                              result_of=self._realized_of)
 
     # -- startup ------------------------------------------------------------
 
@@ -885,12 +889,21 @@ class Coordinator:
 
     # -- the Algo -------------------------------------------------------------
 
-    def set_algo(self, pair_key, choice):
+    def set_algo(self, pair_key, choice, mode=None, confirmed=False,
+                 off_action=None):
         """Pick what a ladder runs: NONE, FAIR_SPREAD or ALGO.
 
         ALGO is a switch on the RUNNING engine and is never saved —
-        every restart comes up with it off. The other two are the Fair
+        every restart comes up with it off. `mode` is DRY_RUN (signals
+        only, the default) or LIVE (it trades), and LIVE needs
+        `confirmed` every time. The other two choices are the Fair
         Spread window, which IS the pair's saved setting.
+
+        Algo or Manual, never both: LIVE is refused on a ladder with a
+        MANUAL position or a working order. Leaving LIVE while the Algo
+        holds a position needs `off_action` — 'close' it now, or hand it
+        to 'manual' — because a position nobody manages is the worst of
+        the three.
         """
         pair = self.config.pairs.get(pair_key)
         if pair is None:
@@ -900,21 +913,130 @@ class Coordinator:
             return {'ok': False, 'pair': pair_key,
                     'reason': f'{choice!r} is not an algo — choose one of '
                               + ', '.join(algo_module.ALGOS)}
+        mode = str(mode or algo_module.DRY_RUN).upper()
         with self.lock:
+            leaving_live = (self.algos.mode(pair_key) == algo_module.LIVE
+                            and not (chosen == algo_module.ALGO
+                                     and mode == algo_module.LIVE))
+            if leaving_live:
+                handed = self._hand_back(pair, off_action)
+                if not handed.get('ok'):
+                    return dict(handed, pair=pair_key, algo=None)
             if chosen == algo_module.ALGO:
-                answer = self.algos.turn_on(pair)
+                if mode == algo_module.LIVE:
+                    refusal = self._live_refusal(pair)
+                    if refusal:
+                        answer = {'ok': False, 'pair': pair_key,
+                                  'reason': refusal}
+                        self._record_switch(pair_key, chosen, mode, answer)
+                        return dict(answer, algo=None)
+                adopt = [p.position_id for p in self.book.positions(pair_key)
+                         if getattr(p, 'source', MANUAL) == ALGO_SOURCE]
+                answer = self.algos.turn_on(pair, mode, confirmed,
+                                            adopt=adopt
+                                            if mode == algo_module.LIVE
+                                            else ())
             else:
                 self.algos.turn_off(pair_key)
                 pair.algo = chosen
                 answer = {'ok': True, 'pair': pair_key, 'on': False}
-        if self.store is not None:
-            try:
-                self.store.event('algo_switch', pair_key, algo=chosen,
-                                 ok=answer.get('ok'),
-                                 reason=answer.get('reason'))
-            except Exception as e:
-                logging.error('could not record the Algo switch: %s', e)
+        self._record_switch(pair_key, chosen, mode, answer)
         return dict(answer, algo=chosen if answer.get('ok') else None)
+
+    def _record_switch(self, pair_key, chosen, mode, answer):
+        if self.store is None:
+            return
+        try:
+            self.store.event('algo_switch', pair_key, algo=chosen, mode=mode,
+                             ok=answer.get('ok'), reason=answer.get('reason'))
+        except Exception as e:
+            logging.error('could not record the Algo switch: %s', e)
+
+    def _live_refusal(self, pair):
+        """Why this ladder cannot go LIVE, in words, or None."""
+        manual = [p for p in self.book.positions(pair.key)
+                  if getattr(p, 'source', MANUAL) != ALGO_SOURCE]
+        if manual:
+            net = sum(p.quantity if p.side is SpreadSide.BUY else -p.quantity
+                      for p in manual)
+            return (f'{pair.key} has {len(manual)} manual position(s) open '
+                    f'({net:+g} spreads) — Algo or Manual, never both. Close '
+                    f'them first.')
+        working = self.book.orders(pair.key)
+        if working:
+            return (f'{pair.key} has {len(working)} working order(s) — '
+                    f'cancel them before the Algo trades this ladder.')
+        return None
+
+    def _hand_back(self, pair, off_action):
+        """The Algo is leaving LIVE: what happens to what it holds."""
+        owned = [self.book.position(pid)
+                 for pid in self.algos.owned(pair.key)]
+        owned = [p for p in owned if p is not None and p.is_open]
+        if not owned:
+            return {'ok': True}
+        action = str(off_action or '').lower()
+        if action == 'manual':
+            for position in owned:
+                position.source = MANUAL
+                self.remember(position)
+            return {'ok': True, 'handed': [p.position_id for p in owned]}
+        if action == 'close':
+            failed = []
+            for position in owned:
+                answer = self.algo_exit(pair, position.position_id,
+                                        'the Algo was turned off')
+                if not answer.get('ok'):
+                    failed.append(answer.get('reason') or 'refused')
+            if failed:
+                # Still ON, still managing: a position the close could
+                # not take off must not also lose its manager.
+                return {'ok': False,
+                        'reason': 'could not close the Algo\'s position — '
+                                  + '; '.join(failed) + '. The Algo stays on.'}
+            return {'ok': True}
+        return {'ok': False, 'choose': ['close', 'manual'],
+                'positions': [p.position_id for p in owned],
+                'reason': f'the Algo holds {len(owned)} position(s) on '
+                          f'{pair.key} — close it now, or hand it to manual'}
+
+    def algo_enter(self, pair, side, quantity):
+        """A LIVE Algo entry: MARKET both legs, through the executor a
+        manual MARKET click uses, with the price the decision was taken
+        at as the slippage guard. Tagged ALGO and remembered."""
+        with self.lock:
+            md = self.market.get(pair.key)
+            side = SpreadSide(getattr(side, 'value', side))
+            level = executable_spread(md, side) if md else None
+            result = self.executor.market_entry(pair, side, md, quantity,
+                                                level)
+            if result.ok and result.position:
+                result.position.source = ALGO_SOURCE
+                self.remember(self.book.add_position(result.position))
+                return {'ok': True,
+                        'position_id': result.position.position_id}
+            if self.store is not None and result.reason:
+                self.store.event('refused', pair.key, reason=result.reason,
+                                 side=side.value, level=level, algo=True,
+                                 naked=result.naked)
+            return {'ok': False, 'reason': result.reason or 'not filled'}
+
+    def algo_exit(self, pair, position_id, reason):
+        """A LIVE Algo exit: close one position, both legs, by TICKET."""
+        with self.lock:
+            position = self.book.position(position_id)
+            if position is None or not position.is_open:
+                return {'ok': True, 'reason': 'already closed'}
+            result = self.executor.close_position(
+                pair, position, self.market.get(pair.key),
+                reason=f'Algo: {algo_module.EXIT_WORDS.get(reason, reason)}')
+            self.remember(position)
+            return {'ok': bool(result.get('ok')),
+                    'reason': result.get('reason') or result.get('error')}
+
+    def _realized_of(self, position_id):
+        position = self.book.position(position_id)
+        return None if position is None else position.realized_pnl
 
     def _offset_of(self, account):
         """One broker's measured offset from UTC, or None."""
@@ -967,6 +1089,7 @@ class Coordinator:
                     else be + stop
             rows.append({'position_id': position.position_id,
                          'side': position.side.value,
+                         'source': getattr(position, 'source', MANUAL),
                          'entry_spread': position.entry_spread,
                          'opened_at': position.opened_at,
                          'break_even': be, 'tp': tp, 'sl': sl,
@@ -1000,7 +1123,10 @@ class Coordinator:
                 minute=int(self.config.get('OVERNIGHT_CLOSE_MINUTE', 55)),
                 second=0, microsecond=0)
             cutoff_min = (cutoff - now).total_seconds() / 60.0
-        return {'health': health, 'cutoff_min': cutoff_min}
+        # The day the Algo's limits are counted over: the broker's, as
+        # the session is; this machine's while that is unmeasured.
+        day = (now or datetime.now()).date().isoformat()
+        return {'health': health, 'cutoff_min': cutoff_min, 'day': day}
 
     def holding_carry(self, pair, direction, nights):
         """What holding one spread `nights` nights costs, in money.
@@ -2233,6 +2359,15 @@ class Coordinator:
                 'algo': (algo_module.ALGO if self.algos.is_on(key)
                          else pair.algo),
                 'algo_on': self.algos.is_on(key),
+                'algo_mode': self.algos.mode(key),
+                # ALGO positions nobody is managing: recovered after a
+                # restart, or left when the Algo went to dry run. Said
+                # on the screen until the Algo is LIVE again to adopt
+                # them, or the trader closes them.
+                'algo_unmanaged': [
+                    p.position_id for p in self.book.positions(key)
+                    if getattr(p, 'source', MANUAL) == ALGO_SOURCE
+                    and p.position_id not in self.algos.owned(key)],
                 'algo_params': algo_module.clean_params(pair.algo_params),
                 'algo_window': pair.algo_window,
                 'algo_block': self.algo_block(pair, md, row_exit),

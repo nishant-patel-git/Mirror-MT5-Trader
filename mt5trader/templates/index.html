@@ -112,6 +112,10 @@
     <p id="modal-body"></p>
     <div class="modal-actions">
       <button id="modal-cancel" class="btn">Cancel</button>
+      <!-- A second answer, for the one question that has two: what
+           to do with the Algo's position when it is turned off. Hidden
+           for every other question. -->
+      <button id="modal-alt" class="btn" hidden></button>
       <button id="modal-confirm" class="btn danger"></button>
     </div>
   </div>
@@ -507,7 +511,8 @@
             <select class="ls-algo">
               <option value="NONE">None</option>
               <option value="FAIR_SPREAD">Fair spread</option>
-              <option value="ALGO">Algo</option>
+              <option value="ALGO">Algo — dry run</option>
+              <option value="ALGO_LIVE">Algo — LIVE (trades)</option>
             </select></label>
           <label class="lsf" title="Enter when the executable spread is this many sigma from the middle line: SELL at +z or above, BUY at &#8722;z or below.">
             <span>Entry z</span>
@@ -544,6 +549,18 @@
           <label class="lsf check-row" title="Also signal EXIT when z crosses back through 0 while the position is at or above break-even after costs.">
             <span>Back to mean</span>
             <input type="checkbox" class="ls-az-revert-on"></label>
+          <label class="lsf" title="One Algo trade, in spreads: 1 = this ladder&#8217;s Leg A lots / Leg B lots. Its own number — the keypad does not change it.">
+            <span>Algo qty</span>
+            <input class="ls-az-qty" type="number" min="0.01" step="0.01"></label>
+          <label class="lsf" title="Entries stop for the rest of the day after this many Algo trades. 0 = no limit.">
+            <span>Max trades/day</span>
+            <input class="ls-az-maxtrades" type="number" min="0" step="1"></label>
+          <label class="lsf" title="Entries stop for the day when the Algo&#8217;s P&amp;L today (closed + open) reaches minus this. 0 = off.">
+            <span>Daily loss limit</span>
+            <input class="ls-az-loss" type="number" min="0" step="1"></label>
+          <label class="lsf" title="Entries stop for the day after this many losing Algo trades in a row. 0 = off.">
+            <span>Losses in a row</span>
+            <input class="ls-az-losses" type="number" min="0" step="1"></label>
           <label class="lsf check-row" title="Signal EXIT when the position falls to break-even less this % of the margin one spread ties up — the mirror of TP % of margin.">
             <span>SL % margin</span>
             <input type="checkbox" class="ls-az-sl-on">
@@ -555,10 +572,11 @@
             <span>Time stop</span>
             <input type="checkbox" class="ls-az-time-on">
             <input class="ls-az-time" type="number" min="1" step="1"></label>
-          <div class="lsf-note hint">Signals only — nothing is sent to
-            the broker, and clicks on the ladder are unaffected. The
-            profit exit is break-even after costs plus TP % of margin
-            (Exit, left). Off again after a restart.</div>
+          <div class="lsf-note hint">Dry run: signals only — nothing is
+            sent, and clicks on the ladder are unaffected. LIVE: the Algo
+            trades this ladder (MARKET in, closes by ticket) and manual
+            orders on it are OFF; closes still work. Off again after a
+            restart.</div>
         </div>
       </div>
       <div class="ls-actions">

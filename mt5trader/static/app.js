@@ -159,18 +159,28 @@
                       kind === 'ok' ? 4000 : 10000);
   }
 
-  function ask(title, body, confirmLabel, onConfirm) {
+  function ask(title, body, confirmLabel, onConfirm, alt) {
+    /* `alt` is an optional second answer, {label, run}: the one
+     * question with two — close the Algo's position, or hand it over. */
     el('modal-title').textContent = title;
     el('modal-body').textContent = body;
     el('modal-confirm').textContent = confirmLabel;
+    var other = el('modal-alt');
+    if (other) {
+      other.hidden = !alt;
+      other.textContent = alt ? alt.label : '';
+    }
     el('modal').classList.remove('hidden');
     el('modal').dataset.pending = '1';
     el('modal')._onConfirm = onConfirm;
+    el('modal')._onAlt = alt ? alt.run : null;
   }
 
   function closeModal() {
     el('modal').classList.add('hidden');
     el('modal')._onConfirm = null;
+    el('modal')._onAlt = null;
+    if (el('modal-alt')) { el('modal-alt').hidden = true; }
   }
 
   // -- sound -------------------------------------------------------------
@@ -776,9 +786,8 @@
     if (!on && row && row.algo_on) {
       // The window IS the Algo's display. Closed, the Algo goes off
       // with it — a signal nobody can see is a signal nobody watches.
-      send('set_algo', {pair: key, algo: 'NONE'});
-      row.algo_on = false;
-      toast(key + ': Algo off');
+      // LIVE holding a position asks first what to do with it.
+      setAlgo(key, 'NONE');
     }
     if (row) { row.algo_window = !!on; }           // before the next poll
     fetch('/api/pairs/' + encodeURIComponent(key), {
@@ -1238,6 +1247,10 @@
     ['.ls-az-sl-on', 'stop_loss_on', 'check'],
     ['.ls-az-sl', 'stop_loss_pct', 'number'],
     ['.ls-az-progress', 'progress_bar', 'check'],
+    ['.ls-az-qty', 'algo_qty', 'number'],
+    ['.ls-az-maxtrades', 'max_trades_day', 'number'],
+    ['.ls-az-loss', 'daily_loss_limit', 'number'],
+    ['.ls-az-losses', 'max_losses_row', 'number'],
     ['.ls-az-stop-on', 'stop_z_on', 'check'],
     ['.ls-az-stop', 'stop_z', 'number'],
     ['.ls-az-revert-on', 'reversion_on', 'check'],
@@ -1247,8 +1260,50 @@
 
   function algoChoiceOf(row) {
     /* What the ladder's window reads NOW, as the dropdown names it. */
-    if (row && row.algo_on) { return 'ALGO'; }
+    if (row && row.algo_on) {
+      return row.algo_mode === 'LIVE' ? 'ALGO_LIVE' : 'ALGO';
+    }
     return row && row.algo_window ? 'FAIR_SPREAD' : 'NONE';
+  }
+
+  function setAlgo(key, choice, extra) {
+    /* One ladder's Algo: NONE / FAIR_SPREAD / ALGO (dry run) /
+     * ALGO_LIVE. LIVE is confirmed here, every time — it sends real
+     * orders and takes the ladder from the trader. The engine refuses
+     * anything it cannot do in its own words, and when the Algo is
+     * leaving LIVE holding a position it asks what to do with it. */
+    var live = choice === 'ALGO_LIVE';
+    var payload = Object.assign({pair: key,
+                                 algo: live ? 'ALGO' : choice,
+                                 mode: live ? 'LIVE' : 'DRY_RUN'},
+                                extra || {});
+    if (live && !payload.confirmed) {
+      ask('Algo LIVE on ' + key + '?',
+          'The Algo will send REAL orders to both accounts on this ladder: '
+          + 'MARKET in when the spread stretches past its band, out at the '
+          + 'take-profit or the stop loss. Manual orders on this ladder are '
+          + 'OFF while it runs; CLOSE ALL and the positions list still close.',
+          'Go LIVE', function () {
+            setAlgo(key, choice, Object.assign({}, extra, {confirmed: true}));
+          });
+      return;
+    }
+    send('set_algo', payload, function (result) {
+      var data = (result && result.data) || {};
+      if (data.choose) {
+        ask('The Algo holds a position on ' + key,
+            (data.reason || '') + '. Close it now at market, by ticket — or '
+            + 'leave it open and manage it by hand.',
+            'Close it now', function () {
+              setAlgo(key, choice, Object.assign({}, extra,
+                                                 {off_action: 'close'}));
+            },
+            {label: 'Hand it to manual', run: function () {
+              setAlgo(key, choice, Object.assign({}, extra,
+                                                 {off_action: 'manual'}));
+            }});
+      }
+    });
   }
 
   function openLadderSettings(node, key) {
@@ -1297,7 +1352,8 @@
         if (kind === 'algo-choice') {
           // The ENGINE says whether the Algo is on — it is never in the
           // file. The window tick is the file's.
-          input.value = live.algo_on ? 'ALGO'
+          input.value = live.algo_on
+            ? (live.algo_mode === 'LIVE' ? 'ALGO_LIVE' : 'ALGO')
             : ((own === undefined || own === null ? live.algo_window : own)
                 ? 'FAIR_SPREAD' : 'NONE');
           return;
@@ -1355,7 +1411,9 @@
       });
       var algoState = pane.querySelector('.ls-algo-state');
       if (algoState) {
-        algoState.textContent = live.algo_on ? 'on — signals only' : '';
+        algoState.textContent = !live.algo_on ? ''
+          : (live.algo_mode === 'LIVE' ? 'LIVE — trading this ladder'
+                                       : 'on — dry run, signals only');
       }
       var typeBox = pane.querySelector('.ls-pair-type');
       fairKindFields(pane, {pair_type:
@@ -1501,7 +1559,7 @@
         choice = raw || 'NONE';
         // Algo leaves the saved window tick as it was: the Algo is the
         // engine's switch, and a restart goes back to what is saved.
-        if (choice === 'ALGO') { return; }
+        if (choice === 'ALGO' || choice === 'ALGO_LIVE') { return; }
         value = choice === 'FAIR_SPREAD';
       } else if (kind === 'check') {
         value = input.checked;
@@ -1554,15 +1612,14 @@
       // trader now rather than a poll later.
       setPair(key, live);
       if (choice !== before) {
-        // ON or OFF in the running engine. Its refusal, if any, comes
-        // back in its own words through `send`.
-        send('set_algo', {pair: key, algo: choice});
+        // ON, OFF or LIVE in the running engine. Its refusal, if any,
+        // comes back in its own words; the next snapshot shows what it
+        // actually did.
+        setAlgo(key, choice);
       }
       var row = (state.snapshot.pairs || {})[key];
-      if (row) {
-        if (choice !== 'ALGO') { row.algo_window = !!payload.algo_window; }
-        row.algo_on = choice === 'ALGO';
-        row.algo = choice;
+      if (row && choice !== 'ALGO' && choice !== 'ALGO_LIVE') {
+        row.algo_window = !!payload.algo_window;
       }
       (answer.notes || []).forEach(function (note) { toast(note); });
       if (!(answer.notes || []).length) { toast('applied to ' + key, 'ok'); }
@@ -1781,7 +1838,10 @@
     var autoOn = !!row.auto_route_on;
     var autoHeld = !!row.auto_route && !autoOn;
     badge.textContent = row.order_type + ' · ' + row.time_in_force
-      + (autoOn ? ' · AUTO' : (autoHeld ? ' · AUTO OFF' : ''));
+      + (autoOn ? ' · AUTO' : (autoHeld ? ' · AUTO OFF' : ''))
+      // The ladder says whose it is: while the Algo is LIVE, a click
+      // here is refused, and the trader must be able to see why.
+      + (row.algo_on && row.algo_mode === 'LIVE' ? ' · ALGO LIVE' : '');
     badge.title = autoOn
       ? 'AutoRouting is ON for this ladder: a fill rests a working '
         + 'order to close at the take-profit. A target, and no stop.'
@@ -2121,8 +2181,12 @@
     var isAlgo = selected === 'ALGO';
     var fair = node.querySelector('.fair');
     var label = fair && fair.querySelector('.rail-label');
+    var isLive = isAlgo && block.mode === 'LIVE';
     if (label && label.firstChild && label.firstChild.nodeType === 3) {
-      label.firstChild.nodeValue = isAlgo ? 'Algo' : 'Fair spread';
+      label.firstChild.nodeValue = isAlgo
+        ? (isLive ? 'Algo · LIVE' : 'Algo · dry run') : 'Fair spread';
+      // LIVE in red: this window is now a trader, not a reading.
+      label.classList.toggle('algo-live', isLive);
     }
     var heads = fair ? fair.querySelectorAll('table.fairs tr > th') : [];
     // [blank, B, S, Fair, Gap]: the two row labels are the 4th and 5th.
@@ -2148,11 +2212,22 @@
           ? (block.kind_note || '') : '';
         kind.className = 'fair-kind hint';
       }
+      var stray = row.algo_unmanaged || [];
+      if (kind && stray.length) {
+        // The Algo's own position with nobody managing it: after a
+        // restart, or once it went to dry run. Said until LIVE adopts
+        // it or a trader closes it.
+        kind.textContent = stray.length + ' Algo position(s) not managed — '
+          + 'Algo LIVE adopts them, or close by hand';
+      }
       return false;
     }
     if (fair) {
-      fair.title = 'Algo: Bollinger bands on the spread. A signal only — '
-        + 'nothing here is sent to the broker, and clicks are unaffected.';
+      fair.title = isLive
+        ? 'Algo LIVE: it TRADES this ladder — MARKET in, closes by ticket. '
+          + 'Manual orders here are off; closes still work.'
+        : 'Algo, dry run: signals only — nothing is sent to the broker, '
+          + 'and clicks are unaffected.';
     }
     var digits = digitsFor(row.increment);
     var entry = (block.params || {}).entry_z;
@@ -2191,6 +2266,10 @@
       // A price that cannot be trusted is said on this one line, in the
       // window's own size — it does not shout over the reading.
       var line = algoLine(block, digits);
+      var last = (block.recent || [])[0];
+      if (isLive && last && last.done === false && last.result) {
+        line += ' — last order failed: ' + last.result;
+      }
       if (block.health && block.state !== 'BLOCKED') {
         line += ' — ' + block.health;
       }
@@ -4663,6 +4742,13 @@
       el('help-overlay').classList.add('hidden');
     });
     el('modal-cancel').addEventListener('click', closeModal);
+    if (el('modal-alt')) {
+      el('modal-alt').addEventListener('click', function () {
+        var handler = el('modal')._onAlt;
+        closeModal();
+        if (handler) { handler(); }
+      });
+    }
     el('modal-confirm').addEventListener('click', function () {
       var handler = el('modal')._onConfirm;
       closeModal();
@@ -4720,7 +4806,7 @@
     panelId: panelId, openPanel: openPanel, closePanel: closePanel,
     fmt: fmt, money: money, DASH: DASH,
     tidyWindows: tidyWindows, sound: sound,
-    showFairWindow: showFairWindow,
+    showFairWindow: showFairWindow, setAlgo: setAlgo,
     toastOutcome: toastOutcome
   };
 })();
