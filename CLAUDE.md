@@ -26,8 +26,14 @@ from.
   makes every live position look like an orphan; the reconciler
   auto-closes nothing until recovery says the book is complete, and
   never touches a position it cannot explain.
-- **No strategy and no loops.** No signals, no automatic entries or
-  exits, nothing that re-enters by itself.
+- **Signals, never automatic orders.** A signal may be computed and
+  shown (the Algo: per ladder, OFF at every start, DRY_RUN only).
+  Nothing places, modifies or cancels an order by itself — no
+  automatic entries or exits, nothing that re-enters by itself. The
+  Algo's intents go to a sink that only records them; letting one
+  trade is a separate step that has to be asked for, and
+  `tests/test_algo.py` fails the build if the Algo's modules can reach
+  an order.
 
 ## Conventions that are easy to lose in a refactor
 

@@ -445,22 +445,6 @@
         </div>
         <div class="ls-group">
           <h4>Carry <small class="ls-pairtype"></small></h4>
-          <!-- ONE control, because there is one decision. A dropdown
-               offering None or Fair spread, plus a separate Show
-               window tick, was two controls for it — and either one
-               alone did nothing anybody could see. The tick opens the
-               window and computes the reading; unticked, neither
-               happens and the ladder costs nothing extra on the wire.
-
-               It READS. It does not place, modify or cancel an order,
-               and a click on the ladder behaves identically either
-               way. Manual trading is untouched. -->
-          <label class="lsf check-row"
-                 title="A floating window for this pair: what the carry says the basis should be, with break-even and the target beside it. It is a reading — nothing here trades, and no price from it is ever sent to the broker.">
-            <span>Show Fair Spread window</span>
-            <input type="checkbox" class="ls-algo-window"></label>
-          <div class="lsf-note hint">The window reads; it does not
-            trade. Clicks on the ladder are unaffected.</div>
           <!-- DECLARED, not inferred. Two futures with two expiries are
                not a calendar: UKOILV6 against USOILV6 is Brent against
                WTI, which is two different instruments with no carry
@@ -491,6 +475,68 @@
             <input class="ls-swap-b-short" type="number" step="0.01" placeholder="from MT5"></label>
           <label class="lsf"><span>Carry rate % a year</span>
             <input class="ls-carry-rate" type="number" step="0.1" placeholder="no cross-check"></label>
+        </div>
+        <!-- ONE control for one decision: what this ladder's window
+             reads. Fair spread is the carry; Algo is the z-score signal
+             on Bollinger bands of the spread. One at a time.
+
+             Both READ. Neither places, modifies or cancels an order,
+             and a click on the ladder behaves identically whichever is
+             picked. Algo is switched on in the running engine and is
+             OFF again after every restart; Fair spread is saved. -->
+        <div class="ls-group">
+          <h4>Algo <small class="ls-algo-state"></small></h4>
+          <label class="lsf"
+                 title="What this ladder&#8217;s window reads. Fair spread: what the carry says the basis should be. Algo: an entry signal when the spread stretches past its Bollinger band, and an exit signal when a position reaches break-even after every cost plus the take-profit. Signals only — nothing here trades.">
+            <span>Window</span>
+            <select class="ls-algo">
+              <option value="NONE">None</option>
+              <option value="FAIR_SPREAD">Fair spread</option>
+              <option value="ALGO">Algo</option>
+            </select></label>
+          <label class="lsf" title="Enter when the executable spread is this many sigma from the middle line: SELL at +z or above, BUY at &#8722;z or below.">
+            <span>Entry z</span>
+            <input class="ls-az-entry" type="number" min="0.1" step="0.1"></label>
+          <label class="lsf" title="The candle the band is built from. MT5&#8217;s own bars are loaded for it when the Algo is turned on.">
+            <span>Candle</span>
+            <select class="ls-az-tf">
+              <option value="1">1 min</option>
+              <option value="5">5 min</option>
+              <option value="15">15 min</option>
+              <option value="30">30 min</option>
+              <option value="60">1 hour</option>
+              <option value="240">4 hours</option>
+            </select></label>
+          <label class="lsf" title="N: the EMA middle line and the sigma are over this many candles, the forming one included.">
+            <span>Length (candles)</span>
+            <input class="ls-az-length" type="number" min="2" step="1"></label>
+          <label class="lsf" title="The entry must hold for this many fresh prices in a row, so one flicker does not signal.">
+            <span>Confirm (ticks)</span>
+            <input class="ls-az-confirm" type="number" min="1" step="1"></label>
+          <label class="lsf" title="No entry signal past this |z| — that is a blow-out, not a stretch. 0 = no cap.">
+            <span>Max entry z</span>
+            <input class="ls-az-max" type="number" min="0" step="0.1"></label>
+          <label class="lsf" title="No entry signal in the last this-many minutes before the session cutoff, or after it. 0 = off.">
+            <span>Cutoff buffer (min)</span>
+            <input class="ls-az-buffer" type="number" min="0" step="1"></label>
+          <label class="lsf" title="No new entry signal for this long after an exit signal or a close.">
+            <span>Cooldown (min)</span>
+            <input class="ls-az-cooldown" type="number" min="0" step="1"></label>
+          <label class="lsf check-row" title="Also signal EXIT if the spread runs against the position to this |z|.">
+            <span>Exit: z-stop at</span>
+            <input type="checkbox" class="ls-az-stop-on">
+            <input class="ls-az-stop" type="number" min="0" step="0.1"></label>
+          <label class="lsf check-row" title="Also signal EXIT when z crosses back through 0 while the position is at or above break-even after costs.">
+            <span>Exit: back to mean</span>
+            <input type="checkbox" class="ls-az-revert-on"></label>
+          <label class="lsf check-row" title="Also signal EXIT after the position has been on this many candles, whatever its P&amp;L.">
+            <span>Exit: after candles</span>
+            <input type="checkbox" class="ls-az-time-on">
+            <input class="ls-az-time" type="number" min="1" step="1"></label>
+          <div class="lsf-note hint">Signals only — nothing is sent to
+            the broker, and clicks on the ladder are unaffected. The
+            profit exit is break-even after costs plus TP % of margin
+            (Exit, left). Off again after a restart.</div>
         </div>
       </div>
       <div class="ls-actions">

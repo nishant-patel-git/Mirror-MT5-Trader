@@ -115,6 +115,12 @@ class FakeBroker:
         #: hours apart and the offset has to come off before they can be
         #: subtracted.
         self.now = time.time
+        #: symbol -> MT5 history bars, oldest first, as `rates` returns
+        #: them. A symbol with none answers None — the terminal had no
+        #: history — which is NOT an empty list.
+        self.bars = {}
+        #: (symbol, timeframe in minutes, count) for every history read.
+        self.rates_asked = []
 
     # -- helpers for tests -------------------------------------------------
 
@@ -249,6 +255,11 @@ class FakeBroker:
             'swap_long': info.swap_long, 'swap_short': info.swap_short,
             'swap_mode': info.swap_mode, 'swap_rollover3days': 3,
         }
+
+    def rates(self, symbol, timeframe_min, count):
+        self.rates_asked.append((symbol, timeframe_min, count))
+        bars = self.bars.get(symbol)
+        return None if bars is None else [dict(b) for b in bars[-count:]]
 
     def server_time_offset_sec(self):
         """Seconds this broker's clock runs ahead of ours — measured

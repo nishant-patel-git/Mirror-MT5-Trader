@@ -2841,28 +2841,26 @@ def test_the_fair_window_is_no_bigger_than_the_figures_in_it(page):
     assert clipped == 0
 
 
-def test_the_fair_window_is_ONE_tick_on_the_ladder_it_belongs_to(page):
-    """Per ladder, off by default, and one control for one decision.
+def test_the_window_is_ONE_choice_on_the_ladder_it_belongs_to(page):
+    """Per ladder, None by default, and one control for one decision.
 
-    There was a dropdown here (None / Fair spread) beside a Show window
-    tick, back when a second algo was being built. That algo was taken
-    out; two controls for one decision stayed, and either one alone did
-    nothing anybody could see."""
+    There was a dropdown (None / Fair spread) beside a Show window tick
+    once, and either alone did nothing anybody could see. Now there are
+    two readings — Fair spread and the Algo — and still ONE control
+    picks which the window shows. No tick beside it."""
     open_ladder(page)
     page.click('.ladder .ladder-cog')
-    page.wait_for_selector('.ladder .ls-algo-window', timeout=WAIT)
+    page.wait_for_selector('.ladder .ls-algo', timeout=WAIT)
 
-    assert page.locator('.ladder .ls-algo').count() == 0
-    assert page.locator('.ladder .ls-algo-window').count() == 1
-    # It lives with the Carry fields it is a reading of, not in a group
-    # of its own.
-    assert page.locator(
-        '.ladder .ls-group:has(.ls-pair-type) .ls-algo-window').count() == 1
-    # Scoped to the CARRY group: the Trading group carries a note of
-    # its own now (what one spread means in lots).
+    assert page.locator('.ladder .ls-algo').count() == 1
+    assert page.locator('.ladder .ls-algo-window').count() == 0
+    options = page.eval_on_selector(
+        '.ladder .ls-algo', 'el => [...el.options].map(o => o.value)')
+    assert options == ['NONE', 'FAIR_SPREAD', 'ALGO']
+    # The group says out loud what the Algo is NOT.
     note = ' '.join(page.text_content(
-        '.ladder .ls-group:has(.ls-pair-type) .lsf-note').split())
-    assert 'it does not trade' in note
+        '.ladder .ls-group:has(.ls-algo) .lsf-note').split())
+    assert 'nothing is sent' in note and 'unaffected' in note
     page.click('.ladder .ls-close')
 
 
@@ -3467,15 +3465,15 @@ def test_ticking_the_setting_OPENS_the_fair_window(page):
 
     page.evaluate(SPY_ON_PAIR_SAVE)
     page.click('.ladder .ladder-cog')
-    page.wait_for_selector('.ladder .ls-algo-window', timeout=WAIT)
-    page.check('.ladder .ls-algo-window')
+    page.wait_for_selector('.ladder .ls-algo', timeout=WAIT)
+    page.select_option('.ladder .ls-algo', 'FAIR_SPREAD')
     page.click('.ladder .ls-save')
     page.wait_for_function("() => window.__sent !== null", timeout=WAIT)
 
     sent = page.evaluate('() => window.__sent')
     assert sent['algo_window'] is True
-    # The tick is the whole decision: `algo` is derived on the engine,
-    # so the form does not send one.
+    # The choice is the whole decision: `algo` is derived on the engine,
+    # so the form does not send one — and ALGO is never saved at all.
     assert 'algo' not in sent
     # ...and it is on the screen NOW, not a poll later and not only once
     # the engine has written the file back.
@@ -5065,3 +5063,40 @@ def test_an_unreadable_account_leaves_the_row_UNMEASURED(page):
         assert '$0.00' not in text.split('nothing to reconcile')[0][-120:]
     finally:
         page.evaluate(RELEASE_THE_SNAPSHOT)
+
+
+def test_the_Algo_reads_in_the_fair_windows_own_slots(page):
+    """The Algo adds no window, tab or panel: with it on, the Fair
+    Spread window's two B/S rows carry z and the band, and its hint line
+    says what the Algo says. The control — the same window with the Algo
+    off — is the fair spread again, labels and all."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    publisher.show_fair_window = True
+    publisher.algo = 'ALGO'
+    publisher.algo_block = {
+        'algo': 'ALGO', 'on': True, 'state': 'SIGNAL', 'signal': 'SELL',
+        'ready': True, 'z_sell': 2.61, 'z_buy': 1.9, 'mean': 59.0,
+        'sigma': 0.04, 'upper': 59.10, 'lower': 58.90, 'count': 20,
+        'needed': 20, 'params': {'entry_z': 2.5, 'confirm_ticks': 3},
+        'timeframe_min': 15, 'length': 20, 'history': {'note': 'mt5'},
+        'positions': [], 'health': None, 'window': True}
+    try:
+        publisher.publish()
+        page.wait_for_function(
+            "() => (document.querySelector('.window.fairwin .fair-kind')"
+            " || {}).textContent.includes('SELL signal')", timeout=WAIT)
+        label = page.text_content('.window.fairwin .fair .rail-label')
+        assert label.strip().startswith('Algo')
+        assert page.text_content('.window.fairwin .fair-sell') == '+2.61'
+        assert page.text_content('.window.fairwin .gap-sell') == '59.10'
+        assert page.locator('.window.fairwin').count() == 1
+    finally:
+        # The control: Algo off, and the window is the fair spread again.
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+    page.wait_for_function(
+        "() => (document.querySelector('.window.fairwin .fair .rail-label')"
+        " || {}).textContent.trim().startsWith('Fair spread')", timeout=WAIT)
+    assert 'SELL' not in page.text_content('.window.fairwin .fair-kind')

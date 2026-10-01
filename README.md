@@ -1,7 +1,8 @@
 # MT5-Trader
 
-A **spread price-ladder trading terminal for MetaTrader 5** — a manual tool. No
-strategy, no signals, no automatic entries or exits. A human looks at a ladder
+A **spread price-ladder trading terminal for MetaTrader 5** — a manual tool,
+with an optional per-ladder **Algo signal** beside it. No automatic entries or
+exits: the signal says what it would do, and the trader decides. A human looks at a ladder
 of spread prices, clicks a price, and an order exists at that price.
 
 Each ladder trades one pair of instruments across **two MT5 accounts** (Leg A on
@@ -37,6 +38,9 @@ The spec's build order, in order. Steps 1-8 are in:
 | `mt5trader/database.py` | SQLite (WAL, 30s busy timeout): crash-safe positions, the fill journal, the audit trail |
 | `mt5trader/shutdown.py` | An unanswered prompt means NO |
 | `mt5trader/commands.py` | The web↔coordinator bridge, primed at startup so a restart never replays a command |
+| `mt5trader/bands.py` | Bollinger bands on the spread: candles, EMA middle, population sigma, MT5 bars matched across two brokers' clocks |
+| `mt5trader/algo.py` | Fair spread, and the Algo signal: entry, gates, exits — decides, never acts |
+| `mt5trader/algodesk.py` | The per-ladder Algo switch (off at every start), history backfill, and the sink that records intents |
 | `mt5trader/webapp.py` | The Flask process: it renders and it asks; it never trades |
 | `mt5trader/static/`, `templates/` | The ladder, the Market Grid, the positions monitor and the settings page — self-hosted, no CDN |
 
@@ -108,6 +112,39 @@ rather than points. A fill that could not be priced is counted as
 **unmeasured**, never averaged in as zero, and the journal is counted
 over the same window as a check on coverage. Exportable as CSV, with
 empty cells rather than zeros where nothing was measured.
+
+## The Algo — a signal, not a trader
+
+Per ladder, picked in the ladder's settings (**Window: None / Fair spread /
+Algo**). It is OFF after every restart, and while it is on the ladder trades
+exactly as before — it adds a reading, not a lock.
+
+- **The band.** Candles of the spread `B - beta x A` from the mid (15-minute,
+  N = 20 by default). Middle = EMA(N), Pine-style; sigma = population stdev of
+  the last N closes; the forming candle counts. Turning the Algo on loads both
+  legs' MT5 bars (moved from bid to mid with each bar's own spread, matched in
+  UTC on each broker's measured clock), so the band is there at once. If the
+  terminals will not give history, candles are built from the live price and
+  the window says `candles 7/20`. Closed candles are saved, so a restart keeps
+  them.
+- **Entry.** SELL when the z of the bid-side spread is >= +2.5, BUY when the z
+  of the offer-side spread is <= -2.5, held for 3 fresh quotes, only on a flat
+  ladder. Held back — and the reason shown — by a stale or jumping price, too
+  few candles, a 5-minute cooldown after an exit, the last 20 minutes before
+  the session cutoff, or a |z| past 3.5.
+- **Exit.** For each REAL position, from its own fill: the closing side
+  reaching break-even after every cost plus the take-profit % of margin — the
+  same TP the Exit panel shows. Optional and OFF by default: a z-stop, back to
+  the mean in profit, and a time stop in candles. No gate ever holds an exit.
+- **Display.** In the Fair Spread window's own slots: the B/S rows carry z and
+  the band level, the hint line says what the Algo says. No new window.
+- **Record.** Every signal goes to the audit trail; *Algo signals CSV* on the
+  Fills tab exports them, with what an exit would have made after costs.
+- **Execution later.** What the Algo decides leaves as an intent to a sink.
+  Today's sink records it and sends nothing (DRY_RUN is the only mode).
+  Execution is a second sink behind the same seam, plus the order-path lock
+  (`AlgoDesk.manual_order_refusal`) — positions already carry a MANUAL/ALGO
+  source tag for it.
 
 ## One click is one order
 

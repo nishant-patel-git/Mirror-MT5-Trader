@@ -178,8 +178,14 @@ class CommandRunner:
         #: Which ALGO this ladder runs — one at a time, NONE by
         #: default. It measures and says what it would do; it does not
         #: trade, and a click on the ladder is unaffected either way.
+        #: Routed to `set_algo`: ALGO is a switch on the running engine,
+        #: not a field.
         'algo': str,
         'algo_window': bool,
+        #: The Algo's own numbers for this ladder (entry z, candles,
+        #: gates, optional exits). Blanks mean the default.
+        'algo_params': lambda v: {k: x for k, x in dict(v or {}).items()
+                                  if x not in (None, '')},
         #: Spot vs future, calendar, or two different instruments. It
         #: decides whether a fair spread applies at all, and it is
         #: DECLARED: two expiries do not make a calendar.
@@ -332,6 +338,16 @@ class CommandRunner:
             applied[name] = self.coordinator.config.settings[name]
         return {'applied': applied}
 
+    def _do_set_algo(self, payload):
+        """NONE / FAIR_SPREAD / ALGO for one ladder.
+
+        ALGO switches the ladder's Algo ON in the running engine: it
+        signals and records, it sends nothing, and it is off again after
+        a restart. Refused in words — never silently ignored.
+        """
+        return self.coordinator.set_algo(payload['pair'],
+                                         payload.get('algo'))
+
     def _do_set_pair(self, payload):
         """Mode / TIF / overnight / increment / quantity, per ladder.
 
@@ -346,6 +362,10 @@ class CommandRunner:
             coerce = self.EDITABLE.get(name)
             if coerce is None:
                 continue          # not a per-ladder setting; ignored
+            if name == 'algo':
+                answer = self.coordinator.set_algo(pair.key, value)
+                applied[name] = answer.get('algo') or answer.get('reason')
+                continue
             # The old name for the window toggle still works, so a page
             # that has not been reloaded goes on working.
             field = 'algo_window' if name == 'show_fair_window' else name
