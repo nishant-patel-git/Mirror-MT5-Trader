@@ -89,13 +89,6 @@ class Publisher:
         #: publishes it — including the case where the reading is
         #: REPLACED by a warning about the input it came from.
         self.fair = None
-        #: AutoRouting: the switch, and what is ACTUALLY resting.
-        self.auto_route = False
-        self.auto_route_armed = None
-        #: The system-wide switch, off by default in the engine. The
-        #: fixture leaves it ON so the per-ladder tick is what is under
-        #: test; the test that turns it off is testing the master.
-        self.auto_route_master = True
         #: The fair-value window is per pair and off by default; the
         #: fixture turns it on so the panels it holds can be read.
         self.show_fair_window = True
@@ -145,8 +138,6 @@ class Publisher:
         payload = snapshot(self.order_type, self.confirm, self.same_login,
                            self.stale_leg, self.dead_orders, self.exits,
                            self.positions, self.unclaimed, self.fair,
-                           self.auto_route, self.auto_route_armed,
-                           self.auto_route_master,
                            self.show_fair_window, self.orders,
                            self.quotes, self.working_buys,
                            self.working_sells, self.algo, self.algo_block,
@@ -197,8 +188,7 @@ def server(tmp_path_factory):
 def snapshot(order_type='LIMIT', confirm=False, same_login=None,
              stale_leg=False, dead_orders=None, exits=None,
              positions=None, unclaimed=None, fair=None,
-             auto_route=False, auto_route_armed=None,
-             auto_route_master=True, show_fair_window=True, orders=None, quotes=None,
+             show_fair_window=True, orders=None, quotes=None,
              working_buys=0, working_sells=0, algo='NONE', algo_block=None,
              net_position=0.0, quoting_leg='b', exit_type='MARKET',
              resting_closes=0, broker_pendings=None, max_qty=None):
@@ -251,15 +241,11 @@ def snapshot(order_type='LIMIT', confirm=False, same_login=None,
                 # What both brokers will take, in Qty. The keypad reads
                 # it; None where neither caps volume.
                 'max_qty': max_qty,
-                'auto_route': auto_route,
-                'auto_route_on': bool(auto_route and auto_route_master),
-                'auto_route_master': bool(auto_route_master),
                 'algo': algo,
                 'algo_window': show_fair_window,
                 'algo_block': algo_block or {'algo': algo,
                                              'window': show_fair_window},
                 'show_fair_window': show_fair_window,
-                'auto_route_armed': auto_route_armed or [],
                 'clip_lots_a': 0.1, 'clip_lots_b': 0.1, 'spread_units': 10.0,
                 'contract_a': 100.0, 'contract_b': 100.0,
                 'short_spread': 59.09, 'long_spread': 59.11,
@@ -964,7 +950,7 @@ def test_the_exit_costs_belong_to_ONE_LADDER_and_the_override_CLEARS(page):
 
     for field in ('.ls-comm-a', '.ls-comm-b', '.ls-slip',
                   '.ls-nights', '.ls-tp', '.ls-carry-rate',
-                  '.ls-auto-route', '.ls-overnight'):
+                  '.ls-overnight'):
         assert page.locator(
             '.ladder .ladder-settings ' + field).count() == 1, field
 
@@ -1095,13 +1081,12 @@ def test_a_cost_typed_on_one_ladder_is_saved_to_THAT_pair(page):
 
 def test_the_rail_carries_no_form_the_market_can_outrun(page):
     """The rail is read top to bottom while the market moves. The
-    overnight rule and the AutoRoute switch are exit logic, not
-    something pressed at the touch, so they are in this ladder's
-    settings — and the three cancels are one row, not three."""
+    overnight rule is exit logic, not something pressed at the touch,
+    so it is in this ladder's settings — and the three cancels are one
+    row, not three."""
     open_ladder(page)
 
     assert page.locator('.ladder .rail .overnight').count() == 0
-    assert page.locator('.ladder .rail .auto-route').count() == 0
     assert page.locator('.ladder .rail .cxl-row .cxl').count() == 3
 
     # ...and the rail fits without scrolling at the default size.
@@ -2923,72 +2908,19 @@ def test_GTC_carries_its_caveat_on_the_screen(page):
         '.ladder .tif option[value="GTC"]', 'title')
 
 
-def test_autorouting_says_what_is_armed_and_that_there_is_no_stop(page):
-    """The switch is not the state. A trader who believes a target is
-    armed when it is not is the worse failure, so the Exit panel shows
-    what is ACTUALLY resting — while the switch itself lives in this
-    ladder\'s settings, because one ladder can arm AutoRouting and the
-    next not."""
+def test_AutoRouting_is_gone_from_every_screen(page):
+    """AutoRouting has been removed: the Algo is the one thing that
+    exits by itself, and two would confuse the desk. No tick in the
+    ladder's settings, no row on the Exit panel, no AUTO in the title."""
     open_ladder(page)
-    assert page.text_content('.fairwin .auto-route-state') == 'off'
-
-    page.paths['publisher'].auto_route = True
-    page.paths['publisher'].auto_route_armed = [
-        {'position_id': 'POS1', 'level': 60.21, 'order_id': 'SO1',
-         'quantity': 1.0}]
-    page.paths['publisher'].publish()
-    page.wait_for_function(
-        "() => document.querySelector('.fairwin .auto-route-state')"
-        ".textContent.indexOf('60.21') >= 0", timeout=WAIT)
-    assert 'no stop' in page.get_attribute('.fairwin .auto-route-state',
-                                           'title')
-
-    # On, but nothing resting yet — and it says which of the two it is.
-    page.paths['publisher'].auto_route_armed = []
-    page.paths['publisher'].publish()
-    page.wait_for_function(
-        "() => document.querySelector('.fairwin .auto-route-state')"
-        ".textContent === 'on'", timeout=WAIT)
-    assert 'next fill' in page.get_attribute('.fairwin .auto-route-state',
-                                             'title')
-
-    # ...and the switch, with the NO STOP caveat, is in this ladder\'s
-    # own settings.
+    assert page.locator('.ls-auto-route').count() == 0
+    assert page.locator('.auto-route-state').count() == 0
+    assert 'AUTO' not in page.text_content('.ladder .mode-badge')
     page.click('.ladder .ladder-cog')
-    page.wait_for_selector('.ladder .ls-auto-route', timeout=WAIT)
-    assert 'NO STOP' in page.get_attribute('.ladder .lsf.check-row', 'title')
-    page.click('.ladder .ls-close')
-
-    page.paths['publisher'].auto_route = False
-    page.paths['publisher'].auto_route_armed = None
-    page.paths['publisher'].publish()
-
-
-def test_a_ladder_ticked_with_the_master_off_does_not_claim_AUTO(page):
-    """The tick alone used to put AUTO in the title bar. With the
-    system switch off nothing arms on a fill, and a badge saying
-    otherwise is the screen promising an exit that will not be there."""
-    open_ladder(page)
-    page.paths['publisher'].auto_route = True
-    page.paths['publisher'].auto_route_master = False
-    page.paths['publisher'].publish()
-    page.wait_for_function(
-        "() => document.querySelector('.ladder .mode-badge')"
-        ".textContent.indexOf('AUTO OFF') >= 0", timeout=WAIT)
-    assert 'switched off' in page.get_attribute('.ladder .mode-badge', 'title')
-    assert page.text_content('.fairwin .auto-route-state') == 'off'
-
-    # The control: the same tick with the master ON does say AUTO.
-    page.paths['publisher'].auto_route_master = True
-    page.paths['publisher'].publish()
-    page.wait_for_function(
-        "() => { var t = document.querySelector('.ladder .mode-badge')"
-        ".textContent; return t.indexOf('AUTO') >= 0"
-        " && t.indexOf('AUTO OFF') < 0; }", timeout=WAIT)
-    assert page.text_content('.fairwin .auto-route-state') == 'on'
-
-    page.paths['publisher'].auto_route = False
-    page.paths['publisher'].publish()
+    page.wait_for_selector('.ladder .ladder-settings .ls-tp', timeout=WAIT)
+    assert 'AutoRoute' not in page.text_content('.ladder .ladder-settings')
+    page.evaluate("() => document.querySelectorAll('.ladder-settings')"
+                  ".forEach(p => p.hidden = true)")
 
 
 def test_nothing_about_the_take_profit_is_sent_to_the_broker():

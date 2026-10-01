@@ -1208,7 +1208,6 @@
     ['.ls-contract-a', 'contract_size_a', 'blank-number'],
     ['.ls-contract-b', 'contract_size_b', 'blank-number'],
     ['.ls-quoting', 'quoting_leg', 'live'],
-    ['.ls-auto-route', 'auto_route', 'check'],
     // What the window reads: None, Fair spread or Algo. ONE control
     // for one decision. Fair spread is the saved `algo_window`; Algo is
     // a switch on the running engine, never saved, off after a restart.
@@ -1785,10 +1784,6 @@
     node.querySelector('.title').textContent = row.name || key;
     node.querySelector('.route').textContent =
       (row.account_a || '?') + ' → ' + (row.account_b || '?');
-    // AutoRouting is armed on ONE ladder at a time and changes what a
-    // FILL does, so it is stated where the mode is stated — and where
-    // it is visible without opening anything. Ticking the box has to
-    // change the screen, or it reads as having done nothing.
     // Which leg rests the real pending, and which one crosses. Read
     // from the ENGINE's own groups where there is one working, and
     // from the pair's setting before that.
@@ -1834,27 +1829,17 @@
           + 'before that.';
     }
     var badge = node.querySelector('.mode-badge');
-    // The EFFECTIVE state, never the ladder's box alone: with the
-    // master switch off the box is ticked and nothing arms, and a
-    // badge reading AUTO there says a fill will rest a target when no
-    // fill will.
-    var autoOn = !!row.auto_route_on;
-    var autoHeld = !!row.auto_route && !autoOn;
+    // The ladder says whose it is: while the Algo is LIVE, a click here
+    // is refused, and the trader must be able to see why.
+    var algoLive = !!(row.algo_on && row.algo_mode === 'LIVE');
     badge.textContent = row.order_type + ' · ' + row.time_in_force
-      + (autoOn ? ' · AUTO' : (autoHeld ? ' · AUTO OFF' : ''))
-      // The ladder says whose it is: while the Algo is LIVE, a click
-      // here is refused, and the trader must be able to see why.
-      + (row.algo_on && row.algo_mode === 'LIVE' ? ' · ALGO LIVE' : '');
-    badge.title = autoOn
-      ? 'AutoRouting is ON for this ladder: a fill rests a working '
-        + 'order to close at the take-profit. A target, and no stop.'
-      : (autoHeld
-          ? 'this ladder has AutoRouting ticked, but it is switched off '
-            + 'for the whole system (AUTO_ROUTE_ENABLED) — a fill arms '
-            + 'nothing'
-          : 'the mode a click sends, and how long a working order lives');
-    badge.classList.toggle('auto', autoOn);
-    badge.classList.toggle('auto-held', autoHeld);
+      + (algoLive ? ' · ALGO LIVE' : '');
+    badge.title = algoLive
+      ? 'the Algo is trading this ladder — manual orders are off; '
+        + 'CLOSE ALL and the positions list still close'
+      : 'the mode a click sends, and how long a working order lives';
+    // Red: automation is on this ladder.
+    badge.classList.toggle('auto', algoLive);
 
     var change = market.net_change;
     var netchg = node.querySelector('.netchg');
@@ -2400,26 +2385,6 @@
       overnight.textContent = OVERNIGHT_WORDS[row.overnight] || row.overnight;
       overnight.title = 'what happens to an OPEN POSITION at the session '
         + 'cutoff — change it in this ladder\u2019s settings';
-    }
-    var armed = node.querySelector('.auto-route-state');
-    if (armed) {
-      // What is ACTUALLY resting, not what the switch says. A target
-      // believed to be armed when it is not is the worse failure — and
-      // it is the reason a re-arm after a restart is announced rather
-      // than done quietly.
-      var orders = row.auto_route_armed || [];
-      armed.textContent = orders.length
-        ? 'out ' + fmt(orders[0].level, digitsFor(row.increment))
-        : (row.auto_route_on ? 'on' : 'off');
-      armed.className = 'auto-route-state' + (orders.length ? ' armed' : '');
-      armed.title = orders.length
-        ? 'a working order is resting to close this position — a target, '
-          + 'and no stop'
-        : (row.auto_route_on
-            ? 'on: the next fill arms a target at the take-profit'
-            : (row.auto_route
-                ? 'off: AutoRouting is switched off for the whole system'
-                : 'off'));
     }
     renderExit(node, row);
   }

@@ -459,12 +459,6 @@ body {
   box-shadow: inset 1px 1px 2px rgba(0, 0, 0, .12);
 }
 .rail .check { font-size: 10px; color: var(--frame-text); }
-.rail .auto-route-box { display: block; margin-top: 3px; }
-.rail .auto-route-state {
-  display: block;
-  font: 700 9px var(--mono);
-  color: var(--frame-muted);
-}
 .rail .fair {
   margin-top: 4px;
   padding: 3px;
@@ -1871,7 +1865,6 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
 .rail .cxl-row { display: flex; gap: 2px; }
 .rail .cxl-row .cxl { flex: 1 1 auto; min-width: 0; padding: 1px 2px; }
 .rail .cxl-row .cxl-all { flex: 1.6 1 auto; }
-.rail .auto-route-state.armed { color: var(--traded); font-weight: 700; }
 
 
 /* The rail, in as few ROWS as it can honestly manage. Every row is one
@@ -1896,21 +1889,12 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
  * other. `fitLadderFloor` writes the measured number over this. */
 .window.ladder { min-height: 420px; }
 
-/* AutoRouting, said in the title bar. It changes what a FILL does, so
- * it is not something to discover by opening a panel. */
+/* The Algo LIVE, said in the title bar. It changes who may trade this
+ * ladder, so it is not something to discover by opening a panel. */
 .titlebar .mode-badge.auto {
   background: var(--traded);
   color: #fff;
   font-weight: 700;
-}
-
-/* Ticked on the ladder, switched off for the system: stated flatly
- * rather than dressed as live. */
-.titlebar .mode-badge.auto-held {
-  background: transparent;
-  color: var(--muted, #777);
-  font-weight: 400;
-  text-decoration: line-through;
 }
 
 /* A field for something this pair does not have: still visible, so the

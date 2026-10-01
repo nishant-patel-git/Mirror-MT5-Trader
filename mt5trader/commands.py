@@ -172,9 +172,6 @@ class CommandRunner:
         #: withheld. Blank = the desk-wide MAX_QUOTE_AGE_SEC.
         'max_quote_age_sec': (
             lambda v: float(v) if v not in (None, '') else None),
-        #: AutoRouting: on a fill, rest a working order to close at the
-        #: take-profit. Default OFF, and it arms a target and NO STOP.
-        'auto_route': bool,
         #: Which ALGO this ladder runs — one at a time, NONE by
         #: default. It measures and says what it would do; it does not
         #: trade, and a click on the ladder is unaffected either way.

@@ -1069,7 +1069,7 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                       'rows', 'clip_lots_a', 'clip_lots_b',
                       'contract_size_a', 'contract_size_b',
                       'max_quote_age_sec',
-                      'expiry', 'expiry_a', 'auto_route',
+                      'expiry', 'expiry_a',
                       'swap_a_long_per_lot', 'swap_a_short_per_lot',
                       'swap_b_long_per_lot', 'swap_b_short_per_lot',
                       # What a trade on THIS ladder costs, and therefore

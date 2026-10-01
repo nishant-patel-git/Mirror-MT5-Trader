@@ -569,12 +569,7 @@ class Coordinator:
             # them: a peg re-priced off a snapshot older than the one on
             # screen is a peg holding a level nobody is showing.
             self.quoter.work(pair, md)
-            if any(e['action'] == 'auto_route_armed'
-                   for e in self.work_auto_route(pair, md)):
-                # A target armed on THIS pass rests on this pass. A poll
-                # later is a window where the trader believes there is a
-                # working order and there is not.
-                self.quoter.work(pair, md)
+            self.tidy_closing_orders(pair)
         return self.market
 
     def _read_ticks(self):
@@ -761,94 +756,34 @@ class Coordinator:
         body['kind_note'] = kind_note
         return body
 
-    def work_auto_route(self, pair, md):
-        """Arm — and keep honest — the closing orders AutoRouting rests.
+    def tidy_closing_orders(self, pair):
+        """Pull the closing orders that must not stay resting.
 
-        On a fill it rests a working order to close the position at its
-        take-profit, priced from the ACTUAL EXECUTED spread and not from
-        the quote the click was taken at. That anchor is the whole
-        point: levels anchored on the quote while P&L is measured from
-        the fill name a level the engine would not fire at.
-
-        It arms a TARGET AND NO STOP. The position runs until the
-        target, the overnight rule, or the trader.
-
-        On a restart it re-arms from the recovered position's frozen
-        levels, and SAYS SO. That deliberately differs from the rule
-        that nothing placing orders by itself may resume after a
-        restart: that rule exists because a replayed ENTRY creates risk
-        nobody chose. This places a CLOSING order on a position that
-        already exists — it reduces exposure — and the worse failure
-        here is silent: a trader who believes a target is armed when it
-        is not.
+        - **Whoever rested it**, a closing order whose POSITION has gone
+          is pulled: it would fill, and with nothing to close it would
+          OPEN a naked position.
+        - **AutoRouting's leftovers.** AutoRouting — rest a take-profit
+          on every fill — has been removed: the Algo is the one thing
+          that exits by itself now, and two would confuse the desk. A
+          target it armed before the upgrade, recovered at startup, is
+          pulled here and said so. ONLY those: a close the TRADER rested
+          by hand is theirs and is never touched.
         """
         events = []
-        # First, the housekeeping that must happen whether AutoRouting
-        # is on or off: an order armed against a position that has gone
-        # is pulled. It would fill, and with nothing to close it would
-        # OPEN a naked position.
         live = {p.position_id for p in self.book.positions(pair.key)}
         for order in self.book.orders(pair.key):
             if order.position_id and order.position_id not in live:
                 self.quoter.disarm(order.position_id,
                                    'its position is no longer open')
-                events.append({'pair': pair.key, 'action': 'auto_route_pulled',
+                events.append({'pair': pair.key, 'action': 'close_pulled',
                                'position': order.position_id})
-        # The master switch, and then the ladder's own. OFF at either
-        # level, nothing is armed — AND anything already resting is
-        # PULLED: standing automation down that leaves an order behind
-        # it has stood nothing down, and that order still fills.
-        on = (self.config.get('AUTO_ROUTE_ENABLED', False)
-              and pair.auto_route)
-        if not on:
-            for position in self.book.positions(pair.key):
-                # ONLY what AutoRouting armed. A close the trader
-                # clicked is not automation: sweeping it here left them
-                # believing they had an order working to get out, with
-                # nothing at the broker, because of a switch they never
-                # touched.
-                if self.book.auto_armed_for(position.position_id):
-                    self.quoter.disarm_auto(position.position_id,
-                                            'AutoRouting was turned off')
-                    position.tp_armed = False
-                    events.append({'pair': pair.key,
-                                   'action': 'auto_route_pulled',
-                                   'position': position.position_id})
-            if events:
-                self.session_events.extend(events)
-            return events
-        margin = (self.margin_detail(pair) or {}).get('money')
-        # This ladder's own numbers: a gold basis and an oil differential
-        # are charged differently and held for different lengths of time.
-        settings = pair.exit_settings(self.config.settings)
-        nights = float(settings.get('BREAK_EVEN_NIGHTS', 0.0) or 0.0)
         for position in self.book.positions(pair.key):
-            if getattr(position, 'tp_armed', False):
-                continue
-            if self.book.orders_for_position(position.position_id):
-                continue
-            exit_levels = takeprofit.for_position(
-                position, md, pair, settings, margin,
-                nights=nights,
-                carry_for=self.holding_carry(pair, position.side.value,
-                                             nights))
-            level = (exit_levels or {}).get('tp')
-            # Break-even is not a target. With no margin priced, or no
-            # percentage set, `tp` IS break-even — and resting an order
-            # there is a different instruction from the one the trader
-            # gave.
-            if level is None or not (exit_levels or {}).get('target_points'):
-                continue
-            order = self.quoter.arm(pair, position, level)
-            if order is None:
-                continue
-            position.tp_armed = True
-            events.append({'pair': pair.key, 'action': 'auto_route_armed',
-                           'position': position.position_id, 'level': level,
-                           'order': order.order_id,
-                           # Said out loud, because a target believed to
-                           # be armed when it is not is the worse fault.
-                           'recovered': bool(position.recovered)})
+            if self.book.auto_armed_for(position.position_id):
+                self.quoter.disarm_auto(position.position_id,
+                                        'AutoRouting has been removed')
+                events.append({'pair': pair.key,
+                               'action': 'auto_route_pulled',
+                               'position': position.position_id})
         if events:
             self.session_events.extend(events)
         return events
@@ -2340,19 +2275,6 @@ class Coordinator:
                 'exit_type': pair.exit_type.value,
                 'time_in_force': pair.time_in_force.value,
                 'overnight': pair.overnight.value,
-                # AutoRouting: on a fill, rest a working order to close
-                # at the take-profit, priced from the actual fill. A
-                # target and NO stop — the panel says so in words.
-                'auto_route': pair.auto_route,
-                # What the ladder's tick actually AMOUNTS to. The
-                # master switch is off by default, and a title bar
-                # reading AUTO off the pair's box alone said a fill
-                # would arm a target when nothing would.
-                'auto_route_on': bool(
-                    pair.auto_route
-                    and self.config.get('AUTO_ROUTE_ENABLED', False)),
-                'auto_route_master': bool(
-                    self.config.get('AUTO_ROUTE_ENABLED', False)),
                 # The selected algo, and what it says. NONE publishes
                 # only its own name — a ladder running nothing costs
                 # nothing on the wire either.
@@ -2372,10 +2294,6 @@ class Coordinator:
                 'algo_window': pair.algo_window,
                 'algo_block': self.algo_block(pair, md, row_exit),
                 'show_fair_window': pair.algo_window,   # the old name
-                'auto_route_armed': [
-                    {'position_id': o.position_id, 'level': o.level,
-                     'order_id': o.order_id, 'quantity': o.remaining}
-                    for o in self.book.orders(key) if o.position_id],
                 'default_quantity': pair.default_quantity,
                 # The largest Qty either broker will take, so the
                 # keypad can stop offering a size that is a guaranteed

@@ -312,12 +312,6 @@ DEFAULT_SETTINGS = {
     #: on the screen and one wrong sign in a swap field is all it takes
     #: to display a licence to print money.
     'CARRY_RATE_PCT': None,
-    #: The master switch for AutoRouting. OFF, no ladder arms a target
-    #: however its own box is ticked — the one place a desk can stand
-    #: every automatic order down before a session without going round
-    #: the ladders one at a time. It is deliberately not per pair: a
-    #: switch you have to find twice is a switch that gets missed once.
-    'AUTO_ROUTE_ENABLED': False,
 
     # --- housekeeping -------------------------------------------------
     'RECONCILE_INTERVAL_SEC': 20.0,
@@ -391,7 +385,7 @@ class PairConfig:
                  expiry=None, expiry_a=None,
                  swap_a_long_per_lot=None, swap_a_short_per_lot=None,
                  swap_b_long_per_lot=None, swap_b_short_per_lot=None,
-                 auto_route=False, commission_per_lot_a=None,
+                 commission_per_lot_a=None,
                  commission_per_lot_b=None, slippage_allowance=None,
                  break_even_nights=None, tp_target_pct_of_margin=None,
                  carry_rate_pct=None,
@@ -496,10 +490,6 @@ class PairConfig:
         self.swap_a_short_per_lot = _blank_to_none(swap_a_short_per_lot)
         self.swap_b_long_per_lot = _blank_to_none(swap_b_long_per_lot)
         self.swap_b_short_per_lot = _blank_to_none(swap_b_short_per_lot)
-        #: AutoRouting: on a fill, rest a working order to CLOSE at the
-        #: take-profit level, priced from the actual executed spread.
-        #: Default OFF (spec section 5.4).
-        self.auto_route = bool(auto_route)
         #: What a trade on THIS ladder costs, and where it therefore
         #: gets out. Per ladder, not per system: a gold basis and a
         #: WTI/Brent differential are charged different commissions,
@@ -662,7 +652,7 @@ class PairConfig:
     #: Blocking these behind a restart is what put "an assets change
     #: requires a restart" ten lines above a live trade while the values
     #: sat saved and correct.
-    HOT_FIELDS = (('expiry', 'expiry_a', 'auto_route',
+    HOT_FIELDS = (('expiry', 'expiry_a',
                    'swap_a_long_per_lot', 'swap_a_short_per_lot',
                    'swap_b_long_per_lot', 'swap_b_short_per_lot',
                    'order_type', 'exit_type',
@@ -691,7 +681,7 @@ class PairConfig:
             if field in self.EXIT_FIELDS or (
                     field.startswith('swap_') and field.endswith('_per_lot')):
                 value = _blank_to_none(value)
-            elif field in ('auto_route', 'algo_window', 'show_fair_window'):
+            elif field in ('algo_window', 'show_fair_window'):
                 field = 'algo_window' if field == 'show_fair_window' else field
                 value = bool(value)
             elif field == 'pair_type':
@@ -756,7 +746,6 @@ class PairConfig:
             'swap_a_short_per_lot': self.swap_a_short_per_lot,
             'swap_b_long_per_lot': self.swap_b_long_per_lot,
             'swap_b_short_per_lot': self.swap_b_short_per_lot,
-            'auto_route': self.auto_route,
             'commission_per_lot_a': self.commission_per_lot_a,
             'commission_per_lot_b': self.commission_per_lot_b,
             'slippage_allowance': self.slippage_allowance,
