@@ -134,8 +134,12 @@ exactly as before — it adds a reading, not a lock.
   the session cutoff, or a |z| past 3.5.
 - **Exit.** For each REAL position, from its own fill: the closing side
   reaching break-even after every cost plus the take-profit % of margin — the
-  same TP the Exit panel shows. Optional and OFF by default: a z-stop, back to
-  the mean in profit, and a time stop in candles. No gate ever holds an exit.
+  same TP the Exit panel shows — or falling to the **stop loss**, break-even
+  less 2% of margin (on by default, per ladder). Optional and OFF by default: a
+  z-stop, back to the mean in profit, and a time stop in candles. No gate ever
+  holds an exit.
+- **In position.** The window names it — `in BUY @ 59.11 — TP 59.31 · SL
+  58.93` — and draws an SL ◄ entry ► TP bar with the closing price on it.
 - **Display.** In the Fair Spread window's own slots: the B/S rows carry z and
   the band level, the hint line says what the Algo says. No new window.
 - **Record.** Every signal goes to the audit trail; *Algo signals CSV* on the
