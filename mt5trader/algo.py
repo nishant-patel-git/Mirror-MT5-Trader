@@ -50,9 +50,11 @@ arithmetic:
   an exit.**
 - *exit*, for each REAL position on the ladder, measured from its own
   fill: the closing side reaching break-even after every cost plus the
-  take-profit (% of margin) — the same TP the Exit panel shows. Three
-  more, each OFF unless the ladder turns it on: a z-stop, a z mean
-  reversion taken only in profit, and a time stop in candles.
+  take-profit (% of margin) — the same TP the Exit panel shows — or
+  falling to the STOP LOSS, break-even minus `stop_loss_pct` of margin
+  (on by default). Three more, each OFF unless the ladder turns it on:
+  a z-stop, a z mean reversion taken only in profit, and a time stop in
+  candles.
 
 The switch is per ladder, held in memory, and OFF after every restart:
 an algo nobody turned on today is an algo nobody is watching.
@@ -142,6 +144,15 @@ DEFAULT_PARAMS = {
     'cutoff_buffer_min': 20,
     #: No entry signal for this long after an exit signal or a close.
     'cooldown_min': 5,
+    #: The STOP LOSS, as a percentage of the margin one spread ties up —
+    #: the mirror of the take-profit, measured from the same break-even.
+    #: ON by default at the take-profit's own 2%: a signal that says
+    #: where to get out in profit and never where to get out in a loss
+    #: is half an exit.
+    'stop_loss_on': True,
+    'stop_loss_pct': 2.0,
+    #: Show the SL <- entry -> TP bar while a position is on.
+    'progress_bar': True,
     # The three optional exits — every one OFF until a ladder asks.
     'stop_z_on': False,
     'stop_z': 4.0,
@@ -150,7 +161,8 @@ DEFAULT_PARAMS = {
     'time_stop_candles': 20,
 }
 
-_BOOLS = ('stop_z_on', 'reversion_on', 'time_stop_on')
+_BOOLS = ('stop_z_on', 'reversion_on', 'time_stop_on', 'stop_loss_on',
+          'progress_bar')
 _INTS = ('timeframe_min', 'length', 'confirm_ticks', 'time_stop_candles')
 
 
@@ -248,9 +260,10 @@ class AlgoSignal:
           `quote_id`. None when a leg has no price.
         - `stats`: `bands.SpreadCandles.stats()`.
         - `positions`: this ladder's OPEN positions, each {position_id,
-          side, entry_spread, opened_at, break_even, tp, net_pnl}. `tp`
-          None means the target is not priced, and no profit exit is
-          signalled on a number that does not exist.
+          side, entry_spread, opened_at, break_even, tp, sl, net_pnl}.
+          `tp` or `sl` None means that level is not priced (or the stop
+          is off), and no exit is signalled on a number that does not
+          exist.
         - `gates`: {'health': why the price cannot be trusted, or None;
           'cutoff_min': minutes to the session cutoff, negative past
           it, None unmeasured}.
@@ -413,14 +426,20 @@ class AlgoSignal:
         closing = (md or {}).get('short_spread' if side == 'BUY'
                                  else 'long_spread')
         z_close = zscore(closing, body['mean'], body['sigma'])
-        row = {'position_id': pos['position_id'], 'side': side,
-               'closing_spread': closing, 'z_close': z_close,
-               'tp': pos.get('tp'), 'break_even': pos.get('break_even'),
-               'net_pnl': pos.get('net_pnl'), 'exit': None}
-        reason = None
         tp = pos.get('tp')
+        sl = pos.get('sl')
         be = pos.get('break_even')
-        if closing is not None and tp is not None and (
+        entry = pos.get('entry_spread')
+        row = {'position_id': pos['position_id'], 'side': side,
+               'entry_spread': entry, 'closing_spread': closing,
+               'z_close': z_close, 'tp': tp, 'sl': sl, 'break_even': be,
+               'net_pnl': pos.get('net_pnl'), 'exit': None,
+               'progress': progress(side, entry, closing, tp, sl)}
+        reason = None
+        if closing is not None and sl is not None and (
+                closing <= sl if side == 'BUY' else closing >= sl):
+            reason = 'STOP_LOSS'
+        elif closing is not None and tp is not None and (
                 closing >= tp if side == 'BUY' else closing <= tp):
             reason = 'PROFIT_TARGET'
         elif p['stop_z_on'] and z_close is not None and (
@@ -446,13 +465,40 @@ class AlgoSignal:
             body['intents'].append({
                 'action': 'EXIT', 'position_id': pos['position_id'],
                 'side': side, 'reason': reason, 'spread': closing,
-                'z': z_close, 'entry_spread': pos.get('entry_spread'),
-                'break_even': be, 'tp': tp, 'net_pnl': pos.get('net_pnl')})
+                'z': z_close, 'entry_spread': entry,
+                'break_even': be, 'tp': tp, 'sl': sl,
+                'net_pnl': pos.get('net_pnl')})
         return row
+
+
+def progress(side, entry, closing, tp, sl):
+    """Where the closing price sits between the stop and the target.
+
+    +1.0 is AT the take-profit, -1.0 is AT the stop loss, 0 is the
+    entry; past either end it is clamped there. The two halves are
+    scaled separately, because the stop and the target are rarely the
+    same distance from the entry. None when the closing price or the
+    entry is unknown — and a missing stop or target leaves only its own
+    half unmeasured.
+    """
+    if closing is None or entry is None:
+        return None
+    sign = 1.0 if side == 'BUY' else -1.0
+    gained = sign * (float(closing) - float(entry))
+    if gained >= 0:
+        if tp is None:
+            return None
+        room = sign * (float(tp) - float(entry))
+        return 1.0 if room <= 0 else min(1.0, gained / room)
+    if sl is None:
+        return None
+    room = sign * (float(entry) - float(sl))
+    return -1.0 if room <= 0 else max(-1.0, gained / room)
 
 
 #: The reasons an exit is signalled, in the trader's words.
 EXIT_WORDS = {
+    'STOP_LOSS': 'stop loss',
     'PROFIT_TARGET': 'profit target (after costs)',
     'Z_STOP': 'z-stop',
     'MEAN_REVERSION': 'back to the mean, in profit',

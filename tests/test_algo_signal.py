@@ -207,9 +207,10 @@ def test_a_blow_out_past_the_cap_is_not_an_entry():
     assert feed(signal, 10.40, 10.42, 3)['signal'] == 'SELL'
 
 
-def position(side='SELL', tp=10.0, be=10.2, opened_at=0.0, pid='POS-1'):
-    return {'position_id': pid, 'side': side, 'entry_spread': 10.26,
-            'opened_at': opened_at, 'break_even': be, 'tp': tp,
+def position(side='SELL', tp=10.0, be=10.2, opened_at=0.0, pid='POS-1',
+             sl=None, entry=10.26):
+    return {'position_id': pid, 'side': side, 'entry_spread': entry,
+            'opened_at': opened_at, 'break_even': be, 'tp': tp, 'sl': sl,
             'net_pnl': 1.0}
 
 
@@ -314,3 +315,60 @@ def test_the_defaults_are_the_ones_the_desk_agreed():
             d['cooldown_min']) == (3.5, 20, 5)
     assert not (d['stop_z_on'] or d['reversion_on'] or d['time_stop_on'])
     assert math.isclose(d['stop_z'], 4.0)
+    # The stop loss is ON, at the take-profit's own 2% of margin.
+    assert d['stop_loss_on'] is True and d['stop_loss_pct'] == 2.0
+    assert d['progress_bar'] is True
+
+
+def test_the_stop_loss_exits_a_short_on_the_OFFER():
+    signal = algo.AlgoSignal()
+    held = [position(side='SELL', tp=10.0, sl=10.40)]
+    # A short closes at the offer: 10.39 has not reached a 10.40 stop.
+    assert run(signal, market(10.37, 10.39, 1),
+               positions=held)['positions'][0]['exit'] is None
+    body = run(signal, market(10.38, 10.40, 2), positions=held)
+    assert body['positions'][0]['exit'] == 'STOP_LOSS'
+    [intent] = body['intents']
+    assert intent['reason'] == 'STOP_LOSS' and intent['sl'] == 10.40
+
+
+def test_a_long_is_stopped_on_the_BID_and_no_gate_holds_it():
+    signal = algo.AlgoSignal()
+    held = [position(side='BUY', tp=10.5, sl=9.80, be=10.1, entry=10.1)]
+    body = run(signal, market(9.80, 9.90, 1), positions=held,
+               gates={'health': 'leg A quote 20s old', 'cutoff_min': -5})
+    assert body['positions'][0]['exit'] == 'STOP_LOSS'
+
+
+def test_no_stop_priced_means_no_stop_signal():
+    """The stop off — or no margin to price it — is None, never 0: a
+    stop of 0 points would sit AT break-even and fire on the entry."""
+    signal = algo.AlgoSignal()
+    held = [position(side='BUY', tp=10.5, sl=None, be=10.1, entry=10.1)]
+    assert run(signal, market(1.0, 1.1, 1),
+               positions=held)['positions'][0]['exit'] is None
+
+
+def test_progress_runs_from_the_stop_to_the_target():
+    # A long in at 10.0, stop 9.8 (0.2 under), target 10.4 (0.4 over).
+    assert algo.progress('BUY', 10.0, 10.0, 10.4, 9.8) == 0.0
+    assert algo.progress('BUY', 10.0, 10.2, 10.4, 9.8) == pytest.approx(0.5)
+    assert algo.progress('BUY', 10.0, 9.9, 10.4, 9.8) == pytest.approx(-0.5)
+    assert algo.progress('BUY', 10.0, 11.0, 10.4, 9.8) == 1.0     # clamped
+    assert algo.progress('BUY', 10.0, 9.0, 10.4, 9.8) == -1.0
+    # A short mirrors it: in at 10.0, target 9.6, stop 10.2.
+    assert algo.progress('SELL', 10.0, 9.8, 9.6, 10.2) == pytest.approx(0.5)
+    assert algo.progress('SELL', 10.0, 10.1, 9.6, 10.2) == pytest.approx(-0.5)
+    # Unmeasured is not zero: no stop, and the losing half is unknown.
+    assert algo.progress('BUY', 10.0, 9.9, 10.4, None) is None
+    assert algo.progress('BUY', 10.0, None, 10.4, 9.8) is None
+
+
+def test_each_position_row_carries_its_entry_and_progress():
+    signal = algo.AlgoSignal()
+    body = run(signal, market(10.10, 10.16, 1),
+               positions=[position(side='SELL', tp=9.86, sl=10.46,
+                                   entry=10.26)])
+    row = body['positions'][0]
+    assert row['entry_spread'] == 10.26 and row['sl'] == 10.46
+    assert row['progress'] == pytest.approx(0.25)

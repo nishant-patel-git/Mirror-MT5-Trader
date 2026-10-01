@@ -182,6 +182,18 @@
           <tr><th>Gap</th><td class="gap-buy">—</td><td class="gap-sell">—</td></tr>
         </table>
         <div class="fair-kind hint"></div>
+        <!-- The Algo only, while a position is on: where the closing
+             price sits between the stop loss and the take-profit, with
+             the entry marked. Hidden for Fair spread and when flat. -->
+        <div class="algo-progress" hidden>
+          <div class="ap-pct"></div>
+          <div class="ap-track">
+            <div class="ap-fill"></div>
+            <div class="ap-entry" title="entry"></div>
+            <div class="ap-mark"></div>
+          </div>
+          <div class="ap-ends"><span class="ap-sl"></span><span class="ap-tp"></span></div>
+        </div>
         <div class="fair-note hint"></div>
         <!-- A conclusion drawn from an input that can be proven wrong
              does not render at all: the warning REPLACES the reading,
@@ -207,6 +219,9 @@
           <tr class="heads"><th></th><th class="col-b" title="Buying the spread">B</th><th class="col-s" title="Selling the spread">S</th></tr>
           <tr><th>B/E</th><td class="be-buy">—</td><td class="be-sell">—</td></tr>
           <tr><th>TP</th><td class="tp-buy">—</td><td class="tp-sell">—</td></tr>
+          <!-- The Algo's stop loss for a NEW entry: break-even less its
+               % of margin. Shown only while the Algo is on. -->
+          <tr class="algo-sl-row" hidden><th title="stop loss: break-even less the Algo&#8217;s SL % of margin">SL</th><td class="sl-buy">—</td><td class="sl-sell">—</td></tr>
           <!-- The other two things that decide where a position ends,
                read-only beside the two that price it. -->
           <tr><th>o/n</th><td class="x-overnight" colspan="2">—</td></tr>
@@ -517,20 +532,27 @@
             <span>Max entry z</span>
             <input class="ls-az-max" type="number" min="0" step="0.1"></label>
           <label class="lsf" title="No entry signal in the last this-many minutes before the session cutoff, or after it. 0 = off.">
-            <span>Cutoff buffer (min)</span>
+            <span>Cutoff (min)</span>
             <input class="ls-az-buffer" type="number" min="0" step="1"></label>
           <label class="lsf" title="No new entry signal for this long after an exit signal or a close.">
             <span>Cooldown (min)</span>
             <input class="ls-az-cooldown" type="number" min="0" step="1"></label>
           <label class="lsf check-row" title="Also signal EXIT if the spread runs against the position to this |z|.">
-            <span>Exit: z-stop at</span>
+            <span>Z-stop at</span>
             <input type="checkbox" class="ls-az-stop-on">
             <input class="ls-az-stop" type="number" min="0" step="0.1"></label>
           <label class="lsf check-row" title="Also signal EXIT when z crosses back through 0 while the position is at or above break-even after costs.">
-            <span>Exit: back to mean</span>
+            <span>Back to mean</span>
             <input type="checkbox" class="ls-az-revert-on"></label>
+          <label class="lsf check-row" title="Signal EXIT when the position falls to break-even less this % of the margin one spread ties up — the mirror of TP % of margin.">
+            <span>SL % margin</span>
+            <input type="checkbox" class="ls-az-sl-on">
+            <input class="ls-az-sl" type="number" min="0" step="0.1"></label>
+          <label class="lsf check-row" title="While a position is on: a bar from the stop loss to the take-profit, with the entry marked and the closing price on it.">
+            <span>Progress bar</span>
+            <input type="checkbox" class="ls-az-progress"></label>
           <label class="lsf check-row" title="Also signal EXIT after the position has been on this many candles, whatever its P&amp;L.">
-            <span>Exit: after candles</span>
+            <span>Time stop</span>
             <input type="checkbox" class="ls-az-time-on">
             <input class="ls-az-time" type="number" min="1" step="1"></label>
           <div class="lsf-note hint">Signals only — nothing is sent to

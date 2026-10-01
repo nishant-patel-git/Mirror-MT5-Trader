@@ -1964,3 +1964,30 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
   opacity: .38;
   cursor: not-allowed;
 }
+
+/* The Algo's in-position bar: stop loss on the left, take-profit on
+ * the right, the entry marked between them and the closing price as a
+ * tick on it. Green is the way to the target, red the way to the stop. */
+.fairwin .algo-progress { margin: 3px 0 2px; }
+.fairwin .ap-track {
+  position: relative;
+  height: 8px;
+  background: var(--frame-line, #ccc);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.fairwin .ap-fill { position: absolute; top: 0; bottom: 0; }
+.fairwin .ap-fill.up { background: #2e9e4f; }
+.fairwin .ap-fill.down { background: #c0392b; }
+.fairwin .ap-entry, .fairwin .ap-mark {
+  position: absolute; top: -1px; bottom: -1px; width: 2px;
+}
+.fairwin .ap-entry { background: #555; }
+.fairwin .ap-mark { background: #000; }
+.fairwin .ap-pct { font-size: 9px; text-align: center; }
+.fairwin .ap-ends {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9px;
+  color: var(--muted, #666);
+}

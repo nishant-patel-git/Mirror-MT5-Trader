@@ -1235,6 +1235,9 @@
     ['.ls-az-max', 'max_entry_z', 'number'],
     ['.ls-az-buffer', 'cutoff_buffer_min', 'number'],
     ['.ls-az-cooldown', 'cooldown_min', 'number'],
+    ['.ls-az-sl-on', 'stop_loss_on', 'check'],
+    ['.ls-az-sl', 'stop_loss_pct', 'number'],
+    ['.ls-az-progress', 'progress_bar', 'check'],
     ['.ls-az-stop-on', 'stop_z_on', 'check'],
     ['.ls-az-stop', 'stop_z', 'number'],
     ['.ls-az-revert-on', 'reversion_on', 'check'],
@@ -2003,6 +2006,7 @@
   //: What the Algo is doing, in the trader's words. The engine's
   //: state names are for the code.
   var ALGO_EXIT_WORDS = {
+    STOP_LOSS: 'stop loss',
     PROFIT_TARGET: 'profit target', Z_STOP: 'z-stop',
     MEAN_REVERSION: 'back to the mean', TIME_STOP: 'time stop'
   };
@@ -2016,18 +2020,25 @@
         signed(z);
     }
     if (state === 'EXIT') {
+      // WHICH position, by what it is: the side and the price it went
+      // on at. With two on the ladder, "exit" alone is half a sentence.
       var rows = (block.positions || []).filter(function (p) {
         return p.exit;
       });
-      return 'EXIT signal: ' + rows.map(function (p) {
-        return ALGO_EXIT_WORDS[p.exit] || p.exit;
-      }).join(', ');
+      return rows.map(function (p) {
+        return 'EXIT ' + positionWords(p, digits) + ': ' +
+          (ALGO_EXIT_WORDS[p.exit] || p.exit);
+      }).join('; ');
     }
     if (state === 'IN_POSITION') {
-      var first = (block.positions || [])[0] || {};
-      return first.tp === null || first.tp === undefined
-        ? 'in position — target not priced'
-        : 'in position — exit at ' + fmt(first.tp, digits);
+      var held = block.positions || [];
+      var first = held[0] || {};
+      return 'in ' + positionWords(first, digits) +
+        (held.length > 1 ? ' (+' + (held.length - 1) + ' more)' : '') +
+        ' — TP ' + fmt(first.tp, digits) + ' · SL ' +
+        (first.sl === null || first.sl === undefined
+          ? (((block.params || {}).stop_loss_on) ? '—' : 'off')
+          : fmt(first.sl, digits));
     }
     if (state === 'BLOCKED') { return 'held: ' + (block.blocked || ''); }
     if (state === 'CONFIRMING') {
@@ -2037,6 +2048,56 @@
     }
     if (state === 'STARTING') { return 'starting…'; }
     return 'watching';
+  }
+
+  function positionWords(position, digits) {
+    /* "BUY @ 59.11": the side and the spread it was ENTERED at. */
+    return (position.side || '?') + ' @ ' + fmt(position.entry_spread, digits);
+  }
+
+  function renderProgress(node, block, digits) {
+    /* SL <- entry -> TP, with the closing price on it. The Algo only,
+     * while a position is on, and only if the ladder has it turned on. */
+    var bar = node.querySelector('.algo-progress');
+    if (!bar) { return; }
+    var first = (block && (block.positions || [])[0]) || null;
+    var wanted = !!(block && block.algo === 'ALGO' && first &&
+                    (block.params || {}).progress_bar !== false);
+    bar.hidden = !wanted;
+    if (!wanted) { return; }
+    // The entry sits where the stop and the target put it: the two
+    // halves are drawn to their own scale, as the engine measures them.
+    var entry = first.entry_spread;
+    var toTp = first.tp === null || first.tp === undefined
+      ? null : Math.abs(first.tp - entry);
+    var toSl = first.sl === null || first.sl === undefined
+      ? null : Math.abs(entry - first.sl);
+    var split = (toTp && toSl) ? toSl / (toSl + toTp) : (toSl ? 0.5 : 0);
+    var p = first.progress;
+    var at = (p === null || p === undefined) ? null
+      : (p >= 0 ? split + p * (1 - split) : split + p * split);
+    var fill = bar.querySelector('.ap-fill');
+    var mark = bar.querySelector('.ap-mark');
+    bar.querySelector('.ap-entry').style.left = (split * 100) + '%';
+    if (at === null) {
+      fill.style.width = '0';
+      mark.hidden = true;
+    } else {
+      mark.hidden = false;
+      mark.style.left = 'calc(' + (at * 100) + '% - 1px)';
+      fill.className = 'ap-fill ' + (p >= 0 ? 'up' : 'down');
+      fill.style.left = (Math.min(at, split) * 100) + '%';
+      fill.style.width = (Math.abs(at - split) * 100) + '%';
+    }
+    bar.querySelector('.ap-sl').textContent =
+      toSl === null ? 'no SL' : 'SL ' + fmt(first.sl, digits);
+    bar.querySelector('.ap-tp').textContent =
+      toTp === null ? 'no TP' : 'TP ' + fmt(first.tp, digits);
+    bar.querySelector('.ap-pct').textContent = p === null || p === undefined
+      ? '—' : (p >= 0 ? Math.round(p * 100) + '% to TP'
+                      : Math.round(-p * 100) + '% to SL');
+    bar.title = positionWords(first, digits) + ', closing at ' +
+      fmt(first.closing_spread, digits) + ' — a signal only, nothing is sent';
   }
 
   function signed(value) {
@@ -2074,6 +2135,11 @@
         + 'lower band, S at or over the upper' : '';
     }
     var kind = node.querySelector('.fair-kind');
+    var slRow = node.querySelector('.algo-sl-row');
+    if (slRow) {
+      slRow.hidden = !isAlgo;
+    }
+    renderProgress(node, isAlgo ? block : null, digitsFor(row.increment));
     if (!isAlgo) {
       if (kind) {
         // Which arithmetic this pair gets — spot against a future, a
@@ -2112,10 +2178,25 @@
           : 'SELL signals when the bid-side spread is at or over this';
       }
     });
+    if (slRow) {
+      slRow.querySelector('.sl-buy').textContent = fmt(block.sl_buy, digits);
+      slRow.querySelector('.sl-sell').textContent = fmt(block.sl_sell,
+                                                        digits);
+      slRow.title = (block.params || {}).stop_loss_on
+        ? 'stop loss for a new entry: break-even less '
+          + (block.params || {}).stop_loss_pct + '% of margin'
+        : 'stop loss off for this ladder';
+    }
     if (kind) {
-      kind.textContent = algoLine(block, digits);
+      // A price that cannot be trusted is said on this one line, in the
+      // window's own size — it does not shout over the reading.
+      var line = algoLine(block, digits);
+      if (block.health && block.state !== 'BLOCKED') {
+        line += ' — ' + block.health;
+      }
+      kind.textContent = line;
       kind.className = 'fair-kind hint';
-      kind.title = block.blocked || '';
+      kind.title = block.blocked || block.health || '';
     }
     var note = node.querySelector('.fair-note');
     if (note) {
@@ -2129,13 +2210,9 @@
     }
     var warn = node.querySelector('.fair-warn');
     if (warn) {
-      // The price itself cannot be trusted: that REPLACES nothing, but
-      // it is said where a warning is said.
-      var problem = block.health || (row.market ? '' : 'no price on one leg');
-      warn.hidden = !problem;
-      node.querySelector('.fair-warn-text').textContent = problem || '';
-      var fix = node.querySelector('.fair-fix');
-      if (fix) { fix.hidden = true; }
+      // The carry's warning box belongs to the fair spread. The Algo
+      // says its own trouble on its state line instead.
+      warn.hidden = true;
     }
     return true;
   }

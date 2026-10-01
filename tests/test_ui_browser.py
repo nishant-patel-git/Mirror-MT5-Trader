@@ -5100,3 +5100,50 @@ def test_the_Algo_reads_in_the_fair_windows_own_slots(page):
         "() => (document.querySelector('.window.fairwin .fair .rail-label')"
         " || {}).textContent.trim().startsWith('Fair spread')", timeout=WAIT)
     assert 'SELL' not in page.text_content('.window.fairwin .fair-kind')
+
+
+def test_in_a_position_the_Algo_names_the_entry_and_draws_the_bar(page):
+    """In a position the Algo says what it is in — side and the price it
+    went on at — and draws SL <- entry -> TP with the closing price on
+    it. The control: flat, there is no bar."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    publisher.show_fair_window = True
+    publisher.algo = 'ALGO'
+    base = {
+        'algo': 'ALGO', 'on': True, 'ready': True, 'z_sell': 0.4,
+        'z_buy': 0.6, 'mean': 59.0, 'sigma': 0.04, 'upper': 59.10,
+        'lower': 58.90, 'count': 20, 'needed': 20,
+        'params': {'entry_z': 2.5, 'progress_bar': True,
+                   'stop_loss_on': True, 'stop_loss_pct': 2.0},
+        'timeframe_min': 15, 'length': 20, 'history': {}, 'health': None,
+        'sl_buy': 58.80, 'sl_sell': 59.40, 'window': True}
+    publisher.algo_block = dict(base, state='IN_POSITION', positions=[{
+        'position_id': 'POS-7', 'side': 'BUY', 'entry_spread': 59.11,
+        'closing_spread': 59.21, 'tp': 59.31, 'sl': 58.91,
+        'progress': 0.5, 'exit': None}])
+    try:
+        publisher.publish()
+        page.wait_for_function(
+            "() => (document.querySelector('.window.fairwin .fair-kind')"
+            " || {}).textContent.includes('BUY @ 59.11')", timeout=WAIT)
+        kind = page.text_content('.window.fairwin .fair-kind')
+        assert 'TP 59.31' in kind and 'SL 58.91' in kind
+        assert page.is_visible('.window.fairwin .algo-progress')
+        assert '50% to TP' in page.text_content('.window.fairwin .ap-pct')
+        assert page.is_visible('.window.fairwin .algo-sl-row')
+
+        # The control: flat again, and the bar is gone.
+        publisher.algo_block = dict(base, state='WATCHING', positions=[])
+        publisher.publish()
+        page.wait_for_function(
+            "() => document.querySelector('.window.fairwin .algo-progress')"
+            ".hidden", timeout=WAIT)
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+    # ...and with the Algo off, neither the bar nor the SL row exists.
+    page.wait_for_function(
+        "() => document.querySelector('.window.fairwin .algo-sl-row')"
+        ".hidden", timeout=WAIT)

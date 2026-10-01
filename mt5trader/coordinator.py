@@ -858,7 +858,23 @@ class Coordinator:
         """
         running = self.algos.block(pair.key)
         if running is not None:
-            return dict(running, window=pair.algo_window)
+            body = dict(running, window=pair.algo_window)
+            # Where a NEW entry's stop would be, beside the take-profit
+            # the Exit panel already shows for it: the same break-even,
+            # the other way.
+            stop = self._algo_stop_points(pair, pair.default_quantity,
+                                          sizing.spread_units(
+                                              pair.clip_lots_b,
+                                              (pair.meta_b or {}).get(
+                                                  'contract_size')))
+            levels = exit_levels or {}
+            body['sl_buy'] = (None if stop is None or
+                              levels.get('break_even_buy') is None
+                              else levels['break_even_buy'] - stop)
+            body['sl_sell'] = (None if stop is None or
+                               levels.get('break_even_sell') is None
+                               else levels['break_even_sell'] + stop)
+            return body
         selected = pair.algo or algo_module.NONE
         body = {'algo': selected, 'window': pair.algo_window}
         if selected == algo_module.FAIR_SPREAD:
@@ -942,13 +958,36 @@ class Coordinator:
                 # target, so no profit exit is signalled on it.
                 tp = None
             _gross, net_pnl, _closing = mark_position(position, md, settings)
+            be = levels.get('break_even')
+            stop = self._algo_stop_points(pair, position.quantity or 1.0,
+                                          position.spread_units, margin)
+            sl = None
+            if stop is not None and be is not None:
+                sl = be - stop if position.side is SpreadSide.BUY \
+                    else be + stop
             rows.append({'position_id': position.position_id,
                          'side': position.side.value,
                          'entry_spread': position.entry_spread,
                          'opened_at': position.opened_at,
-                         'break_even': levels.get('break_even'),
-                         'tp': tp, 'net_pnl': net_pnl})
+                         'break_even': be, 'tp': tp, 'sl': sl,
+                         'net_pnl': net_pnl})
         return rows
+
+    def _algo_stop_points(self, pair, quantity, units, margin=None):
+        """The stop loss's distance from break-even, in spread points:
+        `stop_loss_pct` of the margin `quantity` spreads tie up, through
+        the one `k`. None when the stop is off or cannot be priced —
+        never 0, which would put the stop AT break-even."""
+        params = algo_module.clean_params(pair.algo_params)
+        if not params['stop_loss_on'] or not params['stop_loss_pct']:
+            return None
+        if margin is None:
+            margin = (self.margin_detail(pair) or {}).get('money')
+        if not margin:
+            return None
+        return takeprofit.points(
+            params['stop_loss_pct'] / 100.0 * float(margin) * float(quantity),
+            units, quantity)
 
     def _algo_gates(self, pair, md):
         """What can hold an Algo ENTRY back on this pass."""

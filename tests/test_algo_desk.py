@@ -398,3 +398,37 @@ def test_a_new_threshold_keeps_the_band(config, pair, legs):
     assert after['ready'] and after['mean'] == pytest.approx(before['mean'])
     assert len(legs['acct_a'].broker.rates_asked) == asked
     assert after['upper'] - after['mean'] == pytest.approx(1.5 * after['sigma'])
+
+
+def test_a_real_position_gets_a_stop_loss_from_its_margin(config, pair, legs):
+    """The stop is break-even less 2% of the margin the position ties
+    up, through the same k as the take-profit. The control: the stop
+    turned off is None, not a stop at break-even."""
+    give_history(legs)
+    coordinator = engine(config, legs)
+    pair.order_type = OrderType.MARKET
+    md = coordinator.market[pair.key]
+    assert coordinator.click(pair.key, SpreadSide.BUY,
+                             md['long_spread']).get('ok')
+    [held] = coordinator.book.positions(pair.key)
+    margin = coordinator.margin_detail(pair)['money']
+    assert margin
+    [row] = coordinator._algo_positions(pair, coordinator.market[pair.key])
+    expected = 0.02 * margin * held.quantity / (held.spread_units
+                                                * held.quantity)
+    assert row['sl'] == pytest.approx(row['break_even'] - expected)
+
+    pair.algo_params = {'stop_loss_on': False}
+    [row] = coordinator._algo_positions(pair, coordinator.market[pair.key])
+    assert row['sl'] is None
+
+
+def test_a_new_entrys_stop_is_shown_beside_its_target(config, pair, legs):
+    give_history(legs)
+    coordinator = engine(config, legs)
+    coordinator.set_algo(pair.key, 'ALGO')
+    coordinator.poll_once()
+    row = coordinator.snapshot()['pairs'][pair.key]
+    body = row['algo_block']
+    assert body['sl_buy'] < row['exit']['break_even_buy']
+    assert body['sl_sell'] > row['exit']['break_even_sell']
