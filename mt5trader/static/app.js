@@ -1291,9 +1291,12 @@
     send('set_algo', payload, function (result) {
       var data = (result && result.data) || {};
       if (data.choose) {
+        var count = (data.positions || []).length || 1;
         ask('The Algo holds a position on ' + key,
-            (data.reason || '') + '. Close it now at market, by ticket — or '
-            + 'leave it open and manage it by hand.',
+            'It holds ' + count + ' position(s) on this ladder. Close '
+            + (count > 1 ? 'them' : 'it') + ' now at market, by ticket — '
+            + 'or leave ' + (count > 1 ? 'them' : 'it') + ' open and '
+            + 'manage by hand.',
             'Close it now', function () {
               setAlgo(key, choice, Object.assign({}, extra,
                                                  {off_action: 'close'}));
