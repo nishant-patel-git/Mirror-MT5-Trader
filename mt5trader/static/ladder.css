@@ -1728,8 +1728,15 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
  * while the market moves, and a form in it is a form between the
  * trader and the price. Three groups side by side so the whole thing
  * fits without scrolling — which is the point of moving it here.
+ *
+ * The pane is placed against the ladder window, which `.window` already
+ * makes relative — and a FLOATING window, being absolute, places it just
+ * as well. A `.window.ladder { position: relative }` here used to win
+ * over `.window.floating` on source order, so a dragged ladder was never
+ * really lifted out of the row: its `left` was measured from wherever
+ * the row would have put it, and it jumped by the width of any window
+ * in front of it the moment it was grabbed.
  */
-.window.ladder { position: relative; }
 /* `display: flex` below beats the `hidden` attribute, and a pane that
  * is invisible but still laid over the ladder swallows every click on
  * it — on the panel where a click IS an order. The browser test for a

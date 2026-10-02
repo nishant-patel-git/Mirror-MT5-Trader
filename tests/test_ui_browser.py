@@ -1787,6 +1787,57 @@ def test_tidy_puts_every_window_back_in_the_row(page):
             None, '{}')
 
 
+def test_tidy_keeps_the_fair_window_in_the_row_across_renders(page):
+    """The fair window floats to its own corner by default. Tidy puts it
+    in the row — and it has to STAY there: it used to float off again on
+    the next render, shifting the row under the pointer, so a ladder
+    grabbed just after Tidy jumped sideways by the fair window's width."""
+    open_ladder(page)
+    # A FRESH fair window: closed first, so no earlier test's Tidy is on it.
+    page.evaluate(
+        "() => window.MT5Trader.showFairWindow('XAUUSD_|GC1226', false)")
+    page.wait_for_selector('.window.fairwin', state='detached',
+                           timeout=WAIT)
+    page.evaluate("""() => {
+        window.localStorage.removeItem('mt5trader.windows.v1');
+        window.MT5Trader.showFairWindow('XAUUSD_|GC1226', true);
+    }""")
+    page.wait_for_selector('.window.fairwin', timeout=WAIT)
+    try:
+        # The control: untidied, it floats by default.
+        page.evaluate("() => window.MT5Trader.render()")
+        assert page.locator('.window.fairwin.floating').count() == 1
+        tidy(page)
+        for _ in range(3):
+            page.evaluate("() => window.MT5Trader.render()")
+        assert page.locator('.window.floating').count() == 0
+        ladder_x = page.locator('.window.ladder').first.bounding_box()['x']
+        page.evaluate("() => window.MT5Trader.render()")
+        assert page.locator('.window.ladder').first.bounding_box()['x'] == \
+            pytest.approx(ladder_x, abs=1)
+    finally:
+        page.evaluate(
+            "() => window.MT5Trader.showFairWindow('XAUUSD_|GC1226', false)")
+
+
+def test_a_floating_ladder_is_really_lifted_out_of_the_row(page):
+    """`.window.ladder { position: relative }` used to beat
+    `.window.floating` on source order: a dragged ladder stayed in the
+    row, its `left` counted from where the row put it, and with a window
+    in front of it, it jumped by that window's width when grabbed."""
+    open_ladder(page)
+    tidy(page)
+    page.evaluate("""() => {
+        const node = document.querySelector('.window.ladder');
+        node.classList.add('floating');
+    }""")
+    position = page.evaluate(
+        "() => getComputedStyle(document.querySelector('.window.ladder'))"
+        ".position")
+    page.evaluate("() => window.MT5Trader.tidyWindows()")
+    assert position == 'absolute'
+
+
 def seed_config(page, pairs=True):
     """A saved account and pair, as a configured install has."""
     config = {'accounts': {'acct_a': {'endpoint': '127.0.0.1:9101'},

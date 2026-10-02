@@ -581,6 +581,13 @@
     var id = panelIdOf(node);
     var saved = layout[id];
     if (!saved) {
+      // TIDY put this window in the row, and there it stays until the
+      // trader moves it. Floating it off to its default corner on the
+      // next render shifted the whole row under the pointer: a ladder
+      // grabbed just after Tidy jumped sideways by the fair window's
+      // width. Marked on the ELEMENT, so a window closed and opened
+      // again is a new one and lands where new ones land.
+      if (node.dataset.tidied) { return; }
       if (FLOATING_BY_DEFAULT.indexOf(id) >= 0) { floatByDefault(node, id); }
       else if (node.classList.contains('fairwin') ||
                node.classList.contains('algowin')) {
@@ -628,6 +635,7 @@
     writeLayout();
     Array.prototype.forEach.call(document.querySelectorAll('.window'),
       function (node) {
+        node.dataset.tidied = '1';
         node.classList.remove('floating', 'sized');
         node.style.left = node.style.top = node.style.zIndex = '';
         node.style.width = node.style.height = '';
