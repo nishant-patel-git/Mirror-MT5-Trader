@@ -139,7 +139,7 @@ def test_a_signal_is_RECORDED_and_nothing_is_sent(config, pair, legs,
     assert block(coordinator, pair)['signal'] is None      # at the mean
 
     # The future's bid lifts: the bid-side spread is far over the band.
-    legs['acct_b'].broker.quote('GC1226', 4351.60, 4351.70)
+    legs['acct_b'].broker.quote('GC1226', 4352.00, 4352.10)
     coordinator.poll_once()
     body = block(coordinator, pair)
     assert body['state'] == 'SIGNAL' and body['signal'] == 'SELL'
@@ -224,7 +224,7 @@ def test_a_click_is_IDENTICAL_with_the_algo_on_and_signalling(config, pair,
     pair.order_type = OrderType.MARKET
 
     def click_once(algo_on):
-        legs['acct_b'].broker.quote('GC1226', 4351.60, 4351.70)
+        legs['acct_b'].broker.quote('GC1226', 4352.00, 4352.10)
         coordinator = engine(config, legs)
         if algo_on:
             coordinator.set_algo(pair.key, 'ALGO')
@@ -432,3 +432,30 @@ def test_a_new_entrys_stop_is_shown_beside_its_target(config, pair, legs):
     body = row['algo_block']
     assert body['sl_buy'] < row['exit']['break_even_buy']
     assert body['sl_sell'] > row['exit']['break_even_sell']
+
+
+def test_the_live_price_builds_candles(config, pair, legs):
+    """No MT5 history at all: the candles come from the live mid, one per
+    15 minutes. The mid was published as `spread` and read as
+    `mid_spread`, so this never happened — a band from history went
+    stale all session, and one without history collected forever."""
+    clock = Clock()
+    coordinator = engine(config, legs, clock=clock)
+    coordinator.set_algo(pair.key, 'ALGO')
+    coordinator.poll_once()
+    before = block(coordinator, pair)['count']
+    for _ in range(3):
+        clock.now += 900                    # into the next candle
+        for name, symbol in (('acct_a', 'XAUUSD_'), ('acct_b', 'GC1226')):
+            book = legs[name].broker.symbols[symbol]
+            legs[name].broker.quote(symbol, book.bid, book.ask)
+        coordinator.poll_once()
+    assert block(coordinator, pair)['count'] == before + 3
+
+
+def test_the_market_carries_the_mid_by_the_name_the_algo_reads(config, pair,
+                                                                legs):
+    coordinator = engine(config, legs)
+    md = coordinator.market[pair.key]
+    assert md['mid_spread'] == md['spread']
+    assert md['short_spread'] <= md['mid_spread'] <= md['long_spread']
