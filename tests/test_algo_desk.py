@@ -38,7 +38,14 @@ class Clock:
 #: Settings that keep these tests about the Algo and not about the hour
 #: they happen to run at: no cutoff buffer (the session clock is real),
 #: one tick to confirm, no cap.
-QUIET = {'cutoff_buffer_min': 0, 'confirm_ticks': 1, 'max_entry_z': 0}
+QUIET = {'cutoff_buffer_min': 0, 'confirm_ticks': 1, 'max_entry_z': 0,
+         # The entry filters are tested on their own (test_algo_filters);
+         # these tests are about what happens once an entry is allowed.
+         'edge_on': False, 'regime_on': False, 'prob_on': False,
+         # The live warm-up is tested on its own (test_algo_warmup).
+         'warmup_min': 0,
+         # Re-entry and the trend filter: test_algo_protections.
+         'reentry_on': False, 'trend_on': False}
 
 
 def give_history(legs, count=40):
@@ -243,14 +250,16 @@ def test_a_click_is_IDENTICAL_with_the_algo_on_and_signalling(config, pair,
     assert click_once(False) == click_once(True)
 
 
-def test_trading_live_is_refused_in_words(config, pair, legs):
+def test_LIVE_is_never_implied_it_has_to_be_confirmed(config, pair, legs):
     coordinator = engine(config, legs)
     answer = coordinator.algos.turn_on(pair, mode='LIVE')
-    assert answer['ok'] is False and 'does not trade' in answer['reason']
+    assert answer['ok'] is False and 'confirmed' in answer['reason']
     assert coordinator.algos.is_on(pair.key) is False
-    # The control: the mode that exists.
-    assert coordinator.algos.turn_on(pair)['ok']
-    # And while it only signals, manual orders are never refused by it.
+    # The control: confirmed, it goes LIVE.
+    assert coordinator.algos.turn_on(pair, mode='LIVE', confirmed=True)['ok']
+    assert coordinator.algos.mode(pair.key) == 'LIVE'
+    # And a dry run never takes the ladder from the trader.
+    coordinator.algos.turn_on(pair, mode='DRY_RUN')
     assert coordinator.algos.manual_order_refusal(pair.key) is None
 
 

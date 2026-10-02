@@ -172,9 +172,6 @@ class CommandRunner:
         #: withheld. Blank = the desk-wide MAX_QUOTE_AGE_SEC.
         'max_quote_age_sec': (
             lambda v: float(v) if v not in (None, '') else None),
-        #: AutoRouting: on a fill, rest a working order to close at the
-        #: take-profit. Default OFF, and it arms a target and NO STOP.
-        'auto_route': bool,
         #: Which ALGO this ladder runs — one at a time, NONE by
         #: default. It measures and says what it would do; it does not
         #: trade, and a click on the ladder is unaffected either way.
@@ -338,15 +335,24 @@ class CommandRunner:
             applied[name] = self.coordinator.config.settings[name]
         return {'applied': applied}
 
-    def _do_set_algo(self, payload):
-        """NONE / FAIR_SPREAD / ALGO for one ladder.
+    def _do_algo_backtest(self, payload):
+        """Replay history through one ladder's Algo. Sends nothing."""
+        return self.coordinator.algo_backtest(payload['pair'],
+                                              payload.get('days', 5))
 
-        ALGO switches the ladder's Algo ON in the running engine: it
-        signals and records, it sends nothing, and it is off again after
-        a restart. Refused in words — never silently ignored.
+    def _do_set_algo(self, payload):
+        """NONE / FAIR_SPREAD / ALGO for one ladder, and ALGO's mode.
+
+        ALGO switches the ladder's Algo ON in the running engine, off
+        again after a restart. `mode` DRY_RUN signals and records; LIVE
+        trades, and needs `confirmed` every time. Leaving LIVE while it
+        holds a position needs `off_action`: 'close' or 'manual'.
+        Refused in words — never silently ignored.
         """
-        return self.coordinator.set_algo(payload['pair'],
-                                         payload.get('algo'))
+        return self.coordinator.set_algo(
+            payload['pair'], payload.get('algo'), mode=payload.get('mode'),
+            confirmed=bool(payload.get('confirmed')),
+            off_action=payload.get('off_action'))
 
     def _do_set_pair(self, payload):
         """Mode / TIF / overnight / increment / quantity, per ladder.

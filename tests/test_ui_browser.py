@@ -89,13 +89,6 @@ class Publisher:
         #: publishes it — including the case where the reading is
         #: REPLACED by a warning about the input it came from.
         self.fair = None
-        #: AutoRouting: the switch, and what is ACTUALLY resting.
-        self.auto_route = False
-        self.auto_route_armed = None
-        #: The system-wide switch, off by default in the engine. The
-        #: fixture leaves it ON so the per-ladder tick is what is under
-        #: test; the test that turns it off is testing the master.
-        self.auto_route_master = True
         #: The fair-value window is per pair and off by default; the
         #: fixture turns it on so the panels it holds can be read.
         self.show_fair_window = True
@@ -145,8 +138,6 @@ class Publisher:
         payload = snapshot(self.order_type, self.confirm, self.same_login,
                            self.stale_leg, self.dead_orders, self.exits,
                            self.positions, self.unclaimed, self.fair,
-                           self.auto_route, self.auto_route_armed,
-                           self.auto_route_master,
                            self.show_fair_window, self.orders,
                            self.quotes, self.working_buys,
                            self.working_sells, self.algo, self.algo_block,
@@ -197,8 +188,7 @@ def server(tmp_path_factory):
 def snapshot(order_type='LIMIT', confirm=False, same_login=None,
              stale_leg=False, dead_orders=None, exits=None,
              positions=None, unclaimed=None, fair=None,
-             auto_route=False, auto_route_armed=None,
-             auto_route_master=True, show_fair_window=True, orders=None, quotes=None,
+             show_fair_window=True, orders=None, quotes=None,
              working_buys=0, working_sells=0, algo='NONE', algo_block=None,
              net_position=0.0, quoting_leg='b', exit_type='MARKET',
              resting_closes=0, broker_pendings=None, max_qty=None):
@@ -251,15 +241,13 @@ def snapshot(order_type='LIMIT', confirm=False, same_login=None,
                 # What both brokers will take, in Qty. The keypad reads
                 # it; None where neither caps volume.
                 'max_qty': max_qty,
-                'auto_route': auto_route,
-                'auto_route_on': bool(auto_route and auto_route_master),
-                'auto_route_master': bool(auto_route_master),
                 'algo': algo,
+                'algo_on': algo == 'ALGO',
+                'algo_mode': (algo_block or {}).get('mode') or 'DRY_RUN',
                 'algo_window': show_fair_window,
                 'algo_block': algo_block or {'algo': algo,
                                              'window': show_fair_window},
                 'show_fair_window': show_fair_window,
-                'auto_route_armed': auto_route_armed or [],
                 'clip_lots_a': 0.1, 'clip_lots_b': 0.1, 'spread_units': 10.0,
                 'contract_a': 100.0, 'contract_b': 100.0,
                 'short_spread': 59.09, 'long_spread': 59.11,
@@ -602,7 +590,9 @@ def test_three_clicks_at_one_price_send_three_orders(page):
     for _ in range(3):
         cell.click()
         page.wait_for_timeout(120)
-    assert command_count(page) == before + 3
+    # The server writes each command after its POST lands; on a slow
+    # runner the last clicks are still in flight when the loop ends.
+    assert wait_for_commands(page, before + 3) == before + 3
     levels = {json.loads(line)['payload']['level']
               for line in commands(page)[-3:]}
     assert len(levels) == 1                       # same price, three orders
@@ -716,6 +706,16 @@ def commands(page):
 
 def command_count(page):
     return len(commands(page))
+
+
+def wait_for_commands(page, count, timeout_ms=5000):
+    """The command count once it reaches `count`, or what it is when
+    `timeout_ms` runs out."""
+    waited = 0
+    while command_count(page) < count and waited < timeout_ms:
+        page.wait_for_timeout(50)
+        waited += 50
+    return command_count(page)
 
 
 def last_command(page):
@@ -964,7 +964,7 @@ def test_the_exit_costs_belong_to_ONE_LADDER_and_the_override_CLEARS(page):
 
     for field in ('.ls-comm-a', '.ls-comm-b', '.ls-slip',
                   '.ls-nights', '.ls-tp', '.ls-carry-rate',
-                  '.ls-auto-route', '.ls-overnight'):
+                  '.ls-overnight'):
         assert page.locator(
             '.ladder .ladder-settings ' + field).count() == 1, field
 
@@ -1098,13 +1098,12 @@ def test_a_cost_typed_on_one_ladder_is_saved_to_THAT_pair(page):
 
 def test_the_rail_carries_no_form_the_market_can_outrun(page):
     """The rail is read top to bottom while the market moves. The
-    overnight rule and the AutoRoute switch are exit logic, not
-    something pressed at the touch, so they are in this ladder's
-    settings — and the three cancels are one row, not three."""
+    overnight rule is exit logic, not something pressed at the touch,
+    so it is in this ladder's settings — and the three cancels are one
+    row, not three."""
     open_ladder(page)
 
     assert page.locator('.ladder .rail .overnight').count() == 0
-    assert page.locator('.ladder .rail .auto-route').count() == 0
     assert page.locator('.ladder .rail .cxl-row .cxl').count() == 3
 
     # ...and the rail fits without scrolling at the default size.
@@ -1174,6 +1173,9 @@ def test_the_operator_is_told_when_the_system_is_connected(page):
     # Nothing is really connected in this fixture, and it says so
     # plainly rather than showing a green light.
     assert 'NOT READY' in page.text_content('.conn')
+    # A toast an earlier test left up (an "applied to ..." lasts four
+    # seconds) is not the one this test is about.
+    page.evaluate("() => document.getElementById('toasts').innerHTML = ''")
 
     page.evaluate("""() => {
         window.__realFetch = window.__realFetch || window.fetch;
@@ -1205,8 +1207,8 @@ def test_the_operator_is_told_when_the_system_is_connected(page):
     assert "the 16:55 cutoff is on the broker's clock" in \
         page.text_content('.conn.up')
     # It is also said once, out loud.
-    page.wait_for_selector('.toast.ok', timeout=WAIT)
-    assert 'You can trade' in page.text_content('.toast.ok')
+    page.wait_for_selector('.toast.ok:has-text("You can trade")',
+                           timeout=WAIT)
     page.evaluate('() => { window.fetch = window.__realFetch; }')
 
 
@@ -1295,9 +1297,37 @@ def drag(page, selector, dx, dy, steps=8):
     """
     settle(page, selector)
     start = grab_point(page, selector)
+    # The whole desk at the press, and just after it: on CI the ladder
+    # has been seen to be at x 141 when measured and at x 4 by the
+    # first step, so the jump is somewhere around here.
+    desk = """(sel) => {
+        const node = document.querySelector(sel);
+        const desk = document.getElementById('desktop');
+        return {node: Math.round(node.getBoundingClientRect().left),
+                scroll: desk.scrollLeft, active: window.MT5Trader.state.active,
+                windows: Array.from(desk.querySelectorAll('.window')).map(
+                    w => w.className.replace('window ', '') + '@' +
+                         Math.round(w.getBoundingClientRect().left) + '/' +
+                         Math.round(w.getBoundingClientRect().width))};
+    }"""
+    page.trace = [{'pre': page.evaluate(desk, selector), 'grab': start}]
     page.mouse.move(*start)
     page.mouse.down()
-    page.mouse.move(start[0] + dx, start[1] + dy, steps=steps)
+    page.trace.append({'down': page.evaluate(desk, selector)})
+    # One step at a time, and what the window and the desk did at each,
+    # so a drag that stops short says WHERE and WHY in the failure.
+    for i in range(1, steps + 1):
+        page.mouse.move(start[0] + dx * i / steps, start[1] + dy * i / steps)
+        page.trace.append(page.evaluate(
+            """(sel) => {
+                const node = document.querySelector(sel);
+                const desk = document.getElementById('desktop');
+                return {x: Math.round(node.getBoundingClientRect().left),
+                        left: node.style.left,
+                        dragging: node.classList.contains('dragging'),
+                        scroll: desk.scrollLeft, width: desk.clientWidth,
+                        windows: desk.querySelectorAll('.window').length};
+            }""", selector))
     assert started(page, selector), (
         'the press missed the title bar, so nothing was dragged')
     page.mouse.up()
@@ -1418,7 +1448,17 @@ RELEASE_THE_SNAPSHOT = ("() => { if (window.__realFetch) "
 
 
 def tidy(page):
+    """Tidy the desk, and WAIT for it to be tidy.
+
+    Tidy re-lays the row, and on a slow runner the windows can still be
+    moving when the click returns; a position read then is where a
+    window WAS.
+    """
     page.click('#tidy')
+    # A fresh baseline: two readings from THIS layout, not one left
+    # over from a previous test's.
+    page.evaluate("() => { window.__settleWas = {}; }")
+    settle(page, '.window.ladder')
 
 
 def open_ladder(page):
@@ -1507,7 +1547,9 @@ def test_a_window_goes_where_it_is_dragged_and_is_still_there_after_a_reload(
     drag(page, '.window.ladder', 220, 130)
 
     after = page.locator('.window.ladder').first.bounding_box()
-    assert after['x'] - before['x'] == pytest.approx(220, abs=6)
+    assert after['x'] - before['x'] == pytest.approx(220, abs=6), (
+        f'room {room}, before {before}, after {after}, '
+        f'steps {getattr(page, "trace", None)}')
     assert after['y'] - before['y'] == pytest.approx(130, abs=6)
     assert page.locator('.window.ladder.floating').count() == 1
 
@@ -1755,6 +1797,57 @@ def test_tidy_puts_every_window_back_in_the_row(page):
     assert page.evaluate(
         "() => window.localStorage.getItem('mt5trader.windows.v1')") in (
             None, '{}')
+
+
+def test_tidy_keeps_the_fair_window_in_the_row_across_renders(page):
+    """The fair window floats to its own corner by default. Tidy puts it
+    in the row — and it has to STAY there: it used to float off again on
+    the next render, shifting the row under the pointer, so a ladder
+    grabbed just after Tidy jumped sideways by the fair window's width."""
+    open_ladder(page)
+    # A FRESH fair window: closed first, so no earlier test's Tidy is on it.
+    page.evaluate(
+        "() => window.MT5Trader.showFairWindow('XAUUSD_|GC1226', false)")
+    page.wait_for_selector('.window.fairwin', state='detached',
+                           timeout=WAIT)
+    page.evaluate("""() => {
+        window.localStorage.removeItem('mt5trader.windows.v1');
+        window.MT5Trader.showFairWindow('XAUUSD_|GC1226', true);
+    }""")
+    page.wait_for_selector('.window.fairwin', timeout=WAIT)
+    try:
+        # The control: untidied, it floats by default.
+        page.evaluate("() => window.MT5Trader.render()")
+        assert page.locator('.window.fairwin.floating').count() == 1
+        tidy(page)
+        for _ in range(3):
+            page.evaluate("() => window.MT5Trader.render()")
+        assert page.locator('.window.floating').count() == 0
+        ladder_x = page.locator('.window.ladder').first.bounding_box()['x']
+        page.evaluate("() => window.MT5Trader.render()")
+        assert page.locator('.window.ladder').first.bounding_box()['x'] == \
+            pytest.approx(ladder_x, abs=1)
+    finally:
+        page.evaluate(
+            "() => window.MT5Trader.showFairWindow('XAUUSD_|GC1226', false)")
+
+
+def test_a_floating_ladder_is_really_lifted_out_of_the_row(page):
+    """`.window.ladder { position: relative }` used to beat
+    `.window.floating` on source order: a dragged ladder stayed in the
+    row, its `left` counted from where the row put it, and with a window
+    in front of it, it jumped by that window's width when grabbed."""
+    open_ladder(page)
+    tidy(page)
+    page.evaluate("""() => {
+        const node = document.querySelector('.window.ladder');
+        node.classList.add('floating');
+    }""")
+    position = page.evaluate(
+        "() => getComputedStyle(document.querySelector('.window.ladder'))"
+        ".position")
+    page.evaluate("() => window.MT5Trader.tidyWindows()")
+    assert position == 'absolute'
 
 
 def seed_config(page, pairs=True):
@@ -2882,7 +2975,7 @@ def test_the_window_is_ONE_choice_on_the_ladder_it_belongs_to(page):
     assert page.locator('.ladder .ls-algo-window').count() == 0
     options = page.eval_on_selector(
         '.ladder .ls-algo', 'el => [...el.options].map(o => o.value)')
-    assert options == ['NONE', 'FAIR_SPREAD', 'ALGO']
+    assert options == ['NONE', 'FAIR_SPREAD', 'ALGO', 'ALGO_LIVE']
     # The group says out loud what the Algo is NOT.
     note = ' '.join(page.text_content(
         '.ladder .ls-group:has(.ls-algo) .lsf-note').split())
@@ -2949,72 +3042,19 @@ def test_GTC_carries_its_caveat_on_the_screen(page):
         '.ladder .tif option[value="GTC"]', 'title')
 
 
-def test_autorouting_says_what_is_armed_and_that_there_is_no_stop(page):
-    """The switch is not the state. A trader who believes a target is
-    armed when it is not is the worse failure, so the Exit panel shows
-    what is ACTUALLY resting — while the switch itself lives in this
-    ladder\'s settings, because one ladder can arm AutoRouting and the
-    next not."""
+def test_AutoRouting_is_gone_from_every_screen(page):
+    """AutoRouting has been removed: the Algo is the one thing that
+    exits by itself, and two would confuse the desk. No tick in the
+    ladder's settings, no row on the Exit panel, no AUTO in the title."""
     open_ladder(page)
-    assert page.text_content('.fairwin .auto-route-state') == 'off'
-
-    page.paths['publisher'].auto_route = True
-    page.paths['publisher'].auto_route_armed = [
-        {'position_id': 'POS1', 'level': 60.21, 'order_id': 'SO1',
-         'quantity': 1.0}]
-    page.paths['publisher'].publish()
-    page.wait_for_function(
-        "() => document.querySelector('.fairwin .auto-route-state')"
-        ".textContent.indexOf('60.21') >= 0", timeout=WAIT)
-    assert 'no stop' in page.get_attribute('.fairwin .auto-route-state',
-                                           'title')
-
-    # On, but nothing resting yet — and it says which of the two it is.
-    page.paths['publisher'].auto_route_armed = []
-    page.paths['publisher'].publish()
-    page.wait_for_function(
-        "() => document.querySelector('.fairwin .auto-route-state')"
-        ".textContent === 'on'", timeout=WAIT)
-    assert 'next fill' in page.get_attribute('.fairwin .auto-route-state',
-                                             'title')
-
-    # ...and the switch, with the NO STOP caveat, is in this ladder\'s
-    # own settings.
+    assert page.locator('.ls-auto-route').count() == 0
+    assert page.locator('.auto-route-state').count() == 0
+    assert 'AUTO' not in page.text_content('.ladder .mode-badge')
     page.click('.ladder .ladder-cog')
-    page.wait_for_selector('.ladder .ls-auto-route', timeout=WAIT)
-    assert 'NO STOP' in page.get_attribute('.ladder .lsf.check-row', 'title')
-    page.click('.ladder .ls-close')
-
-    page.paths['publisher'].auto_route = False
-    page.paths['publisher'].auto_route_armed = None
-    page.paths['publisher'].publish()
-
-
-def test_a_ladder_ticked_with_the_master_off_does_not_claim_AUTO(page):
-    """The tick alone used to put AUTO in the title bar. With the
-    system switch off nothing arms on a fill, and a badge saying
-    otherwise is the screen promising an exit that will not be there."""
-    open_ladder(page)
-    page.paths['publisher'].auto_route = True
-    page.paths['publisher'].auto_route_master = False
-    page.paths['publisher'].publish()
-    page.wait_for_function(
-        "() => document.querySelector('.ladder .mode-badge')"
-        ".textContent.indexOf('AUTO OFF') >= 0", timeout=WAIT)
-    assert 'switched off' in page.get_attribute('.ladder .mode-badge', 'title')
-    assert page.text_content('.fairwin .auto-route-state') == 'off'
-
-    # The control: the same tick with the master ON does say AUTO.
-    page.paths['publisher'].auto_route_master = True
-    page.paths['publisher'].publish()
-    page.wait_for_function(
-        "() => { var t = document.querySelector('.ladder .mode-badge')"
-        ".textContent; return t.indexOf('AUTO') >= 0"
-        " && t.indexOf('AUTO OFF') < 0; }", timeout=WAIT)
-    assert page.text_content('.fairwin .auto-route-state') == 'on'
-
-    page.paths['publisher'].auto_route = False
-    page.paths['publisher'].publish()
+    page.wait_for_selector('.ladder .ladder-settings .ls-tp', timeout=WAIT)
+    assert 'AutoRoute' not in page.text_content('.ladder .ladder-settings')
+    page.evaluate("() => document.querySelectorAll('.ladder-settings')"
+                  ".forEach(p => p.hidden = true)")
 
 
 def test_nothing_about_the_take_profit_is_sent_to_the_broker():
@@ -5097,85 +5137,395 @@ def test_an_unreadable_account_leaves_the_row_UNMEASURED(page):
         page.evaluate(RELEASE_THE_SNAPSHOT)
 
 
-def test_the_Algo_reads_in_the_fair_windows_own_slots(page):
-    """The Algo adds no window, tab or panel: with it on, the Fair
-    Spread window's two B/S rows carry z and the band, and its hint line
-    says what the Algo says. The control — the same window with the Algo
-    off — is the fair spread again, labels and all."""
+def _algo_block(**over):
+    block = {
+        'algo': 'ALGO', 'on': True, 'mode': 'DRY_RUN', 'state': 'SIGNAL',
+        'signal': 'SELL', 'ready': True, 'z_sell': 2.61, 'z_buy': 1.9,
+        'mean': 59.0, 'sigma': 0.04, 'upper': 59.10, 'lower': 58.90,
+        'count': 20, 'needed': 20, 'timeframe_min': 15, 'length': 20,
+        'params': {'entry_z': 2.5, 'confirm_ticks': 3, 'progress_bar': True,
+                   'stop_loss_on': True, 'max_trades_day': 10,
+                   'edge_capture_frac': 0.5},
+        'history': {'note': 'mt5'}, 'positions': [], 'health': None,
+        'day': {'trades': 2, 'losses_row': 0, 'pnl': 1.4},
+        'last_blocked': None, 'window': True,
+        'filters': {
+            'ready': True, 'qty': 1,
+            'cost': {'crossing': 2.0, 'commission': 1.0, 'slippage': 0.0,
+                     'total': 3.0},
+            'edge': {'on': True, 'ok': True, 'ratio': 2.4, 'required': 1.5,
+                     'capture': 7.2},
+            'probability': {'on': True, 'ok': True, 'win': 0.986,
+                            'ev': 4.1},
+            'regime': {'on': True, 'state': 'RANGE',
+                       'efficiency_ratio': 0.2, 'crossings': 9},
+            'half_life_minutes': 42.0, 'half_life_band': [0, 0]}}
+    block.update(over)
+    return block
+
+
+def test_the_Algo_has_a_window_of_its_own_with_the_three_panels(page):
+    """Signal & Position, Statistics, Filters — the stat-arb dashboard's
+    three panels — in one window per ladder while its Algo is on. The
+    control: the Algo off, and the window is gone."""
     open_ladder(page)
     publisher = page.paths['publisher']
-    publisher.show_fair_window = True
     publisher.algo = 'ALGO'
-    publisher.algo_block = {
-        'algo': 'ALGO', 'on': True, 'state': 'SIGNAL', 'signal': 'SELL',
-        'ready': True, 'z_sell': 2.61, 'z_buy': 1.9, 'mean': 59.0,
-        'sigma': 0.04, 'upper': 59.10, 'lower': 58.90, 'count': 20,
-        'needed': 20, 'params': {'entry_z': 2.5, 'confirm_ticks': 3},
-        'timeframe_min': 15, 'length': 20, 'history': {'note': 'mt5'},
-        'positions': [], 'health': None, 'window': True}
+    publisher.algo_block = _algo_block()
     try:
         publisher.publish()
+        page.wait_for_selector('.window.algowin', timeout=WAIT)
         page.wait_for_function(
-            "() => (document.querySelector('.window.fairwin .fair-kind')"
-            " || {}).textContent.includes('SELL signal')", timeout=WAIT)
-        label = page.text_content('.window.fairwin .fair .rail-label')
-        assert label.strip().startswith('Algo')
-        assert page.text_content('.window.fairwin .fair-sell') == '+2.61'
-        assert page.text_content('.window.fairwin .gap-sell') == '59.10'
-        assert page.locator('.window.fairwin').count() == 1
-    finally:
-        # The control: Algo off, and the window is the fair spread again.
-        publisher.algo = 'NONE'
-        publisher.algo_block = None
-        publisher.publish()
-    page.wait_for_function(
-        "() => (document.querySelector('.window.fairwin .fair .rail-label')"
-        " || {}).textContent.trim().startsWith('Fair spread')", timeout=WAIT)
-    assert 'SELL' not in page.text_content('.window.fairwin .fair-kind')
-
-
-def test_in_a_position_the_Algo_names_the_entry_and_draws_the_bar(page):
-    """In a position the Algo says what it is in — side and the price it
-    went on at — and draws SL <- entry -> TP with the closing price on
-    it. The control: flat, there is no bar."""
-    open_ladder(page)
-    publisher = page.paths['publisher']
-    publisher.show_fair_window = True
-    publisher.algo = 'ALGO'
-    base = {
-        'algo': 'ALGO', 'on': True, 'ready': True, 'z_sell': 0.4,
-        'z_buy': 0.6, 'mean': 59.0, 'sigma': 0.04, 'upper': 59.10,
-        'lower': 58.90, 'count': 20, 'needed': 20,
-        'params': {'entry_z': 2.5, 'progress_bar': True,
-                   'stop_loss_on': True, 'stop_loss_pct': 2.0},
-        'timeframe_min': 15, 'length': 20, 'history': {}, 'health': None,
-        'sl_buy': 58.80, 'sl_sell': 59.40, 'window': True}
-    publisher.algo_block = dict(base, state='IN_POSITION', positions=[{
-        'position_id': 'POS-7', 'side': 'BUY', 'entry_spread': 59.11,
-        'closing_spread': 59.21, 'tp': 59.31, 'sl': 58.91,
-        'progress': 0.5, 'exit': None}])
-    try:
-        publisher.publish()
-        page.wait_for_function(
-            "() => (document.querySelector('.window.fairwin .fair-kind')"
-            " || {}).textContent.includes('BUY @ 59.11')", timeout=WAIT)
-        kind = page.text_content('.window.fairwin .fair-kind')
-        assert 'TP 59.31' in kind and 'SL 58.91' in kind
-        assert page.is_visible('.window.fairwin .algo-progress')
-        assert '50% to TP' in page.text_content('.window.fairwin .ap-pct')
-        assert page.is_visible('.window.fairwin .algo-sl-row')
-
-        # The control: flat again, and the bar is gone.
-        publisher.algo_block = dict(base, state='WATCHING', positions=[])
-        publisher.publish()
-        page.wait_for_function(
-            "() => document.querySelector('.window.fairwin .algo-progress')"
-            ".hidden", timeout=WAIT)
+            "() => (document.querySelector('.window.algowin .aw-signal')"
+            " || {textContent: ''}).textContent.includes('H to L signal')", timeout=WAIT)
+        text = page.text_content('.window.algowin')
+        for heading in ('Signal & Position', 'Statistics', 'Filters'):
+            assert heading.upper() in text.upper(), heading
+        assert 'H to L' in text and 'L to H' in text
+        assert '2.40' in text and 'req 1.5' in text        # capture / cost
+        assert 'Mean-rev' in text and '42 min' in text
+        assert page.locator('.window.algowin .aw-tile.sell.hit').count() == 1
+        assert page.text_content('.window.algowin .aw-mode') == 'DRY RUN'
+        # The Fair Spread window no longer carries the Algo.
+        assert 'H to L signal' not in (page.text_content('.window.fairwin')
+                                     if page.locator('.window.fairwin').count()
+                                     else '')
     finally:
         publisher.algo = 'NONE'
         publisher.algo_block = None
         publisher.publish()
-    # ...and with the Algo off, neither the bar nor the SL row exists.
     page.wait_for_function(
-        "() => document.querySelector('.window.fairwin .algo-sl-row')"
-        ".hidden", timeout=WAIT)
+        "() => !document.querySelector('.window.algowin')", timeout=WAIT)
+
+
+def test_a_blocked_signal_names_the_filter_that_held_it(page):
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(
+        state='BLOCKED', signal=None,
+        blocked='edge filter: capture 0.42x the cost, under the 1.5x required',
+        last_blocked={'side': 'SELL', 'z': 3.04, 'at': time.time(),
+                      'reason': 'edge filter: capture 0.42x the cost, under '
+                                'the 1.5x required'})
+    publisher.algo_block['filters']['edge'].update(ok=False, ratio=0.42)
+    try:
+        publisher.publish()
+        page.wait_for_function(
+            "() => (document.querySelector('.window.algowin .aw-blocked')"
+            " || {textContent: ''}).textContent.includes('edge filter')", timeout=WAIT)
+        assert 'H to L' in page.text_content('.window.algowin .aw-blocked')
+        assert page.locator('.window.algowin .aw-badge.bad').count() >= 1
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def test_in_a_position_the_Algo_window_shows_entry_legs_levels_and_the_bar(
+        page):
+    """In a position: what it is in, at what price, each leg's fill and
+    where it would close now, BE/TP/SL, and SL <- entry -> TP. The
+    control: flat, there is no position detail and no bar."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+    held = {'position_id': 'POS-7', 'side': 'BUY', 'quantity': 1,
+            'entry_spread': 59.11, 'closing_spread': 59.21, 'tp': 59.31,
+            'sl': 58.91, 'break_even': 59.13, 'progress': 0.5, 'exit': None,
+            'net_pnl': 0.8, 'entry_z': -2.6, 'age_sec': 125,
+            'leg_a_side': 'SELL', 'leg_a_entry': 4292.0, 'leg_a_now': 4292.2,
+            'leg_b_side': 'BUY', 'leg_b_entry': 4351.1, 'leg_b_now': 4351.4}
+    publisher.algo_block = _algo_block(state='IN_POSITION', signal=None,
+                                       positions=[held])
+    try:
+        publisher.publish()
+        page.wait_for_function(
+            "() => (document.querySelector('.window.algowin .aw-signal')"
+            " || {textContent: ''}).textContent.includes('BUY @ 59.11')", timeout=WAIT)
+        text = page.text_content('.window.algowin .aw-signal')
+        assert 'LONG' in text and 'TP 59.31' in text and 'SL 58.91' in text
+        assert '4351.10' in text and '4351.40' in text      # leg B fill/now
+        assert '50% to TP' in text
+        publisher.algo_block = _algo_block(state='WATCHING', signal=None)
+        publisher.publish()
+        page.wait_for_function(
+            "() => !document.querySelector('.window.algowin .algo-progress')",
+            timeout=WAIT)
+        assert 'FLAT' in page.text_content('.window.algowin .aw-signal')
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def test_the_ladder_title_bar_carries_the_Algo_switch(page):
+    """One click from the ladder: OFF / DRY RUN / LIVE. Picking LIVE
+    still asks first and sends nothing until confirmed."""
+    open_ladder(page)
+    page.paths['publisher'].publish()
+    page.wait_for_function(
+        "() => (document.querySelector('.ladder .algo-btn') || {})"
+        ".textContent === 'ALGO OFF'", timeout=WAIT)
+    page.evaluate(SPY_ON_COMMANDS)
+    try:
+        page.click('.ladder .algo-btn')
+        page.wait_for_selector('.ladder .algo-menu:not([hidden])',
+                               timeout=WAIT)
+        page.click('.ladder .algo-menu button[data-algo="ALGO_LIVE"]')
+        page.wait_for_selector('#modal:not(.hidden)', timeout=WAIT)
+        assert 'LIVE' in page.text_content('#modal-title')
+        assert algo_commands(page) == []                 # nothing sent yet
+        page.click('#modal-cancel')
+        # The control: a dry run goes straight through.
+        page.click('.ladder .algo-btn')
+        page.click('.ladder .algo-menu button[data-algo="ALGO"]')
+        page.wait_for_function(
+            "() => window.__commands.some(c => c.kind === 'set_algo')",
+            timeout=WAIT)
+        assert algo_commands(page)[-1]['payload']['mode'] == 'DRY_RUN'
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch; }')
+
+
+def test_the_switch_says_LIVE_when_the_Algo_trades(page):
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(mode='LIVE')
+    try:
+        publisher.publish()
+        page.wait_for_function(
+            "() => (document.querySelector('.ladder .algo-btn') || {})"
+            ".textContent === 'ALGO LIVE'", timeout=WAIT)
+        assert 'live' in page.get_attribute('.ladder .algo-btn', 'class')
+        assert page.text_content('.window.algowin .aw-mode') == 'LIVE'
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+    page.wait_for_function(
+        "() => (document.querySelector('.ladder .algo-btn') || {})"
+        ".textContent === 'ALGO OFF'", timeout=WAIT)
+
+def _ladder_with_algo(page, mode):
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(mode=mode)
+    publisher.publish()
+    want = 'ALGO LIVE' if mode == 'LIVE' else 'ALGO DRY'
+    page.wait_for_function(
+        "(want) => (document.querySelector('.ladder .algo-btn') || {})"
+        ".textContent === want", arg=want, timeout=WAIT)
+
+
+def _algo_off(page):
+    publisher = page.paths['publisher']
+    publisher.algo = 'NONE'
+    publisher.algo_block = None
+    publisher.publish()
+    page.wait_for_function(
+        "() => (document.querySelector('.ladder .algo-btn') || {})"
+        ".textContent === 'ALGO OFF'", timeout=WAIT)
+
+
+def _click_a_bid(page):
+    page.evaluate("() => document.querySelector("
+                  "'.ladder .grid tbody td.bid').click()")
+
+
+def test_a_LIVE_ladder_is_locked_and_says_so(page):
+    """Algo or Manual, never both — on the SCREEN, not only in the
+    engine. While LIVE the ways in are off (and a click on the grid
+    sends nothing), the ladder says why, and the ways out stay."""
+    open_ladder(page)
+    try:
+        _ladder_with_algo(page, 'LIVE')
+        page.wait_for_selector('.ladder .algo-lock:not([hidden])',
+                               timeout=WAIT)
+        assert 'manual orders are off' in page.text_content(
+            '.ladder .algo-lock')
+        # A strip ABOVE the ladder, never in place of it: the prices are
+        # still the thing the trader is watching.
+        grid = page.locator('.ladder .grid').bounding_box()
+        assert grid['width'] > 200 and grid['height'] > 200, grid
+        lock = page.locator('.ladder .algo-lock').bounding_box()
+        assert lock['y'] + lock['height'] <= grid['y'] + 1
+        assert page.is_disabled('.ladder .buy-touch')
+        assert page.is_disabled('.ladder .sell-touch')
+        assert page.is_disabled('.ladder .keypad .qty')
+        # A close is never withheld.
+        assert page.is_enabled('.ladder .flatten')
+        assert page.is_enabled('.ladder .close-limit-go')
+
+        page.evaluate(SPY_ON_COMMANDS)
+        page.evaluate("() => { document.getElementById('toasts')"
+                      ".innerHTML = ''; }")
+        _click_a_bid(page)
+        page.wait_for_selector('.toast:has-text("manual orders are off")',
+                               timeout=WAIT)
+        assert not page.evaluate(
+            "() => window.__commands.some(c => c.kind === 'click')")
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch || '
+                      'window.fetch; }')
+        _algo_off(page)
+
+
+def test_the_CONTROL_a_dry_run_ladder_still_trades_by_hand(page):
+    open_ladder(page)
+    try:
+        _ladder_with_algo(page, 'DRY_RUN')
+        assert page.locator('.ladder .algo-lock[hidden]').count() == 1
+        assert page.is_enabled('.ladder .buy-touch')
+        assert page.is_enabled('.ladder .keypad .qty')
+        page.evaluate(SPY_ON_COMMANDS)
+        page.evaluate("() => { window.MT5Trader.state.snapshot"
+                      ".confirm_market_clicks = false; }")
+        _click_a_bid(page)
+        page.wait_for_function(
+            "() => window.__commands.some(c => c.kind === 'click')",
+            timeout=WAIT)
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch || '
+                      'window.fetch; }')
+        _algo_off(page)
+
+
+#: Capture every engine command the page sends, answering each as the
+#: engine would — so a test can read exactly what was asked for.
+SPY_ON_COMMANDS = """(answer) => {
+    window.__realFetch = window.__realFetch || window.fetch;
+    window.__commands = [];
+    window.__answer = answer || {ok: true};
+    window.fetch = function (url, options) {
+        const u = String(url);
+        const json = (body) => Promise.resolve(new Response(
+            JSON.stringify(body),
+            {status: 200, headers: {'Content-Type': 'application/json'}}));
+        if (u.indexOf('/api/command') >= 0 && options) {
+            window.__commands.push(JSON.parse(options.body));
+            return json({ok: true, id: 'c' + window.__commands.length});
+        }
+        if (u.indexOf('/api/result/') >= 0) {
+            return json({ok: true, data: window.__answer});
+        }
+        if (u.indexOf('/api/pairs/') >= 0 && options &&
+            options.method === 'POST') {
+            return json({ok: true, notes: []});
+        }
+        return window.__realFetch(url, options);
+    };
+}"""
+
+
+def algo_commands(page):
+    return [c for c in page.evaluate('() => window.__commands')
+            if c['kind'] == 'set_algo']
+
+
+def test_going_LIVE_asks_first_and_sends_nothing_until_confirmed(page):
+    open_ladder(page)
+    page.evaluate(SPY_ON_COMMANDS)
+    try:
+        page.click('.ladder .ladder-cog')
+        page.wait_for_selector('.ladder .ls-algo', timeout=WAIT)
+        page.select_option('.ladder .ls-algo', 'ALGO_LIVE')
+        page.click('.ladder .ls-save')
+        page.wait_for_selector('#modal:not(.hidden)', timeout=WAIT)
+        assert 'LIVE' in page.text_content('#modal-title')
+        assert 'REAL orders' in page.text_content('#modal-body')
+        assert algo_commands(page) == []            # nothing sent yet
+
+        page.click('#modal-confirm')
+        page.wait_for_function(
+            "() => window.__commands.some(c => c.kind === 'set_algo')",
+            timeout=WAIT)
+        [command] = algo_commands(page)
+        assert command['payload']['mode'] == 'LIVE'
+        assert command['payload']['confirmed'] is True
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch; }')
+
+
+def test_a_dry_run_is_not_asked_about(page):
+    """The control: the Algo in dry run sends nothing, so it asks
+    nothing."""
+    open_ladder(page)
+    page.evaluate(SPY_ON_COMMANDS)
+    try:
+        page.click('.ladder .ladder-cog')
+        page.wait_for_selector('.ladder .ls-algo', timeout=WAIT)
+        page.select_option('.ladder .ls-algo', 'ALGO')
+        page.click('.ladder .ls-save')
+        page.wait_for_function(
+            "() => window.__commands.some(c => c.kind === 'set_algo')",
+            timeout=WAIT)
+        [command] = algo_commands(page)
+        assert command['payload']['mode'] == 'DRY_RUN'
+        assert page.locator('#modal:not(.hidden)').count() == 0
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch; }')
+
+
+def test_leaving_LIVE_with_a_position_offers_close_or_hand_over(page):
+    open_ladder(page)
+    page.evaluate(SPY_ON_COMMANDS, {
+        'ok': False, 'choose': ['close', 'manual'],
+        'reason': 'the Algo holds 1 position(s) on XAUUSD_|GC1226'})
+    try:
+        page.evaluate(
+            "() => window.MT5Trader.setAlgo('XAUUSD_|GC1226', 'NONE')")
+        page.wait_for_selector('#modal:not(.hidden)', timeout=WAIT)
+        assert page.is_visible('#modal-alt')
+        assert 'Hand it to manual' in page.text_content('#modal-alt')
+        page.evaluate("() => { window.__answer = {ok: true}; }")
+        page.click('#modal-alt')
+        page.wait_for_function(
+            "() => window.__commands.filter(c => c.kind === 'set_algo')"
+            ".length === 2", timeout=WAIT)
+        assert algo_commands(page)[-1]['payload']['off_action'] == 'manual'
+        # The second answer is gone again for every other question.
+        assert not page.is_visible('#modal-alt')
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch; }')
+
+
+def test_the_backtest_button_runs_it_on_the_engine_and_shows_both_runs(page):
+    """What these settings would have done on MT5's history — and,
+    beside it, without the trend protections. It asks the ENGINE, which
+    holds the history and the costs, and it sends no order."""
+    open_ladder(page)
+    answer = {'ok': True, 'summary': {
+                  'trades': 3, 'wins': 2, 'losses': 1, 'net': 4.5,
+                  'max_drawdown': -1.2, 'candles': 480,
+                  'from': 1790000000, 'to': 1790432000},
+              'without_protections': {'trades': 9, 'wins': 3, 'losses': 6,
+                                      'net': -12.25, 'max_drawdown': -15.0},
+              'held': {'trend: the middle ROSE #σ in the last # min — no '
+                       'H to L against it': 14},
+              'trades': [{'side': 'SELL', 'opened_at': 1790100000,
+                          'entry_z': 1.48, 'reason': 'PROFIT_TARGET',
+                          'pnl': 2.5}],
+              'caveats': ['one look per candle']}
+    try:
+        _ladder_with_algo(page, 'DRY_RUN')
+        page.wait_for_selector('.window.algowin .aw-bt-run', timeout=WAIT)
+        page.evaluate(SPY_ON_COMMANDS, answer)
+        page.click('.window.algowin .aw-bt-run')
+        page.wait_for_function(
+            "() => (document.querySelector('.window.algowin .aw-bt-out') "
+            "|| {textContent: ''}).textContent.indexOf('These settings') >= 0",
+            timeout=WAIT)
+        text = page.text_content('.window.algowin .aw-bt-out')
+        assert '3 trade(s)' in text and '9 trade(s)' in text
+        assert 'Without re-entry and the trend filter' in text
+        assert 'ROSE' in text and 'H to L' in text
+        kinds = page.evaluate("() => window.__commands.map(c => c.kind)")
+        assert kinds == ['algo_backtest']
+        assert page.evaluate(
+            "() => window.__commands[0].payload.days") == 5
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch || '
+                      'window.fetch; }')
+        _algo_off(page)

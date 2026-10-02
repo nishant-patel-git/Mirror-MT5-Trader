@@ -159,18 +159,28 @@
                       kind === 'ok' ? 4000 : 10000);
   }
 
-  function ask(title, body, confirmLabel, onConfirm) {
+  function ask(title, body, confirmLabel, onConfirm, alt) {
+    /* `alt` is an optional second answer, {label, run}: the one
+     * question with two — close the Algo's position, or hand it over. */
     el('modal-title').textContent = title;
     el('modal-body').textContent = body;
     el('modal-confirm').textContent = confirmLabel;
+    var other = el('modal-alt');
+    if (other) {
+      other.hidden = !alt;
+      other.textContent = alt ? alt.label : '';
+    }
     el('modal').classList.remove('hidden');
     el('modal').dataset.pending = '1';
     el('modal')._onConfirm = onConfirm;
+    el('modal')._onAlt = alt ? alt.run : null;
   }
 
   function closeModal() {
     el('modal').classList.add('hidden');
     el('modal')._onConfirm = null;
+    el('modal')._onAlt = null;
+    if (el('modal-alt')) { el('modal-alt').hidden = true; }
   }
 
   // -- sound -------------------------------------------------------------
@@ -345,7 +355,9 @@
         : node.classList.contains('settings') ? panelId('settings')
           : node.classList.contains('fairwin')
             ? panelId('fair', node.dataset.pair)
-            : panelId('ladder', node.dataset.pair);
+            : node.classList.contains('algowin')
+              ? panelId('algo', node.dataset.pair)
+              : panelId('ladder', node.dataset.pair);
   }
 
   // -- moving the windows ------------------------------------------------
@@ -569,8 +581,16 @@
     var id = panelIdOf(node);
     var saved = layout[id];
     if (!saved) {
+      // TIDY put this window in the row, and there it stays until the
+      // trader moves it. Floating it off to its default corner on the
+      // next render shifted the whole row under the pointer: a ladder
+      // grabbed just after Tidy jumped sideways by the fair window's
+      // width. Marked on the ELEMENT, so a window closed and opened
+      // again is a new one and lands where new ones land.
+      if (node.dataset.tidied) { return; }
       if (FLOATING_BY_DEFAULT.indexOf(id) >= 0) { floatByDefault(node, id); }
-      else if (node.classList.contains('fairwin')) {
+      else if (node.classList.contains('fairwin') ||
+               node.classList.contains('algowin')) {
         fairFloatByDefault(node, id);
       }
       return;
@@ -615,6 +635,7 @@
     writeLayout();
     Array.prototype.forEach.call(document.querySelectorAll('.window'),
       function (node) {
+        node.dataset.tidied = '1';
         node.classList.remove('floating', 'sized');
         node.style.left = node.style.top = node.style.zIndex = '';
         node.style.width = node.style.height = '';
@@ -773,13 +794,6 @@
     if (on) { openPanel(id); } else { closePanel(id); }
     setPair(key, {algo_window: !!on});
     var row = (state.snapshot.pairs || {})[key];
-    if (!on && row && row.algo_on) {
-      // The window IS the Algo's display. Closed, the Algo goes off
-      // with it — a signal nobody can see is a signal nobody watches.
-      send('set_algo', {pair: key, algo: 'NONE'});
-      row.algo_on = false;
-      toast(key + ': Algo off');
-    }
     if (row) { row.algo_window = !!on; }           // before the next poll
     fetch('/api/pairs/' + encodeURIComponent(key), {
       method: 'POST',
@@ -806,6 +820,7 @@
     node.querySelector('.close').addEventListener('click', function () {
       closePanel(panelId('ladder', key));
     });
+    wireAlgoSwitch(node, key);
     node.querySelector('.order-type').addEventListener('change', function (e) {
       setPair(key, {order_type: e.target.value});
     });
@@ -1068,8 +1083,22 @@
       ' (' + legs + ')';
   }
 
+  function algoTrades(row) {
+    /* This ladder's Algo is LIVE: it, and only it, places orders here. */
+    return !!(row && row.algo_on && row.algo_mode === 'LIVE');
+  }
+
   function clickLevel(key, side, level) {
     var pair = state.snapshot.pairs[key] || {};
+    // Every manual order on the screen comes through here — the grid,
+    // BUY/SELL, the B and S keys and the Market Grid. The ENGINE refuses
+    // it too; this only saves sending what will be refused.
+    if (algoTrades(pair)) {
+      toast((pair.name || key) + ': the Algo is trading this ladder ' +
+            '(LIVE) — manual orders are off. CLOSE ALL still closes; ' +
+            'turn the Algo off in the title bar to trade by hand.');
+      return;
+    }
     var armed = armedFor(key, side);
     var quantity = armed || pair.default_quantity;
     var payload = {pair: key, side: side, level: level};
@@ -1199,7 +1228,6 @@
     ['.ls-contract-a', 'contract_size_a', 'blank-number'],
     ['.ls-contract-b', 'contract_size_b', 'blank-number'],
     ['.ls-quoting', 'quoting_leg', 'live'],
-    ['.ls-auto-route', 'auto_route', 'check'],
     // What the window reads: None, Fair spread or Algo. ONE control
     // for one decision. Fair spread is the saved `algo_window`; Algo is
     // a switch on the running engine, never saved, off after a restart.
@@ -1229,15 +1257,32 @@
   //: the box shows — the engine's effective value, from the snapshot.
   var ALGO_FIELDS = [
     ['.ls-az-entry', 'entry_z', 'number'],
+    ['.ls-az-direction', 'direction', 'text'],
     ['.ls-az-tf', 'timeframe_min', 'number'],
     ['.ls-az-length', 'length', 'number'],
     ['.ls-az-confirm', 'confirm_ticks', 'number'],
     ['.ls-az-max', 'max_entry_z', 'number'],
     ['.ls-az-buffer', 'cutoff_buffer_min', 'number'],
     ['.ls-az-cooldown', 'cooldown_min', 'number'],
+    ['.ls-az-warmup', 'warmup_min', 'number'],
     ['.ls-az-sl-on', 'stop_loss_on', 'check'],
     ['.ls-az-sl', 'stop_loss_pct', 'number'],
     ['.ls-az-progress', 'progress_bar', 'check'],
+    ['.ls-az-qty', 'algo_qty', 'number'],
+    ['.ls-az-maxtrades', 'max_trades_day', 'number'],
+    ['.ls-az-loss', 'daily_loss_limit', 'number'],
+    ['.ls-az-losses', 'max_losses_row', 'number'],
+    ['.ls-az-edge-on', 'edge_on', 'check'],
+    ['.ls-az-edge', 'edge_multiple', 'number'],
+    ['.ls-az-capture', 'edge_capture_frac', 'number'],
+    ['.ls-az-regime-on', 'regime_on', 'check'],
+    ['.ls-az-reentry-on', 'reentry_on', 'check'],
+    ['.ls-az-reentry', 'reentry_back', 'number'],
+    ['.ls-az-trend-on', 'trend_on', 'check'],
+    ['.ls-az-trend', 'trend_sigma', 'number'],
+    ['.ls-az-trend-look', 'trend_lookback_min', 'number'],
+    ['.ls-az-hl-min', 'half_life_min_min', 'number'],
+    ['.ls-az-hl-max', 'half_life_max_min', 'number'],
     ['.ls-az-stop-on', 'stop_z_on', 'check'],
     ['.ls-az-stop', 'stop_z', 'number'],
     ['.ls-az-revert-on', 'reversion_on', 'check'],
@@ -1247,8 +1292,115 @@
 
   function algoChoiceOf(row) {
     /* What the ladder's window reads NOW, as the dropdown names it. */
-    if (row && row.algo_on) { return 'ALGO'; }
+    if (row && row.algo_on) {
+      return row.algo_mode === 'LIVE' ? 'ALGO_LIVE' : 'ALGO';
+    }
     return row && row.algo_window ? 'FAIR_SPREAD' : 'NONE';
+  }
+
+  function warmupHtml(warmup) {
+    /* The live warm-up: minutes of live prices watched since the Algo
+     * was turned on, against the minutes it needs. No entry until full —
+     * a band loaded from MT5's history in a second is not a feed that
+     * has been watched. */
+    if (!warmup || !warmup.need_sec) { return ''; }
+    var done = !!warmup.done;
+    var pct = done ? 100 : Math.floor(100 * warmup.sec / warmup.need_sec);
+    return '<div class="aw-data aw-warmup" title="No entry until the Algo '
+      + 'has watched this long of live prices. Time with no price does not '
+      + 'count.">'
+      + '<span>Live</span><div class="aw-bar"><div class="'
+      + (done ? 'ok' : 'wait') + '" style="width:' + pct + '%"></div></div>'
+      + '<span>' + (done ? 'warmed up'
+        : 'warming up ' + Math.floor(warmup.sec / 60) + '/'
+          + Math.round(warmup.need_sec / 60) + ' min') + '</span></div>';
+  }
+
+  function renderAlgoSwitch(node, key, row) {
+    /* The ladder's Algo switch: OFF / DRY RUN / LIVE, in the title bar.
+     * While LIVE a click on this ladder is refused, and the trader must
+     * be able to see why without opening anything. */
+    var button = node.querySelector('.algo-btn');
+    if (!button) { return; }
+    var live = !!(row.algo_on && row.algo_mode === 'LIVE');
+    var dry = !!(row.algo_on && !live);
+    button.textContent = live ? 'ALGO LIVE' : (dry ? 'ALGO DRY' : 'ALGO OFF');
+    button.className = 'algo-btn ' + (live ? 'live' : (dry ? 'dry' : 'off'));
+    button.title = live
+      ? 'The Algo is TRADING this ladder — manual orders here are off; '
+        + 'CLOSE ALL still closes. Click to change.'
+      : dry ? 'The Algo is on in a dry run: signals only, nothing is sent. '
+          + 'Click to change.'
+        : 'The Algo is off on this ladder. Click to turn it on.';
+  }
+
+  function wireAlgoSwitch(node, key) {
+    var button = node.querySelector('.algo-btn');
+    var menu = node.querySelector('.algo-menu');
+    if (!button || !menu) { return; }
+    button.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      menu.hidden = !menu.hidden;
+    });
+    menu.querySelectorAll('button[data-algo]').forEach(function (item) {
+      item.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        menu.hidden = true;
+        var choice = item.dataset.algo;
+        var row = (state.snapshot.pairs || {})[key] || {};
+        if (choice === algoChoiceOf(row)) { return; }   // already there
+        // Off goes back to whatever the window tick says, never to a
+        // choice the trader did not make.
+        if (choice === 'NONE' && row.algo_window) { choice = 'FAIR_SPREAD'; }
+        setAlgo(key, choice);
+      });
+    });
+    document.addEventListener('click', function () { menu.hidden = true; });
+  }
+
+  function setAlgo(key, choice, extra) {
+    /* One ladder's Algo: NONE / FAIR_SPREAD / ALGO (dry run) /
+     * ALGO_LIVE. LIVE is confirmed here, every time — it sends real
+     * orders and takes the ladder from the trader. The engine refuses
+     * anything it cannot do in its own words, and when the Algo is
+     * leaving LIVE holding a position it asks what to do with it. */
+    var live = choice === 'ALGO_LIVE';
+    var payload = Object.assign({pair: key,
+                                 algo: live ? 'ALGO' : choice,
+                                 mode: live ? 'LIVE' : 'DRY_RUN'},
+                                extra || {});
+    if (live && !payload.confirmed) {
+      ask('Algo LIVE on ' + key + '?',
+          'The Algo will send REAL orders to both accounts on this ladder: '
+          + 'MARKET in when the spread stretches past its band, out at the '
+          + 'take-profit or the stop loss. Manual orders on this ladder are '
+          + 'OFF while it runs; CLOSE ALL and the positions list still close.',
+          'Go LIVE', function () {
+            setAlgo(key, choice, Object.assign({}, extra, {confirmed: true}));
+          });
+      return;
+    }
+    send('set_algo', payload, function (result) {
+      var data = (result && result.data) || {};
+      if (data.choose) {
+        var count = (data.positions || []).length || 1;
+        ask('The Algo holds a position on ' + key,
+            'It holds ' + count + ' position(s) on this ladder. Close '
+            + (count > 1 ? 'them' : 'it') + ' now at market, by ticket — '
+            + 'or leave ' + (count > 1 ? 'them' : 'it') + ' open and '
+            + 'manage by hand.',
+            'Close it now', function () {
+              setAlgo(key, choice, Object.assign({}, extra,
+                                                 {off_action: 'close'}));
+            },
+            {label: 'Hand it to manual', run: function () {
+              setAlgo(key, choice, Object.assign({}, extra,
+                                                 {off_action: 'manual'}));
+            }});
+      }
+    });
   }
 
   function openLadderSettings(node, key) {
@@ -1297,7 +1449,8 @@
         if (kind === 'algo-choice') {
           // The ENGINE says whether the Algo is on — it is never in the
           // file. The window tick is the file's.
-          input.value = live.algo_on ? 'ALGO'
+          input.value = live.algo_on
+            ? (live.algo_mode === 'LIVE' ? 'ALGO_LIVE' : 'ALGO')
             : ((own === undefined || own === null ? live.algo_window : own)
                 ? 'FAIR_SPREAD' : 'NONE');
           return;
@@ -1355,7 +1508,9 @@
       });
       var algoState = pane.querySelector('.ls-algo-state');
       if (algoState) {
-        algoState.textContent = live.algo_on ? 'on — signals only' : '';
+        algoState.textContent = !live.algo_on ? ''
+          : (live.algo_mode === 'LIVE' ? 'LIVE — trading this ladder'
+                                       : 'on — dry run, signals only');
       }
       var typeBox = pane.querySelector('.ls-pair-type');
       fairKindFields(pane, {pair_type:
@@ -1501,7 +1656,7 @@
         choice = raw || 'NONE';
         // Algo leaves the saved window tick as it was: the Algo is the
         // engine's switch, and a restart goes back to what is saved.
-        if (choice === 'ALGO') { return; }
+        if (choice === 'ALGO' || choice === 'ALGO_LIVE') { return; }
         value = choice === 'FAIR_SPREAD';
       } else if (kind === 'check') {
         value = input.checked;
@@ -1535,6 +1690,7 @@
       if (entry[2] === 'check') { params[entry[1]] = !!input.checked; return; }
       var raw = (input.value || '').trim();
       if (raw === '') { return; }
+      if (entry[2] === 'text') { params[entry[1]] = raw; return; }
       var number = parseFloat(raw);
       if (!isNaN(number)) { params[entry[1]] = number; }
     });
@@ -1554,15 +1710,14 @@
       // trader now rather than a poll later.
       setPair(key, live);
       if (choice !== before) {
-        // ON or OFF in the running engine. Its refusal, if any, comes
-        // back in its own words through `send`.
-        send('set_algo', {pair: key, algo: choice});
+        // ON, OFF or LIVE in the running engine. Its refusal, if any,
+        // comes back in its own words; the next snapshot shows what it
+        // actually did.
+        setAlgo(key, choice);
       }
       var row = (state.snapshot.pairs || {})[key];
-      if (row) {
-        if (choice !== 'ALGO') { row.algo_window = !!payload.algo_window; }
-        row.algo_on = choice === 'ALGO';
-        row.algo = choice;
+      if (row && choice !== 'ALGO' && choice !== 'ALGO_LIVE') {
+        row.algo_window = !!payload.algo_window;
       }
       (answer.notes || []).forEach(function (note) { toast(note); });
       if (!(answer.notes || []).length) { toast('applied to ' + key, 'ok'); }
@@ -1570,8 +1725,13 @@
       // One door for the window, so the pane and the window's own X
       // cannot disagree about whether it is open.
       var fairId = panelId('fair', key);
-      var wanted = choice !== 'NONE';
+      var algoChosen = choice === 'ALGO' || choice === 'ALGO_LIVE';
+      // The Algo opens its own window (render, on the next snapshot);
+      // this one is the fair spread's, and follows its own tick.
+      var wanted = algoChosen ? (state.open.indexOf(fairId) >= 0)
+        : !!payload.algo_window;
       if (wanted) { delete state.closed[fairId]; }
+      if (algoChosen) { delete state.closed[panelId('algo', key)]; }
       if (wanted !== (state.open.indexOf(fairId) >= 0)) {
         if (wanted) { openPanel(fairId); } else { closePanel(fairId); }
       } else {
@@ -1722,13 +1882,18 @@
     }
     node.classList.toggle('mode-market', row.order_type === 'MARKET');
     node.classList.toggle('inactive', state.active !== panelId('ladder', key));
+    // Algo LIVE: the ways IN are off and say why; the ways OUT stay.
+    var algoLive = algoTrades(row);
+    node.classList.toggle('algo-live', algoLive);
+    var lockNote = node.querySelector('.algo-lock');
+    if (lockNote) { lockNote.hidden = !algoLive; }
+    node.querySelectorAll('.buy-touch, .sell-touch, .keypad button, ' +
+                          '.qty-box').forEach(function (control) {
+      control.disabled = algoLive;
+    });
     node.querySelector('.title').textContent = row.name || key;
     node.querySelector('.route').textContent =
       (row.account_a || '?') + ' → ' + (row.account_b || '?');
-    // AutoRouting is armed on ONE ladder at a time and changes what a
-    // FILL does, so it is stated where the mode is stated — and where
-    // it is visible without opening anything. Ticking the box has to
-    // change the screen, or it reads as having done nothing.
     // Which leg rests the real pending, and which one crosses. Read
     // from the ENGINE's own groups where there is one working, and
     // from the pair's setting before that.
@@ -1774,24 +1939,11 @@
           + 'before that.';
     }
     var badge = node.querySelector('.mode-badge');
-    // The EFFECTIVE state, never the ladder's box alone: with the
-    // master switch off the box is ticked and nothing arms, and a
-    // badge reading AUTO there says a fill will rest a target when no
-    // fill will.
-    var autoOn = !!row.auto_route_on;
-    var autoHeld = !!row.auto_route && !autoOn;
-    badge.textContent = row.order_type + ' · ' + row.time_in_force
-      + (autoOn ? ' · AUTO' : (autoHeld ? ' · AUTO OFF' : ''));
-    badge.title = autoOn
-      ? 'AutoRouting is ON for this ladder: a fill rests a working '
-        + 'order to close at the take-profit. A target, and no stop.'
-      : (autoHeld
-          ? 'this ladder has AutoRouting ticked, but it is switched off '
-            + 'for the whole system (AUTO_ROUTE_ENABLED) — a fill arms '
-            + 'nothing'
-          : 'the mode a click sends, and how long a working order lives');
-    badge.classList.toggle('auto', autoOn);
-    badge.classList.toggle('auto-held', autoHeld);
+    // The ladder says whose it is: while the Algo is LIVE, a click here
+    // is refused, and the trader must be able to see why.
+    badge.textContent = row.order_type + ' · ' + row.time_in_force;
+    badge.title = 'the mode a click sends, and how long a working order lives';
+    renderAlgoSwitch(node, key, row);
 
     var change = market.net_change;
     var netchg = node.querySelector('.netchg');
@@ -1848,7 +2000,7 @@
     node.querySelectorAll('.keypad .qty').forEach(function (button) {
       var size = Number(button.dataset.qty);
       var beyond = cap !== null && button.dataset.qty && size > cap;
-      button.disabled = !!beyond;
+      button.disabled = !!beyond || algoTrades(row);
       button.title = beyond
         ? 'Qty ' + size + ' is over what this pair can trade — it tops '
           + 'out at ' + cap
@@ -2016,7 +2168,7 @@
     var state = block.state;
     if (state === 'SIGNAL') {
       var z = block.signal === 'SELL' ? block.z_sell : block.z_buy;
-      return (block.signal === 'SELL' ? 'SELL' : 'BUY') + ' signal  z ' +
+      return (block.signal === 'SELL' ? 'H to L' : 'L to H') + ' signal  z ' +
         signed(z);
     }
     if (state === 'EXIT') {
@@ -2055,18 +2207,10 @@
     return (position.side || '?') + ' @ ' + fmt(position.entry_spread, digits);
   }
 
-  function renderProgress(node, block, digits) {
-    /* SL <- entry -> TP, with the closing price on it. The Algo only,
-     * while a position is on, and only if the ladder has it turned on. */
-    var bar = node.querySelector('.algo-progress');
-    if (!bar) { return; }
-    var first = (block && (block.positions || [])[0]) || null;
-    var wanted = !!(block && block.algo === 'ALGO' && first &&
-                    (block.params || {}).progress_bar !== false);
-    bar.hidden = !wanted;
-    if (!wanted) { return; }
-    // The entry sits where the stop and the target put it: the two
-    // halves are drawn to their own scale, as the engine measures them.
+  function progressHtml(first, digits) {
+    /* SL <- entry -> TP, with the closing price on it. The two halves
+     * are drawn to their own scale, as the engine measures them: the
+     * stop and the target are rarely the same distance from the entry. */
     var entry = first.entry_spread;
     var toTp = first.tp === null || first.tp === undefined
       ? null : Math.abs(first.tp - entry);
@@ -2076,28 +2220,24 @@
     var p = first.progress;
     var at = (p === null || p === undefined) ? null
       : (p >= 0 ? split + p * (1 - split) : split + p * split);
-    var fill = bar.querySelector('.ap-fill');
-    var mark = bar.querySelector('.ap-mark');
-    bar.querySelector('.ap-entry').style.left = (split * 100) + '%';
-    if (at === null) {
-      fill.style.width = '0';
-      mark.hidden = true;
-    } else {
-      mark.hidden = false;
-      mark.style.left = 'calc(' + (at * 100) + '% - 1px)';
-      fill.className = 'ap-fill ' + (p >= 0 ? 'up' : 'down');
-      fill.style.left = (Math.min(at, split) * 100) + '%';
-      fill.style.width = (Math.abs(at - split) * 100) + '%';
-    }
-    bar.querySelector('.ap-sl').textContent =
-      toSl === null ? 'no SL' : 'SL ' + fmt(first.sl, digits);
-    bar.querySelector('.ap-tp').textContent =
-      toTp === null ? 'no TP' : 'TP ' + fmt(first.tp, digits);
-    bar.querySelector('.ap-pct').textContent = p === null || p === undefined
-      ? '—' : (p >= 0 ? Math.round(p * 100) + '% to TP'
-                      : Math.round(-p * 100) + '% to SL');
-    bar.title = positionWords(first, digits) + ', closing at ' +
-      fmt(first.closing_spread, digits) + ' — a signal only, nothing is sent';
+    var fill = at === null ? '' :
+      '<div class="ap-fill ' + (p >= 0 ? 'up' : 'down') + '" style="left:' +
+      (Math.min(at, split) * 100) + '%;width:' +
+      (Math.abs(at - split) * 100) + '%"></div>' +
+      '<div class="ap-mark" style="left:calc(' + (at * 100) +
+      '% - 1px)"></div>';
+    return '<div class="algo-progress" title="' + escapeHtml(positionWords(first,
+        digits) + ', closing at ' + fmt(first.closing_spread, digits)) + '">' +
+      '<div class="ap-pct">' + (p === null || p === undefined ? DASH
+        : (p >= 0 ? Math.round(p * 100) + '% to TP'
+                  : Math.round(-p * 100) + '% to SL')) + '</div>' +
+      '<div class="ap-track">' + fill +
+      '<div class="ap-entry" style="left:' + (split * 100) + '%"></div>' +
+      '</div><div class="ap-ends"><span>' +
+      (toSl === null ? 'no SL' : 'SL ' + fmt(first.sl, digits)) +
+      '</span><span>' +
+      (toTp === null ? 'no TP' : 'TP ' + fmt(first.tp, digits)) +
+      '</span></div></div>';
   }
 
   function signed(value) {
@@ -2106,115 +2246,419 @@
   }
 
   function renderAlgo(node, row) {
-    /* Which algo this ladder is running: FAIR SPREAD, ALGO, or none.
+    /* The Fair Spread window's one line about which reading it is.
      *
-     * It MEASURES: it does not place, modify or cancel an order, and a
-     * click on the ladder behaves identically either way.
-     *
-     * With the Algo on, the window keeps its shape and its slots — the
-     * two B/S rows carry z and the band instead of fair and gap — so
-     * nothing new appears on the screen. Returns true when it drew the
-     * Algo, so the fair reading is not drawn over it.
-     */
+     * The Algo has a window of its own now (renderAlgoWindow); this one
+     * is the carry's, and says so. Returns false: nothing here draws
+     * over the fair reading. */
     var block = row.algo_block || {};
-    var selected = block.algo || row.algo || 'NONE';
-    var isAlgo = selected === 'ALGO';
-    var fair = node.querySelector('.fair');
-    var label = fair && fair.querySelector('.rail-label');
-    if (label && label.firstChild && label.firstChild.nodeType === 3) {
-      label.firstChild.nodeValue = isAlgo ? 'Algo' : 'Fair spread';
-    }
-    var heads = fair ? fair.querySelectorAll('table.fairs tr > th') : [];
-    // [blank, B, S, Fair, Gap]: the two row labels are the 4th and 5th.
-    if (heads.length >= 5) {
-      heads[3].textContent = isAlgo ? 'z' : 'Fair';
-      heads[3].title = isAlgo ? 'z of the price each side trades at: '
-        + 'B at the offer, S at the bid' : '';
-      heads[4].textContent = isAlgo ? 'Band' : 'Gap';
-      heads[4].title = isAlgo ? 'where each side signals: B at or under the '
-        + 'lower band, S at or over the upper' : '';
-    }
     var kind = node.querySelector('.fair-kind');
-    var slRow = node.querySelector('.algo-sl-row');
-    if (slRow) {
-      slRow.hidden = !isAlgo;
+    if (!kind) { return false; }
+    kind.className = 'fair-kind hint';
+    kind.textContent = row.algo_window ? (block.kind_note ||
+      ((row.fair || {}).kind_note) || '') : '';
+    var stray = row.algo_unmanaged || [];
+    if (stray.length) {
+      // The Algo's own position with nobody managing it: after a
+      // restart, or once it went to dry run. Said until LIVE adopts it
+      // or a trader closes it.
+      kind.textContent = stray.length + ' Algo position(s) not managed — '
+        + 'Algo LIVE adopts them, or close by hand';
     }
-    renderProgress(node, isAlgo ? block : null, digitsFor(row.increment));
-    if (!isAlgo) {
-      if (kind) {
-        // Which arithmetic this pair gets — spot against a future, a
-        // calendar, or two instruments with no carry between them.
-        kind.textContent = selected === 'FAIR_SPREAD'
-          ? (block.kind_note || '') : '';
-        kind.className = 'fair-kind hint';
-      }
-      return false;
-    }
-    if (fair) {
-      fair.title = 'Algo: Bollinger bands on the spread. A signal only — '
-        + 'nothing here is sent to the broker, and clicks are unaffected.';
-    }
-    var digits = digitsFor(row.increment);
-    var entry = (block.params || {}).entry_z;
-    var hits = {
-      buy: block.z_buy !== null && block.z_buy !== undefined && entry
-        && block.z_buy <= -entry,
-      sell: block.z_sell !== null && block.z_sell !== undefined && entry
-        && block.z_sell >= entry
-    };
-    ['buy', 'sell'].forEach(function (side) {
-      var cell = node.querySelector('.fair-' + side);
-      if (!cell) { return; }
-      cell.textContent = signed(block['z_' + side]);
-      cell.className = 'fair-' + side + (hits[side]
-        ? (side === 'buy' ? ' up' : ' down') : '');
-      var band = node.querySelector('.gap-' + side);
-      if (band) {
-        band.textContent = fmt(side === 'buy' ? block.lower : block.upper,
-                               digits);
-        band.className = 'gap-' + side;
-        band.title = side === 'buy'
-          ? 'BUY signals when the offer-side spread is at or under this'
-          : 'SELL signals when the bid-side spread is at or over this';
-      }
+    return false;
+  }
+
+  // -- the Algo window ----------------------------------------------------
+
+  function algoNode(key) {
+    /* One ladder's Algo, in a window of its own while it is on. */
+    var existing = document.querySelector(
+      '.algowin[data-pair="' + cssEscape(key) + '"]');
+    if (existing) { return existing; }
+    var node = el('algo-template').content.firstElementChild.cloneNode(true);
+    node.dataset.pair = key;
+    node.querySelector('.close').addEventListener('click', function () {
+      // The window IS the Algo's display. Closed, the Algo goes off with
+      // it — a signal nobody can see is a signal nobody watches. LIVE
+      // holding a position asks first what to do with it, and the
+      // window stays until the engine says the Algo is off.
+      var row = (state.snapshot.pairs || {})[key] || {};
+      setAlgo(key, row.algo_window ? 'FAIR_SPREAD' : 'NONE');
     });
-    if (slRow) {
-      slRow.querySelector('.sl-buy').textContent = fmt(block.sl_buy, digits);
-      slRow.querySelector('.sl-sell').textContent = fmt(block.sl_sell,
-                                                        digits);
-      slRow.title = (block.params || {}).stop_loss_on
-        ? 'stop loss for a new entry: break-even less '
-          + (block.params || {}).stop_loss_pct + '% of margin'
-        : 'stop loss off for this ladder';
+    node.querySelector('.aw-cog').addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var ladder = document.querySelector(
+        '.ladder[data-pair="' + cssEscape(key) + '"]');
+      if (ladder) { openLadderSettings(ladder, key); }
+      else { toast('open the ' + key + ' ladder to reach its settings'); }
+    });
+    node.querySelector('.aw-bt-run').addEventListener('click', function (e) {
+      e.preventDefault();
+      runBacktest(node, key,
+                  parseInt(node.querySelector('.aw-bt-days').value, 10) || 5);
+    });
+    el('desktop').appendChild(node);
+    return node;
+  }
+
+  function runBacktest(node, key, days) {
+    /* Replay MT5's history through this ladder's Algo, on the engine.
+     * A few seconds, not a click's fraction of one: it is polled for
+     * longer than an order is, and says it is running meanwhile. */
+    var out = node.querySelector('.aw-bt-out');
+    var button = node.querySelector('.aw-bt-run');
+    out.className = 'aw-bt-out hint';
+    out.textContent = 'running on the last ' + days + ' days\u2026';
+    button.disabled = true;
+    function done(html, cls) {
+      button.disabled = false;
+      out.className = 'aw-bt-out' + (cls ? ' ' + cls : '');
+      out.innerHTML = html;
     }
-    if (kind) {
-      // A price that cannot be trusted is said on this one line, in the
-      // window's own size — it does not shout over the reading.
-      var line = algoLine(block, digits);
-      if (block.health && block.state !== 'BLOCKED') {
-        line += ' — ' + block.health;
+    fetch('/api/command', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({kind: 'algo_backtest',
+                            payload: {pair: key, days: days}})
+    }).then(function (r) { return r.json(); }).then(function (sent) {
+      if (!sent.ok) { return done(escapeHtml(sent.error || 'refused'), 'down'); }
+      var tries = 0;
+      (function poll() {
+        fetch('/api/result/' + sent.id).then(function (r) { return r.json(); })
+          .then(function (result) {
+            if (result && result.pending) {
+              if (++tries > 120) {
+                return done('no answer from the engine yet \u2014 try again',
+                            'down');
+              }
+              return window.setTimeout(poll, 250);
+            }
+            var data = (result && result.data) || {};
+            if (!result || result.ok === false || data.ok === false) {
+              return done('could not run: ' + escapeHtml(
+                (result && result.error) || data.reason || 'unknown'), 'down');
+            }
+            done(backtestHtml(data));
+          });
+      })();
+    }).catch(function (error) { done(escapeHtml(error.message), 'down'); });
+  }
+
+  function backtestHtml(data) {
+    var s = data.summary || {};
+    var plain = data.without_protections || {};
+    function line(sum) {
+      return (sum.trades || 0) + ' trade(s) \u00b7 ' + (sum.wins || 0) +
+        ' won, ' + (sum.losses || 0) + ' lost \u00b7 net ' + moneyOr(sum.net) +
+        ' \u00b7 worst run ' + moneyOr(sum.max_drawdown);
+    }
+    function when(at) {
+      return at ? new Date(at * 1000).toLocaleString([], {
+        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'})
+        : DASH;
+    }
+    var held = Object.keys(data.held || {}).map(function (reason) {
+      return [reason, data.held[reason]];
+    }).sort(function (a, b) { return b[1] - a[1]; }).slice(0, 3);
+    var rows = (data.trades || []).slice(-8).reverse().map(function (t) {
+      return '<tr><td>' + when(t.opened_at) + '</td><td>' +
+        sideWords(t.side) + '</td><td>' + signed(t.entry_z) + '</td><td>' +
+        escapeHtml(algoExitWords(t.reason)) + '</td><td class="' +
+        (t.pnl > 0 ? 'up' : (t.pnl < 0 ? 'down' : '')) + '">' +
+        moneyOr(t.pnl) + '</td></tr>';
+    }).join('');
+    return '<div><b>These settings:</b> ' + line(s) + '</div>' +
+      '<div class="hint">Without re-entry and the trend filter: ' +
+      line(plain) + '</div>' +
+      (held.length ? '<div class="hint">Held back most by: ' + held.map(
+        function (h) { return escapeHtml(h[0]) + ' (' + h[1] + ')'; })
+        .join('; ') + '</div>' : '') +
+      (rows ? '<table class="aw-bt-trades"><tr><th>Entered</th><th>Side' +
+        '</th><th>z</th><th>Exit</th><th>P&amp;L</th></tr>' + rows +
+        '</table>' : '') +
+      '<div class="hint" title="' + escapeHtml((data.caveats || []).join('; ')) +
+      '">' + (s.candles || 0) + ' candles of MT5 history, ' + when(s.from) +
+      ' \u2013 ' + when(s.to) + ' \u00b7 hover for what a backtest cannot see' +
+      '</div>';
+  }
+
+  function algoExitWords(reason) {
+    return {STOP_LOSS: 'stop loss', PROFIT_TARGET: 'target',
+            Z_STOP: 'z-stop', MEAN_REVERSION: 'mean', TIME_STOP: 'time stop'
+           }[reason] || reason || '';
+  }
+
+  function moneyOr(value) {
+    return value === null || value === undefined ? DASH : money(value);
+  }
+
+  function kv(label, value, cls, title, wide) {
+    return '<div class="aw-kv' + (wide ? ' wide' : '') + '"' +
+      (title ? ' title="' + escapeHtml(title) + '"' : '')
+      + '><span>' + label + '</span><b' + (cls ? ' class="' + cls + '"' : '')
+      + '>' + value + '</b></div>';
+  }
+
+  function badge(text, tone, title) {
+    return '<span class="aw-badge ' + tone + '"' +
+      (title ? ' title="' + escapeHtml(title) + '"' : '') + '>' + text + '</span>';
+  }
+
+  function renderAlgoWindow(key, row) {
+    /* SIGNAL & POSITION, STATISTICS, FILTERS — the stat-arb dashboard's
+     * three panels, for one ladder, from the engine's Algo block. */
+    var node = algoNode(key);
+    var block = row.algo_block || {};
+    var params = block.params || {};
+    var filters = block.filters || {};
+    var digits = digitsFor(row.increment);
+    var live = block.mode === 'LIVE';
+    node.querySelector('.aw-pair').textContent = (row.name || key) + ' · Algo';
+    var mode = node.querySelector('.aw-mode');
+    mode.textContent = live ? 'LIVE' : 'DRY RUN';
+    mode.className = 'aw-mode ' + (live ? 'live' : 'dry');
+    mode.title = live
+      ? 'the Algo TRADES this ladder — manual orders on it are off'
+      : 'signals only — nothing is sent';
+    var market = row.market || {};
+    var entryZ = params.entry_z;
+
+    // -- SIGNAL & POSITION ------------------------------------------------
+    var direction = params.direction || 'BOTH';
+    function tile(side) {
+      var sell = side === 'SELL';
+      var z = sell ? block.z_sell : block.z_buy;
+      var hit = z !== null && z !== undefined && entryZ &&
+        (sell ? z >= entryZ : z <= -entryZ);
+      // This ladder may be set to enter one way only. The other tile is
+      // still drawn — it is how the spread is read — but it says so.
+      var off = (sell && direction === 'L_TO_H') ||
+        (!sell && direction === 'H_TO_L');
+      return '<div class="aw-tile ' + (sell ? 'sell' : 'buy') +
+        (hit ? ' hit' : '') + (off ? ' off' : '') + '" title="' + (sell
+          ? 'What SELLING the spread gets now (the bid side). The Algo '
+            + 'sells when this z reaches +' + entryZ + ', and closes a long here.'
+          : 'What BUYING the spread costs now (the offer side). The Algo '
+            + 'buys when this z reaches \u2212' + entryZ + ', and closes a short here.')
+        + '"><div class="aw-tile-head">' + (sell ? 'H to L' : 'L to H') +
+        (off ? ' <small>(entries off)</small>' : '') +
+        '</div><div class="aw-tile-price">' +
+        fmt(sell ? market.short_spread : market.long_spread, digits) +
+        '</div><div class="aw-tile-z" title="How stretched the spread is: ' +
+        'entry at \u00b1' + (entryZ || '?') + '">' + signed(z) + '</div>' +
+        entryLine(sell) + '</div>';
+    }
+    function entryLine(sell) {
+      /* Where this side enters. On the TOUCH of the band; or — with
+       * re-entry — armed at the band and entered on the way back in,
+       * which a spread riding the band in a trend never gives. */
+      if (!params.reentry_on) {
+        return '<div class="aw-tile-entry">' + (sell ? 'short' : 'long') +
+          ' at ' + (sell ? '\u2265 +' : '\u2264 \u2212') + (entryZ || '?') +
+          ' (' + fmt(sell ? block.upper : block.lower, digits) + ')</div>';
       }
-      kind.textContent = line;
-      kind.className = 'fair-kind hint';
-      kind.title = block.blocked || block.health || '';
+      var inZ = Math.max(0, (entryZ || 0) - (params.reentry_back || 0));
+      var level = (block.mean === null || block.mean === undefined ||
+                   !block.sigma) ? null
+        : block.mean + (sell ? 1 : -1) * inZ * block.sigma;
+      var armed = (block.armed || {})[sell ? 'SELL' : 'BUY'];
+      return '<div class="aw-tile-entry" title="Armed when the stretch ' +
+        'reaches ' + (sell ? '+' : '\u2212') + entryZ + '; entered on the ' +
+        'way back in, at ' + (sell ? '+' : '\u2212') + inZ.toFixed(2) +
+        '. Lost if the spread reaches the mean first.">' +
+        (armed ? '<b class="aw-armed">ARMED</b> ' : 'arm ' +
+         (sell ? '\u2265 +' : '\u2264 \u2212') + entryZ + ' \u00b7 ') +
+        (sell ? 'short' : 'long') + ' back at ' + (sell ? '+' : '\u2212') +
+        inZ.toFixed(2) + ' (' + fmt(level, digits) + ')</div>';
     }
-    var note = node.querySelector('.fair-note');
-    if (note) {
-      var history = block.history || {};
-      note.textContent = block.ready
-        ? 'EMA ' + fmt(block.mean, digits) + ' σ ' + fmt(block.sigma, digits)
-          + ' · ' + (block.timeframe_min || '?') + 'm×' + (block.length || '?')
-        : 'candles ' + (block.count || 0) + '/' + (block.needed || '?');
-      note.title = (history.note || '') +
-        ' — dry run: signals are recorded, nothing is sent.';
+    var held = block.positions || [];
+    var first = held[0] || null;
+    var position = first
+      ? (first.side === 'BUY' ? 'LONG' : 'SHORT') + ' ' +
+        fmt(first.quantity || 1, 2) : 'FLAT';
+    var html = '<div class="aw-head">Signal &amp; Position</div>' +
+      '<div class="aw-tiles">' + tile('SELL') + tile('BUY') +
+      '<div class="aw-pos ' + (first ? (first.side === 'BUY' ? 'long' : 'short')
+        : 'flat') + '">' + position + '</div></div>' +
+      '<div class="aw-line" title="' + escapeHtml(block.blocked || '') + '">' +
+      escapeHtml(algoLine(block, digits)) +
+      (block.health && block.state !== 'BLOCKED' ? ' — ' + escapeHtml(block.health)
+        : '') + '</div>';
+    if (first) {
+      var delta = (first.closing_spread === null ||
+                   first.closing_spread === undefined ||
+                   first.entry_spread === null)
+        ? null : first.closing_spread - first.entry_spread;
+      var good = delta === null ? '' :
+        ((first.side === 'BUY' ? delta >= 0 : delta <= 0) ? 'up' : 'down');
+      function legRow(leg) {
+        var entry = first['leg_' + leg + '_entry'];
+        var now = first['leg_' + leg + '_now'];
+        var change = (entry === null || entry === undefined ||
+                      now === null || now === undefined) ? null : now - entry;
+        return kv('Leg ' + leg.toUpperCase() + ' (' +
+                  (first['leg_' + leg + '_side'] || '?') + ')',
+                  fmt(entry, 2) + ' \u2192 ' + fmt(now, 2) +
+                  (change === null ? '' : ' <small>(' +
+                    (change > 0 ? '+' : '') + fmt(change, 2) + ')</small>'),
+                  '', 'the leg\u2019s fill \u2192 the price it would close at now',
+                  true);
+      }
+      html += '<div class="aw-grid">' +
+        kv('Entry spread', fmt(first.entry_spread, digits)) +
+        kv('\u0394 spread', delta === null ? DASH
+          : (delta > 0 ? '+' : '') + fmt(delta, digits), good,
+          'closing price now \u2212 entry: a LONG makes money when this is '
+          + 'positive, a SHORT when it is negative') +
+        kv('Entry z', signed(first.entry_z)) +
+        kv('Net P&amp;L', moneyOr(first.net_pnl),
+           first.net_pnl === null || first.net_pnl === undefined ? ''
+             : (first.net_pnl >= 0 ? 'up' : 'down')) +
+        legRow('a') + legRow('b') +
+        kv('Age', first.age_sec === null || first.age_sec === undefined ? DASH
+          : Math.floor(first.age_sec / 60) + 'm ' +
+            Math.floor(first.age_sec % 60) + 's') +
+        kv('Size', fmt(first.quantity || 1, 2) + ' spread(s)') +
+        '</div>' +
+        kv('Levels', 'BE ' + fmt(first.break_even, digits) + ' · TP ' +
+           fmt(first.tp, digits) + ' · SL ' +
+           (first.sl === null || first.sl === undefined
+             ? (params.stop_loss_on ? DASH : 'off') : fmt(first.sl, digits)),
+           '', 'compare with the CLOSING price: the Sell spread for a LONG, '
+           + 'the Buy spread for a SHORT') +
+        (params.progress_bar === false ? '' : progressHtml(first, digits));
     }
-    var warn = node.querySelector('.fair-warn');
-    if (warn) {
-      // The carry's warning box belongs to the fair spread. The Algo
-      // says its own trouble on its state line instead.
-      warn.hidden = true;
+    node.querySelector('.aw-signal').innerHTML = html;
+
+    // -- STATISTICS ---------------------------------------------------------
+    var history = block.history || {};
+    var regime = filters.regime || {};
+    var count = block.count || 0;
+    var needed = block.needed || params.length || 0;
+    var pct = needed ? Math.min(100, Math.round(count * 100 / needed)) : 0;
+    var regimeText = regime.state === 'TRENDING'
+      ? 'Trend ' + ((regime.slope || 0) > 0 ? '\u2191' : '\u2193')
+      : regime.state === 'RANGE' ? 'Mean-rev'
+        : regime.state === 'COLLECTING' ? 'Collect' : DASH;
+    node.querySelector('.aw-stats').innerHTML =
+      '<div class="aw-head">Statistics</div><div class="aw-grid">' +
+      kv('Mean (EMA)', fmt(block.mean, digits)) +
+      kv('Std dev', fmt(block.sigma, digits)) +
+      kv('Half-life', filters.half_life_minutes === null ||
+         filters.half_life_minutes === undefined ? DASH
+         : Math.round(filters.half_life_minutes) + ' min', '',
+         'how long a stretch takes to halve, from the candles (AR(1))') +
+      kv('Regime', regimeText, regime.state === 'TRENDING' ? 'down'
+         : (regime.state === 'RANGE' ? 'up' : ''),
+         regime.efficiency_ratio === null || regime.efficiency_ratio === undefined
+           ? '' : 'efficiency ' + regime.efficiency_ratio.toFixed(2) + ', ' +
+             regime.crossings + ' mean crossings') +
+      kv('Candles', (block.timeframe_min || params.timeframe_min) + 'm \u00d7 ' +
+         needed) +
+      kv('Band', fmt(block.lower, digits) + ' \u2026 ' + fmt(block.upper, digits)) +
+      '</div><div class="aw-data" title="' + escapeHtml(history.note || '') + '">' +
+      '<span>Data</span><div class="aw-bar"><div class="' +
+      (block.ready ? 'ok' : 'wait') + '" style="width:' +
+      (block.ready ? 100 : pct) + '%"></div></div><span>' +
+      (block.ready ? 'candles ready' : count + '/' + needed + ' candles') +
+      '</span></div>' + warmupHtml(block.warmup);
+
+    // -- FILTERS -----------------------------------------------------------
+    var edge = filters.edge || {};
+    var cost = filters.cost || {};
+    var band = filters.half_life_band || [0, 0];
+    function onOff(on, ok, yes, no, why) {
+      if (!on) { return badge('OFF', 'off', why); }
+      if (ok === null || ok === undefined) { return badge('\u2014', 'wait', why); }
+      return badge(ok ? yes : no, ok ? 'ok' : 'bad', why);
     }
-    return true;
+    var trending = regime.state === 'TRENDING';
+    var day = block.day || {};
+    var last = block.last_blocked;
+    node.querySelector('.aw-filters').innerHTML =
+      '<div class="aw-head">Filters</div><div class="aw-badges">' +
+      '<div>' + onOff(edge.on, edge.ok, '\u2713', '\u2717',
+        'expected capture against the round-trip cost, at the entry z') +
+      '<small>Edge</small></div>' +
+      '<div>' + (regime.on ? badge(trending ? 'TR' : (regime.state === 'RANGE'
+          ? 'MR' : 'WAIT'), trending ? 'bad' : (regime.state === 'RANGE'
+          ? 'ok' : 'wait')) : badge('OFF', 'off')) +
+      '<small>Regime</small></div>' +
+      '<div>' + trendBadge(filters.trend || {}) + '<small>Trend</small></div>' +
+      '<div>' + badge(filters.ready ? 'YES' : 'NO', filters.ready ? 'ok' : 'wait')
+      + '<small>Ready</small></div>' +
+      ((band[0] || band[1]) ? '<div>' + badge(
+        Math.round(band[0] || 0) + '\u2013' + (band[1] ? Math.round(band[1]) : '\u221e'),
+        'off') + '<small>HL min</small></div>' : '') +
+      '</div><div class="aw-grid">' +
+      kv('Capture / cost', (edge.ratio === null || edge.ratio === undefined
+          ? DASH : edge.ratio.toFixed(2) + '\u00d7') + ' / req ' +
+          (edge.required === undefined ? DASH : edge.required + '\u00d7'),
+         edge.ok === true ? 'up' : (edge.ok === false ? 'down' : ''),
+         'expected capture ' + moneyOr(edge.capture) +
+         ' (' + (params.edge_capture_frac || 0.5) + ' \u00d7 entry z \u00d7 '
+         + '\u03c3) against the round trip, at the entry z', true) +
+      kv('Round trip', moneyOr(cost.total), '',
+         'crossing ' + moneyOr(cost.crossing) + ' + commission ' +
+         moneyOr(cost.commission) + ' + slippage ' + moneyOr(cost.slippage)) +
+      kv('Today', (day.trades || 0) + (params.max_trades_day
+          ? '/' + params.max_trades_day : '') + ' trades · ' +
+          (day.losses_row || 0) + ' in a row · ' + moneyOr(day.pnl),
+         '', 'the day\u2019s limits stop entries, never exits', true) +
+      kv('Size', fmt(filters.qty || params.algo_qty || 1, 2) + ' spread(s)') +
+      '</div><div class="aw-blocked"><div class="aw-head2">Last signal blocked'
+      + '</div>' + (last
+        ? '<div><b>' + escapeHtml(sideWords(last.side)) + '</b> z ' +
+          signed(last.z) + ' · ' +
+          new Date(last.at * 1000).toLocaleTimeString() + '</div><div>' +
+          escapeHtml(last.reason || '') + '</div>'
+        : '<div class="hint">none yet</div>') + '</div>' +
+      lastOrderHtml(block);
+  }
+
+  function trendBadge(trend) {
+    /* Which way the band's middle has moved over the lookback: up
+     * blocks H to L, down blocks L to H, flat blocks neither. */
+    if (!trend.on) { return badge('OFF', 'off'); }
+    var drift = trend.drift_sigma;
+    var why = drift === null || drift === undefined
+      ? 'not enough candles to measure the trend yet'
+      : 'the middle moved ' + (drift >= 0 ? '+' : '') + drift.toFixed(2) +
+        '\u03c3 in ' + trend.lookback_min + ' min (limit ' + trend.limit +
+        '\u03c3)';
+    if (trend.state === 'UP') { return badge('\u2191', 'bad', why + ' \u2014 no H to L'); }
+    if (trend.state === 'DOWN') { return badge('\u2193', 'bad', why + ' \u2014 no L to H'); }
+    if (trend.state === 'FLAT') { return badge('\u2013', 'ok', why); }
+    return badge('WAIT', 'wait', why);
+  }
+
+  function sideWords(side) {
+    return side === 'SELL' ? 'H to L' : (side === 'BUY' ? 'L to H' : side);
+  }
+
+  function lastOrderHtml(block) {
+    /* What the Algo last DID, and what became of it. A refused order
+     * used to leave no trace on the screen at all — "Last signal
+     * blocked: none yet" over an Algo that had tried, and been refused,
+     * every time. The refusal is shown in its own words. */
+    var last = (block.recent || [])[0];
+    var html = '<div class="aw-blocked aw-last-order"><div class="aw-head2">'
+      + 'Last order</div>';
+    if (!last) { return html + '<div class="hint">none yet</div></div>'; }
+    var what = escapeHtml(last.action || '') + ' ' +
+      escapeHtml(sideWords(last.side)) +
+      (last.z === null || last.z === undefined ? '' : ' z ' + signed(last.z)) +
+      ' · ' + new Date(last.at * 1000).toLocaleTimeString();
+    var outcome;
+    if (last.mode !== 'LIVE') {
+      outcome = '<div class="hint">dry run — nothing sent</div>';
+    } else if (last.done) {
+      outcome = '<div class="up">sent — done</div>';
+    } else {
+      outcome = '<div class="down">REFUSED — ' +
+        escapeHtml(last.result || 'no reason given') + '</div>';
+    }
+    return html + '<div><b>' + what + '</b></div>' + outcome + '</div>';
   }
 
   function renderFair(node, row, algoShown) {
@@ -2256,7 +2700,7 @@
     node.querySelectorAll('.keypad .qty').forEach(function (button) {
       var size = Number(button.dataset.qty);
       var beyond = cap !== null && button.dataset.qty && size > cap;
-      button.disabled = !!beyond;
+      button.disabled = !!beyond || algoTrades(row);
       button.title = beyond
         ? 'Qty ' + size + ' is over what this pair can trade — it tops '
           + 'out at ' + cap
@@ -2318,26 +2762,6 @@
       overnight.textContent = OVERNIGHT_WORDS[row.overnight] || row.overnight;
       overnight.title = 'what happens to an OPEN POSITION at the session '
         + 'cutoff — change it in this ladder\u2019s settings';
-    }
-    var armed = node.querySelector('.auto-route-state');
-    if (armed) {
-      // What is ACTUALLY resting, not what the switch says. A target
-      // believed to be armed when it is not is the worse failure — and
-      // it is the reason a re-arm after a restart is announced rather
-      // than done quietly.
-      var orders = row.auto_route_armed || [];
-      armed.textContent = orders.length
-        ? 'out ' + fmt(orders[0].level, digitsFor(row.increment))
-        : (row.auto_route_on ? 'on' : 'off');
-      armed.className = 'auto-route-state' + (orders.length ? ' armed' : '');
-      armed.title = orders.length
-        ? 'a working order is resting to close this position — a target, '
-          + 'and no stop'
-        : (row.auto_route_on
-            ? 'on: the next fill arms a target at the take-profit'
-            : (row.auto_route
-                ? 'off: AutoRouting is switched off for the whole system'
-                : 'off'));
     }
     renderExit(node, row);
   }
@@ -4180,14 +4604,29 @@
       // says, because a window that vanishes when the engine hiccups
       // is a window the trader cannot rely on.
       var fairId = panelId('fair', key);
-      if ((snapshot.pairs[key].algo_window || snapshot.pairs[key].algo_on)
-          && !state.closed[fairId]
+      if (snapshot.pairs[key].algo_window && !state.closed[fairId]
           && state.open.indexOf(fairId) < 0) {
         state.open.push(fairId);
       }
       if (state.open.indexOf(fairId) >= 0) {
         wanted[fairId] = true;
         renderFairWindow(key, snapshot.pairs[key]);
+      }
+      // The Algo's window: open while the Algo is on, gone when it is
+      // off. Turned on, it opens even if it was closed before — turning
+      // it on IS asking to see it.
+      var algoId = panelId('algo', key);
+      if (snapshot.pairs[key].algo_on) {
+        if (state.open.indexOf(algoId) < 0 && !state.closed[algoId]) {
+          state.open.push(algoId);
+        }
+      } else {
+        delete state.closed[algoId];
+        state.open = state.open.filter(function (id) { return id !== algoId; });
+      }
+      if (state.open.indexOf(algoId) >= 0) {
+        wanted[algoId] = true;
+        renderAlgoWindow(key, snapshot.pairs[key]);
       }
     });
     if (wanted[panelId('grid')]) { renderGrid(); }
@@ -4343,11 +4782,13 @@
     var html = '';
     state.open.forEach(function (id) {
       var parts = id.split(':');
-      var label = parts[0] === 'ladder'
-        ? ((state.snapshot.pairs[parts.slice(1).join(':')] || {}).name ||
-           parts.slice(1).join(':'))
-        : parts[0] === 'grid' ? 'Market Grid'
-          : parts[0] === 'settings' ? 'Exchanges' : 'Positions';
+      var pairName = (state.snapshot.pairs[parts.slice(1).join(':')] || {}).name
+        || parts.slice(1).join(':');
+      var label = parts[0] === 'ladder' ? pairName
+        : parts[0] === 'algo' ? pairName + ' · Algo'
+          : parts[0] === 'fair' ? pairName + ' · Fair'
+            : parts[0] === 'grid' ? 'Market Grid'
+              : parts[0] === 'settings' ? 'Exchanges' : 'Positions';
       var badge = '';
       if (parts[0] === 'ladder') {
         var row = state.snapshot.pairs[parts.slice(1).join(':')] || {};
@@ -4663,6 +5104,13 @@
       el('help-overlay').classList.add('hidden');
     });
     el('modal-cancel').addEventListener('click', closeModal);
+    if (el('modal-alt')) {
+      el('modal-alt').addEventListener('click', function () {
+        var handler = el('modal')._onAlt;
+        closeModal();
+        if (handler) { handler(); }
+      });
+    }
     el('modal-confirm').addEventListener('click', function () {
       var handler = el('modal')._onConfirm;
       closeModal();
@@ -4720,7 +5168,7 @@
     panelId: panelId, openPanel: openPanel, closePanel: closePanel,
     fmt: fmt, money: money, DASH: DASH,
     tidyWindows: tidyWindows, sound: sound,
-    showFairWindow: showFairWindow,
+    showFairWindow: showFairWindow, setAlgo: setAlgo,
     toastOutcome: toastOutcome
   };
 })();

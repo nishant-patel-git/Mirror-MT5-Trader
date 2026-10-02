@@ -1033,16 +1033,14 @@ class Quoter:
         return (group.pair_key, group.side.value, round(group.level, 10),
                 group.position_id)
 
-    def arm(self, pair, position, level, quantity=None, auto=True):
-        """Rest a working order to CLOSE `position` at `level`.
+    def arm(self, pair, position, level, quantity=None, auto=False):
+        """Rest a working order to CLOSE `position` at `level` — the
+        trader's own, from a reducing click or Close @ Limit.
 
-        This is what AutoRouting does on a fill, and it is not a
-        strategy: it places the exit order the trader would otherwise
-        place by hand, at a level derived from settings they typed. No
-        signal, no re-entry, no loop.
-
-        It arms a TARGET and NO STOP — the position runs until the
-        target, the overnight rule, or the trader.
+        `auto` marks an order as automation's. Nothing arms one any more
+        (AutoRouting has been removed); the mark is kept so a target it
+        armed before the upgrade can still be told apart from the
+        trader's and pulled on its own.
         """
         if level is None:
             return None
