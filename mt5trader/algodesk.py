@@ -340,6 +340,9 @@ class AlgoDesk:
             logging.error('could not read the warm-up: %s', e)
             return
         if saved is None:
+            # Said, not silent: a missing line read as a missing feature.
+            logging.info('[ALGO %s] warm-up starts: nothing saved from '
+                         'before', pair.key)
             return
         live_sec, at = saved
         gap = self.clock() - at
