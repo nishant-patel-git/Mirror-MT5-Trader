@@ -2054,6 +2054,8 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
 .window.algowin .aw-blocked {
   margin-top: 4px; padding: 3px 4px; background: #f3f3f3; border-radius: 3px;
 }
+.window.algowin .aw-last-order .up { color: #2e9e4f; font-weight: 600; }
+.window.algowin .aw-last-order .down { color: #c0392b; font-weight: 600; }
 
 /* SL <- entry -> TP: the stop on the left, the target on the right, the
  * entry marked and the closing price a tick on it. */

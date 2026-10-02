@@ -5202,7 +5202,7 @@ def test_a_blocked_signal_names_the_filter_that_held_it(page):
         page.wait_for_function(
             "() => (document.querySelector('.window.algowin .aw-blocked')"
             " || {textContent: ''}).textContent.includes('edge filter')", timeout=WAIT)
-        assert 'SELL' in page.text_content('.window.algowin .aw-blocked')
+        assert 'H to L' in page.text_content('.window.algowin .aw-blocked')
         assert page.locator('.window.algowin .aw-badge.bad').count() >= 1
     finally:
         publisher.algo = 'NONE'

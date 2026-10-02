@@ -1086,8 +1086,16 @@ class Coordinator:
         # The day the Algo's limits are counted over: the broker's, as
         # the session is; this machine's while that is unmeasured.
         day = (now or datetime.now()).date().isoformat()
+        # The Algo's OWN size, sized exactly as its order would be. A
+        # size under either leg's minimum used to be found only when the
+        # order was sent — refused inside the program, every time, with
+        # nothing on the screen but an Algo that never traded.
+        size = None
+        if md is not None:
+            qty = algo_module.clean_params(pair.algo_params)['algo_qty']
+            size = (self.executor.size(pair, md, qty) or {}).get('reason')
         return {'health': health, 'cutoff_min': cutoff_min, 'day': day,
-                'cost': self._algo_cost(pair)}
+                'cost': self._algo_cost(pair), 'size': size}
 
     def _algo_cost(self, pair):
         """What one Algo trade costs besides the crossing, and `k`.

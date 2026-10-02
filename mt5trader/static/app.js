@@ -2490,10 +2490,41 @@
       kv('Size', fmt(filters.qty || params.algo_qty || 1, 2) + ' spread(s)') +
       '</div><div class="aw-blocked"><div class="aw-head2">Last signal blocked'
       + '</div>' + (last
-        ? '<div><b>' + escapeHtml(last.side) + '</b> z ' + signed(last.z) + ' · ' +
+        ? '<div><b>' + escapeHtml(sideWords(last.side)) + '</b> z ' +
+          signed(last.z) + ' · ' +
           new Date(last.at * 1000).toLocaleTimeString() + '</div><div>' +
           escapeHtml(last.reason || '') + '</div>'
-        : '<div class="hint">none yet</div>') + '</div>';
+        : '<div class="hint">none yet</div>') + '</div>' +
+      lastOrderHtml(block);
+  }
+
+  function sideWords(side) {
+    return side === 'SELL' ? 'H to L' : (side === 'BUY' ? 'L to H' : side);
+  }
+
+  function lastOrderHtml(block) {
+    /* What the Algo last DID, and what became of it. A refused order
+     * used to leave no trace on the screen at all — "Last signal
+     * blocked: none yet" over an Algo that had tried, and been refused,
+     * every time. The refusal is shown in its own words. */
+    var last = (block.recent || [])[0];
+    var html = '<div class="aw-blocked aw-last-order"><div class="aw-head2">'
+      + 'Last order</div>';
+    if (!last) { return html + '<div class="hint">none yet</div></div>'; }
+    var what = escapeHtml(last.action || '') + ' ' +
+      escapeHtml(sideWords(last.side)) +
+      (last.z === null || last.z === undefined ? '' : ' z ' + signed(last.z)) +
+      ' · ' + new Date(last.at * 1000).toLocaleTimeString();
+    var outcome;
+    if (last.mode !== 'LIVE') {
+      outcome = '<div class="hint">dry run — nothing sent</div>';
+    } else if (last.done) {
+      outcome = '<div class="up">sent — done</div>';
+    } else {
+      outcome = '<div class="down">REFUSED — ' +
+        escapeHtml(last.result || 'no reason given') + '</div>';
+    }
+    return html + '<div><b>' + what + '</b></div>' + outcome + '</div>';
   }
 
   function renderFair(node, row, algoShown) {

@@ -474,6 +474,10 @@ class AlgoSignal:
             return 'no price on one leg'
         if gates.get('health'):
             return gates['health']
+        if gates.get('size'):
+            # The Algo qty cannot be traded at all: say so all the time,
+            # not only at the moment an order would have been refused.
+            return 'Algo qty: ' + gates['size']
         if gates.get('halt'):
             # A day's limit: the trades, the loss, the losing run.
             return gates['halt']

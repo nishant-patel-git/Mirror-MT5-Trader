@@ -367,6 +367,26 @@ python run_leg.py --config config.json --account leg_b
 python run_coordinator.py --config config.json
 ```
 
+## Logs, and "why did the Algo not trade?"
+
+Every process writes to `logs/` beside `config.json`: `coordinator.log`,
+`web.log`, `leg-<account>.log`, `launcher.log`. Each also has a
+**`<name>.problems.log`** with warnings and errors only — open that one
+first. The screen's own polling is not logged (it was a line three times a
+second); button presses and failed requests still are.
+
+For the Algo, the journal answers it directly:
+
+```
+python tools/algo_report.py              # the last 24 hours
+python tools/algo_report.py --hours 72
+```
+
+Per ladder: when it was switched, every signal it acted on and what became
+of the order (done, or refused in the refusal's own words), and every
+signal it held back with a count per reason — the cutoff, the warm-up, a
+filter, an Algo qty the broker cannot trade.
+
 ## Tests
 
 ```

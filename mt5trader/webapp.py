@@ -1207,6 +1207,9 @@ def main():
                                '%(message)s',
                         handlers=[logging.StreamHandler()])
     logsetup.setup('web')
+    # The screen polls three times a second; a line for each poll buried
+    # every error in web.log. Button presses and failures still log.
+    logsetup.quiet_polling()
     app = create_app(args.status, args.commands, args.results, args.config,
                      args.db)
     # Telegram, if .env carries a bot token. The token is read from the
