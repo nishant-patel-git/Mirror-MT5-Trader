@@ -40,6 +40,13 @@ from.
   fails the build otherwise. Nothing else places, modifies or cancels
   an order by itself.
 
+- **Telegram is a remote desk, not a trader.** `telegram.py` goes
+  through the web app's own routes; only ids in
+  `TELEGRAM_ALLOWED_USERS` get an answer; every action is confirmed
+  (LIVE twice); it may send `set_algo`, `set_pair`, `flatten_pair` and
+  `kill` and nothing else — it never opens a position. The token lives
+  in `.env` and no URL carrying it is ever logged.
+
 ## Conventions that are easy to lose in a refactor
 
 - `positions()` and `pending_orders()` return **None for "unknown"**
