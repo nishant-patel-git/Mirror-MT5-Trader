@@ -590,7 +590,9 @@ def test_three_clicks_at_one_price_send_three_orders(page):
     for _ in range(3):
         cell.click()
         page.wait_for_timeout(120)
-    assert command_count(page) == before + 3
+    # The server writes each command after its POST lands; on a slow
+    # runner the last clicks are still in flight when the loop ends.
+    assert wait_for_commands(page, before + 3) == before + 3
     levels = {json.loads(line)['payload']['level']
               for line in commands(page)[-3:]}
     assert len(levels) == 1                       # same price, three orders
@@ -704,6 +706,16 @@ def commands(page):
 
 def command_count(page):
     return len(commands(page))
+
+
+def wait_for_commands(page, count, timeout_ms=5000):
+    """The command count once it reaches `count`, or what it is when
+    `timeout_ms` runs out."""
+    waited = 0
+    while command_count(page) < count and waited < timeout_ms:
+        page.wait_for_timeout(50)
+        waited += 50
+    return command_count(page)
 
 
 def last_command(page):
