@@ -118,8 +118,10 @@ def _problems_file(logger, directory, name, max_bytes, backups):
     return path
 
 
-#: A request line the web server logs, for a GET that succeeded.
-_ROUTINE_GET = re.compile(r'"GET [^"]*" [23]\d\d\b')
+#: A request line the web server logs, for a GET that succeeded. The
+#: server COLOURS some of them (a 304 arrives as '"\x1b[36mGET ...'),
+#: so a colour code may sit between the quote and the verb.
+_ROUTINE_GET = re.compile(r'"(?:\x1b\[[0-9;]*m)*GET [^"]*" [23]\d\d\b')
 
 
 class _QuietPolling(logging.Filter):

@@ -194,11 +194,15 @@ def test_the_screens_polling_is_not_logged_but_a_press_and_an_error_are(
     with caplog.at_level(logging.INFO, logger='werkzeug'):
         web.info('127.0.0.1 - - [x] "GET /api/status HTTP/1.1" 200 -')
         web.info('127.0.0.1 - - [x] "GET /static/app.js?v=1 HTTP/1.1" 304 -')
+        # As the server really writes a 304: coloured.
+        web.info('127.0.0.1 - - [x] "\x1b[36mGET /static/ladder.css?v=1 '
+                 'HTTP/1.1\x1b[0m" 304 -')
         web.info('127.0.0.1 - - [x] "POST /api/command HTTP/1.1" 200 -')
         web.info('127.0.0.1 - - [x] "GET /api/status HTTP/1.1" 500 -')
     text = caplog.text
     assert 'GET /api/status HTTP/1.1" 200' not in text
     assert 'app.js' not in text
+    assert 'ladder.css' not in text
     # The controls: an action and a failure are still there.
     assert 'POST /api/command' in text
     assert '" 500' in text
