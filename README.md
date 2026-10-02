@@ -116,9 +116,9 @@ empty cells rather than zeros where nothing was measured.
 
 ## The Algo — a signal, not a trader
 
-Per ladder, picked in the ladder's settings (**Window: None / Fair spread /
-Algo**). It is OFF after every restart, and while it is on the ladder trades
-exactly as before — it adds a reading, not a lock.
+Per ladder, picked in the ladder's settings (**Algo: Off / Fair spread / Dry run /
+LIVE**). It is OFF after every restart. In dry run the ladder trades exactly
+as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
 
 - **The band.** Candles of the spread `B - beta x A` from the mid (15-minute,
   N = 20 by default). Middle = EMA(N), Pine-style; sigma = population stdev of
@@ -145,8 +145,8 @@ exactly as before — it adds a reading, not a lock.
   the band level, the hint line says what the Algo says. No new window.
 - **Record.** Every signal goes to the audit trail; *Algo signals CSV* on the
   Fills tab exports them, with what an exit would have made after costs.
-- **Dry run or LIVE.** *Algo — dry run* records signals and sends nothing.
-  *Algo — LIVE* (confirmed every time) trades: MARKET both legs in, closes by
+- **Dry run or LIVE.** *Algo: Dry run* records signals and sends nothing.
+  *Algo: LIVE* (confirmed every time) trades: MARKET both legs in, closes by
   ticket, through the same executor a click uses, at its own **Algo qty**
   (spreads; one spread = the ladder's Leg A / Leg B lots — 0.01 for testing).
   One position at a time.

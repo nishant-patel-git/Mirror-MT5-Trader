@@ -501,13 +501,13 @@
         <div class="ls-group">
           <h4>Algo <small class="ls-algo-state"></small></h4>
           <label class="lsf"
-                 title="What this ladder&#8217;s window reads. Fair spread: what the carry says the basis should be. Algo: an entry signal when the spread stretches past its Bollinger band, and an exit signal when a position reaches break-even after every cost plus the take-profit. Signals only — nothing here trades.">
-            <span>Window</span>
+                 title="Turn this ladder&#8217;s Algo on or off. Dry run: it shows and records its signals and sends nothing. LIVE: it trades this ladder by its rules, and manual orders on it are off. Fair spread: no Algo, the carry reading only.">
+            <span>Algo</span>
             <select class="ls-algo">
-              <option value="NONE">None</option>
+              <option value="NONE">Off</option>
               <option value="FAIR_SPREAD">Fair spread</option>
-              <option value="ALGO">Algo — dry run</option>
-              <option value="ALGO_LIVE">Algo — LIVE (trades)</option>
+              <option value="ALGO">Dry run</option>
+              <option value="ALGO_LIVE">LIVE (trades)</option>
             </select></label>
           <label class="lsf" title="Enter when the executable spread is this many sigma from the middle line: SELL at +z or above, BUY at &#8722;z or below.">
             <span>Entry z</span>
