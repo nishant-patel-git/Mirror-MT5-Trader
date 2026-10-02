@@ -1878,16 +1878,29 @@ def test_the_pairs_table_says_whether_each_ladder_is_actually_quoting(page):
     assert 'CONNECTED' in cell.text_content()
 
     # ...and when the engine reports a problem on that pair, the row
-    # carries the engine's own words rather than a green light.
-    page.evaluate("""() => {
-        const pairs = window.MT5Trader.state.snapshot.pairs;
-        const key = Object.keys(pairs)[0];
-        pairs[key].errors = ["leg A: 'XAUUSD_' is not on account 'leg_a'"];
-        window.MT5Settings.render();
-    }""")
-    text = page.text_content('td.pair-status')
-    assert "is not on account" in text
-    assert page.locator('td.pair-status.c-fail').count() >= 1
+    # carries the engine's own words rather than a green light. HELD
+    # first: a poll landing after the error is written replaces the
+    # snapshot and takes the error away before the row is read.
+    page.evaluate(HOLD_THE_SNAPSHOT)
+    try:
+        page.wait_for_function("() => window.__held >= 2", timeout=WAIT)
+        page.evaluate("""() => {
+            const pairs = window.MT5Trader.state.snapshot.pairs;
+            const key = Object.keys(pairs)[0];
+            pairs[key].errors = ["leg A: 'XAUUSD_' is not on account 'leg_a'"];
+            window.MT5Settings.render();
+        }""")
+        text = page.text_content('td.pair-status')
+        assert "is not on account" in text
+        assert page.locator('td.pair-status.c-fail').count() >= 1
+    finally:
+        page.evaluate("""() => {
+            const pairs = window.MT5Trader.state.snapshot.pairs;
+            Object.keys(pairs).forEach(function (key) {
+                delete pairs[key].errors;
+            });
+        }""")
+        page.evaluate(RELEASE_THE_SNAPSHOT)
 
 
 def test_a_repaint_under_the_pointer_does_not_swallow_the_click(page):
