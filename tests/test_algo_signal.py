@@ -17,6 +17,14 @@ TF = 900.0                                   # 15-minute candles
 # -- the band ------------------------------------------------------------------
 
 
+
+def touch_signal(params=None):
+    """The Algo entering on the TOUCH of the band — what these tests are
+    about. Re-entry confirmation is tested on its own
+    (test_algo_protections)."""
+    return algo.AlgoSignal(dict({'reentry_on': False}, **(params or {})))
+
+
 def test_the_middle_line_is_pines_ema_seeded_on_the_sma():
     values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
     seed = (1 + 2 + 3) / 3.0
@@ -129,7 +137,7 @@ def feed(signal, short, long_, ticks, start=0, now=0.0, **kw):
 
 
 def test_sell_signal_on_the_BID_side_z_after_three_fresh_quotes():
-    signal = algo.AlgoSignal()
+    signal = touch_signal()
     # Bid-side spread 10.26 is z +2.6; the offer side is further out.
     body = feed(signal, 10.26, 10.30, 2)
     assert body['state'] == 'CONFIRMING' and body['signal'] is None
@@ -142,7 +150,7 @@ def test_sell_signal_on_the_BID_side_z_after_three_fresh_quotes():
 
 
 def test_the_same_quote_polled_again_is_not_a_second_tick():
-    signal = algo.AlgoSignal()
+    signal = touch_signal()
     for _ in range(5):
         body = run(signal, market(10.26, 10.30, quote='same'))
     assert body['signal'] is None
@@ -152,7 +160,7 @@ def test_the_same_quote_polled_again_is_not_a_second_tick():
 
 
 def test_buy_is_judged_on_the_OFFER_side_not_the_mid():
-    signal = algo.AlgoSignal()
+    signal = touch_signal()
     # Mid 9.745 is z -2.55, but a buy PAYS 9.76: z -2.4, not a signal.
     body = feed(signal, 9.73, 9.76, 5)
     assert body['z_mid'] <= -2.5 and body['signal'] is None
@@ -163,14 +171,14 @@ def test_buy_is_judged_on_the_OFFER_side_not_the_mid():
 
 
 def test_a_signal_is_recorded_ONCE_while_it_holds():
-    signal = algo.AlgoSignal()
+    signal = touch_signal()
     feed(signal, 10.26, 10.30, 3)
     body = feed(signal, 10.27, 10.30, 4, start=3)
     assert body['signal'] == 'SELL' and body['intents'] == []
 
 
 def test_a_price_that_cannot_be_trusted_holds_the_entry():
-    signal = algo.AlgoSignal()
+    signal = touch_signal()
     body = feed(signal, 10.26, 10.30, 3,
                 gates={'health': 'leg B quote 20s old'})
     assert body['state'] == 'BLOCKED' and body['intents'] == []
@@ -181,7 +189,7 @@ def test_a_price_that_cannot_be_trusted_holds_the_entry():
 
 
 def test_no_band_no_signal_and_the_count_is_said():
-    signal = algo.AlgoSignal()
+    signal = touch_signal()
     warming = {'ready': False, 'count': 7, 'needed': 20}
     body = feed(signal, 10.26, 10.30, 5, stats=warming)
     assert body['signal'] is None and body['z_sell'] is None
@@ -189,21 +197,21 @@ def test_no_band_no_signal_and_the_count_is_said():
 
 
 def test_the_last_minutes_before_the_cutoff_hold_the_entry():
-    signal = algo.AlgoSignal({'cutoff_buffer_min': 20})
+    signal = touch_signal({'cutoff_buffer_min': 20})
     body = feed(signal, 10.26, 10.30, 3, gates={'cutoff_min': 12})
     assert body['state'] == 'BLOCKED' and 'cutoff' in body['blocked']
     # The control: the buffer off.
-    signal = algo.AlgoSignal({'cutoff_buffer_min': 0})
+    signal = touch_signal({'cutoff_buffer_min': 0})
     body = feed(signal, 10.26, 10.30, 3, gates={'cutoff_min': 12})
     assert body['signal'] == 'SELL'
 
 
 def test_a_blow_out_past_the_cap_is_not_an_entry():
-    signal = algo.AlgoSignal({'max_entry_z': 3.5})
+    signal = touch_signal({'max_entry_z': 3.5})
     body = feed(signal, 10.40, 10.42, 3)                 # z +4.0
     assert body['state'] == 'BLOCKED' and 'cap' in body['blocked']
     # The control: no cap.
-    signal = algo.AlgoSignal({'max_entry_z': 0})
+    signal = touch_signal({'max_entry_z': 0})
     assert feed(signal, 10.40, 10.42, 3)['signal'] == 'SELL'
 
 
@@ -215,7 +223,7 @@ def position(side='SELL', tp=10.0, be=10.2, opened_at=0.0, pid='POS-1',
 
 
 def test_a_close_starts_the_cooldown():
-    signal = algo.AlgoSignal({'cooldown_min': 5})
+    signal = touch_signal({'cooldown_min': 5})
     run(signal, market(10.10, 10.12, 1), now=0, positions=[position()])
     body = feed(signal, 10.26, 10.30, 3, start=10, now=60)   # it closed
     assert body['state'] == 'BLOCKED' and 'cooldown' in body['blocked']
@@ -225,14 +233,14 @@ def test_a_close_starts_the_cooldown():
 
 
 def test_no_entry_signal_while_the_ladder_holds_a_position():
-    signal = algo.AlgoSignal()
+    signal = touch_signal()
     body = feed(signal, 9.72, 9.74, 3, positions=[position(tp=None)])
     assert body['state'] == 'IN_POSITION'
     assert not [i for i in body['intents'] if i['action'] == 'ENTER']
 
 
 def test_exit_at_break_even_after_costs_plus_the_target():
-    signal = algo.AlgoSignal()
+    signal = touch_signal()
     # A SHORT closes at the OFFER: 10.01 is short of a 10.00 target.
     body = run(signal, market(9.98, 10.01, 1), positions=[position(tp=10.0)])
     assert body['positions'][0]['exit'] is None
@@ -244,7 +252,7 @@ def test_exit_at_break_even_after_costs_plus_the_target():
 
 
 def test_a_long_exits_on_the_BID():
-    signal = algo.AlgoSignal()
+    signal = touch_signal()
     held = [position(side='BUY', tp=10.10, be=10.0)]
     assert run(signal, market(10.09, 10.20, 1),
                positions=held)['positions'][0]['exit'] is None
@@ -254,13 +262,13 @@ def test_a_long_exits_on_the_BID():
 
 def test_no_target_priced_means_no_profit_exit():
     """Unmeasured is not zero: break-even is not the target."""
-    signal = algo.AlgoSignal()
+    signal = touch_signal()
     body = run(signal, market(5.0, 5.01, 1), positions=[position(tp=None)])
     assert body['positions'][0]['exit'] is None and body['intents'] == []
 
 
 def test_a_gate_never_holds_back_an_exit():
-    signal = algo.AlgoSignal()
+    signal = touch_signal()
     body = run(signal, market(9.97, 10.00, 1), positions=[position(tp=10.0)],
                gates={'health': 'leg A quote 20s old', 'cutoff_min': -5})
     assert body['positions'][0]['exit'] == 'PROFIT_TARGET'
@@ -269,15 +277,15 @@ def test_a_gate_never_holds_back_an_exit():
 def test_the_optional_exits_are_OFF_until_a_ladder_asks():
     held = [position(side='SELL', tp=9.0, be=10.2, opened_at=0.0)]
     stretched = market(10.44, 10.45, 1)           # offer z +4.5
-    signal = algo.AlgoSignal()
+    signal = touch_signal()
     body = run(signal, stretched, now=10 ** 6, positions=held)
     assert body['positions'][0]['exit'] is None
 
-    on = algo.AlgoSignal({'stop_z_on': True, 'stop_z': 4.0})
+    on = touch_signal({'stop_z_on': True, 'stop_z': 4.0})
     assert run(on, stretched, positions=held)['positions'][0]['exit'] \
         == 'Z_STOP'
 
-    timed = algo.AlgoSignal({'time_stop_on': True, 'time_stop_candles': 2})
+    timed = touch_signal({'time_stop_on': True, 'time_stop_candles': 2})
     assert run(timed, market(10.1, 10.11, 1), now=1799,
                positions=held)['positions'][0]['exit'] is None
     assert run(timed, market(10.1, 10.11, 2), now=1800,
@@ -286,7 +294,7 @@ def test_the_optional_exits_are_OFF_until_a_ladder_asks():
 
 def test_back_to_the_mean_only_in_profit():
     held = [position(side='SELL', tp=9.0, be=10.0)]
-    signal = algo.AlgoSignal({'reversion_on': True})
+    signal = touch_signal({'reversion_on': True})
     # Offer at z -0.5 but ABOVE break-even: not in profit, no exit.
     assert run(signal, market(9.94, 10.05, 1), stats=dict(
         STATS, mean=10.10), positions=held)['positions'][0]['exit'] is None
@@ -321,7 +329,7 @@ def test_the_defaults_are_the_ones_the_desk_agreed():
 
 
 def test_the_stop_loss_exits_a_short_on_the_OFFER():
-    signal = algo.AlgoSignal()
+    signal = touch_signal()
     held = [position(side='SELL', tp=10.0, sl=10.40)]
     # A short closes at the offer: 10.39 has not reached a 10.40 stop.
     assert run(signal, market(10.37, 10.39, 1),
@@ -333,7 +341,7 @@ def test_the_stop_loss_exits_a_short_on_the_OFFER():
 
 
 def test_a_long_is_stopped_on_the_BID_and_no_gate_holds_it():
-    signal = algo.AlgoSignal()
+    signal = touch_signal()
     held = [position(side='BUY', tp=10.5, sl=9.80, be=10.1, entry=10.1)]
     body = run(signal, market(9.80, 9.90, 1), positions=held,
                gates={'health': 'leg A quote 20s old', 'cutoff_min': -5})
@@ -343,7 +351,7 @@ def test_a_long_is_stopped_on_the_BID_and_no_gate_holds_it():
 def test_no_stop_priced_means_no_stop_signal():
     """The stop off — or no margin to price it — is None, never 0: a
     stop of 0 points would sit AT break-even and fire on the entry."""
-    signal = algo.AlgoSignal()
+    signal = touch_signal()
     held = [position(side='BUY', tp=10.5, sl=None, be=10.1, entry=10.1)]
     assert run(signal, market(1.0, 1.1, 1),
                positions=held)['positions'][0]['exit'] is None
@@ -365,7 +373,7 @@ def test_progress_runs_from_the_stop_to_the_target():
 
 
 def test_each_position_row_carries_its_entry_and_progress():
-    signal = algo.AlgoSignal()
+    signal = touch_signal()
     body = run(signal, market(10.10, 10.16, 1),
                positions=[position(side='SELL', tp=9.86, sl=10.46,
                                    entry=10.26)])
@@ -379,16 +387,16 @@ def test_a_ladder_set_to_one_direction_enters_only_that_way():
     """H to L only: a stretch DOWN is shown, never entered. The control:
     Both, and the same stretch is a BUY."""
     down = (9.72, 9.74)                          # offer z about -2.6
-    one_way = algo.AlgoSignal({'direction': 'H_TO_L'})
+    one_way = touch_signal({'direction': 'H_TO_L'})
     body = feed(one_way, *down, 3)
     assert body['signal'] is None and body['intents'] == []
     assert body['z_buy'] <= -2.5                 # still measured and shown
-    both = algo.AlgoSignal({'direction': 'BOTH'})
+    both = touch_signal({'direction': 'BOTH'})
     assert feed(both, *down, 3)['signal'] == 'BUY'
 
 
 def test_L_to_H_only_never_sells_and_still_buys():
-    one_way = algo.AlgoSignal({'direction': 'L_TO_H'})
+    one_way = touch_signal({'direction': 'L_TO_H'})
     assert feed(one_way, 10.26, 10.30, 3)['signal'] is None
     assert feed(one_way, 9.72, 9.74, 3, start=10)['signal'] == 'BUY'
 
@@ -396,7 +404,7 @@ def test_L_to_H_only_never_sells_and_still_buys():
 def test_direction_never_holds_back_an_exit():
     """A long on an H-to-L-only ladder (opened before the setting
     changed) still gets out."""
-    signal = algo.AlgoSignal({'direction': 'H_TO_L'})
+    signal = touch_signal({'direction': 'H_TO_L'})
     held = [position(side='BUY', tp=10.10, be=10.0, entry=10.0)]
     assert run(signal, market(10.10, 10.20, 1),
                positions=held)['positions'][0]['exit'] == 'PROFIT_TARGET'

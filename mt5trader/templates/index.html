@@ -237,6 +237,20 @@
       <div class="aw-section aw-signal"></div>
       <div class="aw-section aw-stats"></div>
       <div class="aw-section aw-filters"></div>
+      <!-- What THESE settings would have done on MT5's own history —
+           and without the trend protections, beside it. Sends nothing. -->
+      <div class="aw-section aw-backtest">
+        <div class="aw-head">Backtest</div>
+        <div class="aw-bt-controls">
+          <select class="aw-bt-days" title="How much history, from MT5's own bars">
+            <option value="3">last 3 days</option>
+            <option value="5" selected>last 5 days</option>
+            <option value="10">last 10 days</option>
+          </select>
+          <button type="button" class="aw-bt-run" title="Replay the history through this ladder's Algo, with its settings as they are now. Nothing is sent.">Run backtest</button>
+        </div>
+        <div class="aw-bt-out hint">What these settings would have done — nothing is sent.</div>
+      </div>
     </div>
   </section>
 </template>
@@ -558,6 +572,10 @@
           <label class="lsf" title="No entry signal past this |z| — that is a blow-out, not a stretch. 0 = no cap.">
             <span>Max entry z</span>
             <input class="ls-az-max" type="number" min="0" step="0.1"></label>
+          <label class="lsf check-row" title="Re-entry: do not enter on the TOUCH of the band. A side is armed when its stretch reaches Entry z, and enters when it comes back inside by this much (2.0 armed, 1.5 enters). A spread riding the band in a trend never comes back, so it gives no entry. Lost if the spread reaches the mean first.">
+            <span>Re-entry back by</span>
+            <input type="checkbox" class="ls-az-reentry-on">
+            <input class="ls-az-reentry" type="number" min="0.05" step="0.1"></label>
           <label class="lsf" title="No entry signal in the last this-many minutes before the session cutoff, or after it. 0 = off.">
             <span>Cutoff (min)</span>
             <input class="ls-az-buffer" type="number" min="0" step="1"></label>
@@ -596,6 +614,13 @@
           <label class="lsf check-row" title="No entry while the spread is TRENDING: a high efficiency ratio and few crossings of its mean.">
             <span>Regime filter</span>
             <input type="checkbox" class="ls-az-regime-on"></label>
+          <label class="lsf check-row" title="Trend direction: when the band's middle has moved more than this many sigma over the lookback, no entry AGAINST it — no H to L while it rises, no L to H while it falls. The other side stays open.">
+            <span>Trend filter (σ)</span>
+            <input type="checkbox" class="ls-az-trend-on">
+            <input class="ls-az-trend" type="number" min="0.1" step="0.1"></label>
+          <label class="lsf" title="How far back the trend filter measures the middle's move, in minutes.">
+            <span>Trend lookback (min)</span>
+            <input class="ls-az-trend-look" type="number" min="15" step="15"></label>
           <label class="lsf" title="No entry when the spread reverts faster than this (minutes) — noise. 0 = off.">
             <span>Half-life min (min)</span>
             <input class="ls-az-hl-min" type="number" min="0" step="1"></label>

@@ -1056,6 +1056,59 @@ class Coordinator:
             out[f'leg_{leg}_now'] = now
         return out
 
+    def algo_backtest(self, pair_key, days=5, compare=True):
+        """Replay `days` of MT5's own 15-minute bars through this
+        ladder's Algo, with its settings — and, beside it, the same run
+        with re-entry and the trend filter off, so what they change is
+        on the screen. Prices the trades exactly as the live Algo would:
+        today's bid-ask, the same costs, break-even, target and stop.
+        Sends nothing."""
+        from . import backtest
+        pair = self.config.pairs.get(pair_key)
+        if pair is None:
+            return {'ok': False, 'reason': f'no pair {pair_key}'}
+        days = max(1, min(int(days or 5), 30))
+        params = algo_module.clean_params(pair.algo_params)
+        rows, note = self.algos.history(pair, days)
+        if not rows:
+            return {'ok': False, 'reason': note or 'no history from MT5'}
+        md = self.market.get(pair_key)
+        if not md or md.get('long_spread') is None \
+                or md.get('short_spread') is None:
+            return {'ok': False, 'reason': 'no live price to measure the '
+                                           'bid-ask a trade would cross'}
+        width = md['long_spread'] - md['short_spread']
+        cost_in = self._algo_cost(pair)
+        k, qty = cost_in.get('k'), params['algo_qty']
+        settings = pair.exit_settings(self.config.settings)
+        margin = (self.margin_detail(pair) or {}).get('money')
+        terms = takeprofit.break_even_terms(pair, md, settings, qty, k, 0)
+        pct = settings.get('TP_TARGET_PCT_OF_MARGIN')
+        if not pct:
+            target = 0.0
+        elif margin:
+            target = takeprofit.points(
+                float(pct) / 100.0 * float(margin) * float(qty), k, qty)
+        else:
+            target = None          # asked for, and cannot be priced
+        levels = {'fee_points': terms.get('added_points') or 0.0,
+                  'target_points': target,
+                  'stop_points': self._algo_stop_points(pair, qty, k,
+                                                        margin)}
+        cutoff = (int(self.config.get('OVERNIGHT_CLOSE_HOUR', 16)),
+                  int(self.config.get('OVERNIGHT_CLOSE_MINUTE', 55)))
+        offset = self._offset_of(pair.account_a)
+        result = backtest.run(rows, params, width, cost_in, levels, offset,
+                              cutoff)
+        answer = {'ok': True, 'pair': pair_key, 'days': days,
+                  'width': width, 'levels': levels, **result}
+        if compare:
+            plain = dict(params, reentry_on=False, trend_on=False)
+            answer['without_protections'] = backtest.run(
+                rows, plain, width, cost_in, levels, offset,
+                cutoff)['summary']
+        return answer
+
     def _algo_stop_points(self, pair, quantity, units, margin=None):
         """The stop loss's distance from break-even, in spread points:
         `stop_loss_pct` of the margin `quantity` spreads tie up, through

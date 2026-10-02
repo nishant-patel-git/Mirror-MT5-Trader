@@ -1276,6 +1276,11 @@
     ['.ls-az-edge', 'edge_multiple', 'number'],
     ['.ls-az-capture', 'edge_capture_frac', 'number'],
     ['.ls-az-regime-on', 'regime_on', 'check'],
+    ['.ls-az-reentry-on', 'reentry_on', 'check'],
+    ['.ls-az-reentry', 'reentry_back', 'number'],
+    ['.ls-az-trend-on', 'trend_on', 'check'],
+    ['.ls-az-trend', 'trend_sigma', 'number'],
+    ['.ls-az-trend-look', 'trend_lookback_min', 'number'],
     ['.ls-az-hl-min', 'half_life_min_min', 'number'],
     ['.ls-az-hl-max', 'half_life_max_min', 'number'],
     ['.ls-az-stop-on', 'stop_z_on', 'check'],
@@ -2288,8 +2293,99 @@
       if (ladder) { openLadderSettings(ladder, key); }
       else { toast('open the ' + key + ' ladder to reach its settings'); }
     });
+    node.querySelector('.aw-bt-run').addEventListener('click', function (e) {
+      e.preventDefault();
+      runBacktest(node, key,
+                  parseInt(node.querySelector('.aw-bt-days').value, 10) || 5);
+    });
     el('desktop').appendChild(node);
     return node;
+  }
+
+  function runBacktest(node, key, days) {
+    /* Replay MT5's history through this ladder's Algo, on the engine.
+     * A few seconds, not a click's fraction of one: it is polled for
+     * longer than an order is, and says it is running meanwhile. */
+    var out = node.querySelector('.aw-bt-out');
+    var button = node.querySelector('.aw-bt-run');
+    out.className = 'aw-bt-out hint';
+    out.textContent = 'running on the last ' + days + ' days\u2026';
+    button.disabled = true;
+    function done(html, cls) {
+      button.disabled = false;
+      out.className = 'aw-bt-out' + (cls ? ' ' + cls : '');
+      out.innerHTML = html;
+    }
+    fetch('/api/command', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({kind: 'algo_backtest',
+                            payload: {pair: key, days: days}})
+    }).then(function (r) { return r.json(); }).then(function (sent) {
+      if (!sent.ok) { return done(escapeHtml(sent.error || 'refused'), 'down'); }
+      var tries = 0;
+      (function poll() {
+        fetch('/api/result/' + sent.id).then(function (r) { return r.json(); })
+          .then(function (result) {
+            if (result && result.pending) {
+              if (++tries > 120) {
+                return done('no answer from the engine yet \u2014 try again',
+                            'down');
+              }
+              return window.setTimeout(poll, 250);
+            }
+            var data = (result && result.data) || {};
+            if (!result || result.ok === false || data.ok === false) {
+              return done('could not run: ' + escapeHtml(
+                (result && result.error) || data.reason || 'unknown'), 'down');
+            }
+            done(backtestHtml(data));
+          });
+      })();
+    }).catch(function (error) { done(escapeHtml(error.message), 'down'); });
+  }
+
+  function backtestHtml(data) {
+    var s = data.summary || {};
+    var plain = data.without_protections || {};
+    function line(sum) {
+      return (sum.trades || 0) + ' trade(s) \u00b7 ' + (sum.wins || 0) +
+        ' won, ' + (sum.losses || 0) + ' lost \u00b7 net ' + moneyOr(sum.net) +
+        ' \u00b7 worst run ' + moneyOr(sum.max_drawdown);
+    }
+    function when(at) {
+      return at ? new Date(at * 1000).toLocaleString([], {
+        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'})
+        : DASH;
+    }
+    var held = Object.keys(data.held || {}).map(function (reason) {
+      return [reason, data.held[reason]];
+    }).sort(function (a, b) { return b[1] - a[1]; }).slice(0, 3);
+    var rows = (data.trades || []).slice(-8).reverse().map(function (t) {
+      return '<tr><td>' + when(t.opened_at) + '</td><td>' +
+        sideWords(t.side) + '</td><td>' + signed(t.entry_z) + '</td><td>' +
+        escapeHtml(algoExitWords(t.reason)) + '</td><td class="' +
+        (t.pnl > 0 ? 'up' : (t.pnl < 0 ? 'down' : '')) + '">' +
+        moneyOr(t.pnl) + '</td></tr>';
+    }).join('');
+    return '<div><b>These settings:</b> ' + line(s) + '</div>' +
+      '<div class="hint">Without re-entry and the trend filter: ' +
+      line(plain) + '</div>' +
+      (held.length ? '<div class="hint">Held back most by: ' + held.map(
+        function (h) { return escapeHtml(h[0]) + ' (' + h[1] + ')'; })
+        .join('; ') + '</div>' : '') +
+      (rows ? '<table class="aw-bt-trades"><tr><th>Entered</th><th>Side' +
+        '</th><th>z</th><th>Exit</th><th>P&amp;L</th></tr>' + rows +
+        '</table>' : '') +
+      '<div class="hint" title="' + escapeHtml((data.caveats || []).join('; ')) +
+      '">' + (s.candles || 0) + ' candles of MT5 history, ' + when(s.from) +
+      ' \u2013 ' + when(s.to) + ' \u00b7 hover for what a backtest cannot see' +
+      '</div>';
+  }
+
+  function algoExitWords(reason) {
+    return {STOP_LOSS: 'stop loss', PROFIT_TARGET: 'target',
+            Z_STOP: 'z-stop', MEAN_REVERSION: 'mean', TIME_STOP: 'time stop'
+           }[reason] || reason || '';
   }
 
   function moneyOr(value) {
@@ -2350,9 +2446,30 @@
         fmt(sell ? market.short_spread : market.long_spread, digits) +
         '</div><div class="aw-tile-z" title="How stretched the spread is: ' +
         'entry at \u00b1' + (entryZ || '?') + '">' + signed(z) + '</div>' +
-        '<div class="aw-tile-entry">' + (sell ? 'short' : 'long') + ' at ' +
-        (sell ? '\u2265 +' : '\u2264 \u2212') + (entryZ || '?') + ' (' +
-        fmt(sell ? block.upper : block.lower, digits) + ')</div></div>';
+        entryLine(sell) + '</div>';
+    }
+    function entryLine(sell) {
+      /* Where this side enters. On the TOUCH of the band; or — with
+       * re-entry — armed at the band and entered on the way back in,
+       * which a spread riding the band in a trend never gives. */
+      if (!params.reentry_on) {
+        return '<div class="aw-tile-entry">' + (sell ? 'short' : 'long') +
+          ' at ' + (sell ? '\u2265 +' : '\u2264 \u2212') + (entryZ || '?') +
+          ' (' + fmt(sell ? block.upper : block.lower, digits) + ')</div>';
+      }
+      var inZ = Math.max(0, (entryZ || 0) - (params.reentry_back || 0));
+      var level = (block.mean === null || block.mean === undefined ||
+                   !block.sigma) ? null
+        : block.mean + (sell ? 1 : -1) * inZ * block.sigma;
+      var armed = (block.armed || {})[sell ? 'SELL' : 'BUY'];
+      return '<div class="aw-tile-entry" title="Armed when the stretch ' +
+        'reaches ' + (sell ? '+' : '\u2212') + entryZ + '; entered on the ' +
+        'way back in, at ' + (sell ? '+' : '\u2212') + inZ.toFixed(2) +
+        '. Lost if the spread reaches the mean first.">' +
+        (armed ? '<b class="aw-armed">ARMED</b> ' : 'arm ' +
+         (sell ? '\u2265 +' : '\u2264 \u2212') + entryZ + ' \u00b7 ') +
+        (sell ? 'short' : 'long') + ' back at ' + (sell ? '+' : '\u2212') +
+        inZ.toFixed(2) + ' (' + fmt(level, digits) + ')</div>';
     }
     var held = block.positions || [];
     var first = held[0] || null;
@@ -2467,6 +2584,7 @@
           ? 'MR' : 'WAIT'), trending ? 'bad' : (regime.state === 'RANGE'
           ? 'ok' : 'wait')) : badge('OFF', 'off')) +
       '<small>Regime</small></div>' +
+      '<div>' + trendBadge(filters.trend || {}) + '<small>Trend</small></div>' +
       '<div>' + badge(filters.ready ? 'YES' : 'NO', filters.ready ? 'ok' : 'wait')
       + '<small>Ready</small></div>' +
       ((band[0] || band[1]) ? '<div>' + badge(
@@ -2496,6 +2614,22 @@
           escapeHtml(last.reason || '') + '</div>'
         : '<div class="hint">none yet</div>') + '</div>' +
       lastOrderHtml(block);
+  }
+
+  function trendBadge(trend) {
+    /* Which way the band's middle has moved over the lookback: up
+     * blocks H to L, down blocks L to H, flat blocks neither. */
+    if (!trend.on) { return badge('OFF', 'off'); }
+    var drift = trend.drift_sigma;
+    var why = drift === null || drift === undefined
+      ? 'not enough candles to measure the trend yet'
+      : 'the middle moved ' + (drift >= 0 ? '+' : '') + drift.toFixed(2) +
+        '\u03c3 in ' + trend.lookback_min + ' min (limit ' + trend.limit +
+        '\u03c3)';
+    if (trend.state === 'UP') { return badge('\u2191', 'bad', why + ' \u2014 no H to L'); }
+    if (trend.state === 'DOWN') { return badge('\u2193', 'bad', why + ' \u2014 no L to H'); }
+    if (trend.state === 'FLAT') { return badge('\u2013', 'ok', why); }
+    return badge('WAIT', 'wait', why);
   }
 
   function sideWords(side) {

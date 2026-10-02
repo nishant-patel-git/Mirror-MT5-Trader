@@ -43,7 +43,9 @@ QUIET = {'cutoff_buffer_min': 0, 'confirm_ticks': 1, 'max_entry_z': 0,
          # these tests are about what happens once an entry is allowed.
          'edge_on': False, 'regime_on': False, 'prob_on': False,
          # The live warm-up is tested on its own (test_algo_warmup).
-         'warmup_min': 0}
+         'warmup_min': 0,
+         # Re-entry and the trend filter: test_algo_protections.
+         'reentry_on': False, 'trend_on': False}
 
 
 def give_history(legs, count=40):

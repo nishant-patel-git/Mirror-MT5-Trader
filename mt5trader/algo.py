@@ -140,6 +140,21 @@ DEFAULT_PARAMS = {
     #: No entry signal past this |z|: that is a blow-out, not a stretch.
     #: 0 = no cap.
     'max_entry_z': 3.5,
+    #: RE-ENTRY: do not sell the touch of the band — wait for the spread
+    #: to come BACK inside it. A side is ARMED when its stretch reaches
+    #: the entry z, and enters when it falls back by `reentry_back` (2.0
+    #: armed, 1.5 enters). A trend rides the band and never comes back,
+    #: so it gives no entry; a range does, a little later. Armed is lost
+    #: if the spread reaches the mean first.
+    'reentry_on': True,
+    'reentry_back': 0.5,
+    #: TREND DIRECTION: when the band's middle (the EMA) has moved more
+    #: than `trend_sigma` sigma over the last `trend_lookback_min`, no
+    #: entry AGAINST it — no H to L while it rises, no L to H while it
+    #: falls. The other side stays open.
+    'trend_on': True,
+    'trend_sigma': 1.0,
+    'trend_lookback_min': 120,
     #: No entry signal in the last this-many minutes before the session
     #: cutoff, or after it. 0 = off.
     'cutoff_buffer_min': 20,
@@ -203,7 +218,8 @@ DEFAULT_PARAMS = {
 }
 
 _BOOLS = ('stop_z_on', 'reversion_on', 'time_stop_on', 'stop_loss_on',
-          'progress_bar', 'edge_on', 'regime_on', 'prob_on')
+          'progress_bar', 'edge_on', 'regime_on', 'prob_on', 'reentry_on',
+          'trend_on')
 _INTS = ('timeframe_min', 'length', 'confirm_ticks', 'time_stop_candles',
          'max_trades_day', 'max_losses_row', 'regime_min_crossings')
 
@@ -251,6 +267,12 @@ def clean_params(raw):
     out['prob_on'] = False
     if out['entry_z'] <= 0:
         out['entry_z'] = DEFAULT_PARAMS['entry_z']
+    # Re-entry happens INSIDE the band and above the mean: never at or
+    # past the mean, where there is nothing left to revert.
+    out['reentry_back'] = min(max(out['reentry_back'], 0.05),
+                              out['entry_z'] * 0.9)
+    if out['trend_lookback_min'] <= 0:
+        out['trend_lookback_min'] = DEFAULT_PARAMS['trend_lookback_min']
     if out['algo_qty'] <= 0:
         out['algo_qty'] = DEFAULT_PARAMS['algo_qty']
     return out
@@ -282,6 +304,11 @@ def check_params(raw):
             problems.append('entry z must be above 0')
         elif key == 'algo_qty' and number <= 0:
             problems.append('Algo qty must be above 0')
+        elif key == 'reentry_back' and number <= 0:
+            problems.append('re-entry must be above 0 — how far back '
+                            'inside the band, in z')
+        elif key == 'trend_sigma' and number <= 0:
+            problems.append('trend filter sigma must be above 0')
         elif number < 0:
             problems.append(f'{key} cannot be negative')
     return problems
@@ -313,6 +340,9 @@ class AlgoSignal:
         self._exits_live = {}            # position id -> reason showing
         self._known = set()              # position ids seen last call
         self._cooldown_until = None
+        #: Re-entry: which sides have stretched to the entry z and are
+        #: waiting for the spread to come back inside.
+        self._armed = {'BUY': False, 'SELL': False}
 
     def evaluate(self, now, md, stats, positions=(), gates=None):
         """What the Algo says, and what it decided on this call.
@@ -412,10 +442,33 @@ class AlgoSignal:
         return True
 
     def _count(self, body, fresh):
-        entry = self.params['entry_z']
+        p = self.params
+        entry = p['entry_z']
         z_sell, z_buy = body['z_sell'], body['z_buy']
-        hits = {'SELL': z_sell is not None and z_sell >= entry,
-                'BUY': z_buy is not None and z_buy <= -entry}
+        if p['reentry_on']:
+            back_at = entry - p['reentry_back']
+            # Armed by the stretch, disarmed at the mean.
+            if z_sell is not None:
+                if z_sell >= entry:
+                    self._armed['SELL'] = True
+                elif z_sell <= 0:
+                    self._armed['SELL'] = False
+            if z_buy is not None:
+                if z_buy <= -entry:
+                    self._armed['BUY'] = True
+                elif z_buy >= 0:
+                    self._armed['BUY'] = False
+            # The entry is the way back IN: inside the band, short of
+            # the mean.
+            hits = {'SELL': (self._armed['SELL'] and z_sell is not None
+                             and 0 < z_sell <= back_at),
+                    'BUY': (self._armed['BUY'] and z_buy is not None
+                            and -back_at <= z_buy < 0)}
+        else:
+            self._armed = {'BUY': False, 'SELL': False}
+            hits = {'SELL': z_sell is not None and z_sell >= entry,
+                    'BUY': z_buy is not None and z_buy <= -entry}
+        body['armed'] = dict(self._armed)
         for side, hit in hits.items():
             if not hit:
                 self._streak[side] = 0
@@ -457,6 +510,9 @@ class AlgoSignal:
         body['signal'] = side
         if self._entry_live != side:
             self._entry_live = side
+            # An arming is spent by the entry it gave.
+            self._armed[side] = False
+            body['armed'] = dict(self._armed)
             z = body['z_sell'] if side == 'SELL' else body['z_buy']
             body['intents'].append({
                 'action': 'ENTER', 'side': side, 'z': z,

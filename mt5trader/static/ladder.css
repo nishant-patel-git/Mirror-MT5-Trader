@@ -2054,6 +2054,15 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
 .window.algowin .aw-blocked {
   margin-top: 4px; padding: 3px 4px; background: #f3f3f3; border-radius: 3px;
 }
+.window.algowin .aw-armed { color: #c0392b; }
+.window.algowin .aw-bt-controls { display: flex; gap: 4px; margin: 2px 0; }
+.window.algowin .aw-bt-out { font-size: 11px; }
+.window.algowin .aw-bt-out .up { color: #2e9e4f; }
+.window.algowin .aw-bt-out .down, .window.algowin .aw-bt-out.down { color: #c0392b; }
+.window.algowin .aw-bt-trades { width: 100%; border-collapse: collapse; margin: 3px 0; }
+.window.algowin .aw-bt-trades th, .window.algowin .aw-bt-trades td {
+  text-align: left; padding: 1px 3px; border-bottom: 1px solid #eee;
+}
 .window.algowin .aw-last-order .up { color: #2e9e4f; font-weight: 600; }
 .window.algowin .aw-last-order .down { color: #c0392b; font-weight: 600; }
 

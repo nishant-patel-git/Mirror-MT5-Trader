@@ -335,6 +335,11 @@ class CommandRunner:
             applied[name] = self.coordinator.config.settings[name]
         return {'applied': applied}
 
+    def _do_algo_backtest(self, payload):
+        """Replay history through one ladder's Algo. Sends nothing."""
+        return self.coordinator.algo_backtest(payload['pair'],
+                                              payload.get('days', 5))
+
     def _do_set_algo(self, payload):
         """NONE / FAIR_SPREAD / ALGO for one ladder, and ALGO's mode.
 

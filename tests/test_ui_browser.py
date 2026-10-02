@@ -5477,3 +5477,43 @@ def test_leaving_LIVE_with_a_position_offers_close_or_hand_over(page):
         assert not page.is_visible('#modal-alt')
     finally:
         page.evaluate('() => { window.fetch = window.__realFetch; }')
+
+
+def test_the_backtest_button_runs_it_on_the_engine_and_shows_both_runs(page):
+    """What these settings would have done on MT5's history — and,
+    beside it, without the trend protections. It asks the ENGINE, which
+    holds the history and the costs, and it sends no order."""
+    open_ladder(page)
+    answer = {'ok': True, 'summary': {
+                  'trades': 3, 'wins': 2, 'losses': 1, 'net': 4.5,
+                  'max_drawdown': -1.2, 'candles': 480,
+                  'from': 1790000000, 'to': 1790432000},
+              'without_protections': {'trades': 9, 'wins': 3, 'losses': 6,
+                                      'net': -12.25, 'max_drawdown': -15.0},
+              'held': {'trend: the middle ROSE #σ in the last # min — no '
+                       'H to L against it': 14},
+              'trades': [{'side': 'SELL', 'opened_at': 1790100000,
+                          'entry_z': 1.48, 'reason': 'PROFIT_TARGET',
+                          'pnl': 2.5}],
+              'caveats': ['one look per candle']}
+    try:
+        _ladder_with_algo(page, 'DRY_RUN')
+        page.wait_for_selector('.window.algowin .aw-bt-run', timeout=WAIT)
+        page.evaluate(SPY_ON_COMMANDS, answer)
+        page.click('.window.algowin .aw-bt-run')
+        page.wait_for_function(
+            "() => (document.querySelector('.window.algowin .aw-bt-out') "
+            "|| {textContent: ''}).textContent.indexOf('These settings') >= 0",
+            timeout=WAIT)
+        text = page.text_content('.window.algowin .aw-bt-out')
+        assert '3 trade(s)' in text and '9 trade(s)' in text
+        assert 'Without re-entry and the trend filter' in text
+        assert 'ROSE' in text and 'H to L' in text
+        kinds = page.evaluate("() => window.__commands.map(c => c.kind)")
+        assert kinds == ['algo_backtest']
+        assert page.evaluate(
+            "() => window.__commands[0].payload.days") == 5
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch || '
+                      'window.fetch; }')
+        _algo_off(page)

@@ -390,87 +390,10 @@ class AlgoDesk:
                 logging.error('could not record a held-back signal: %s', e)
 
     def _filters(self, run, md, stats, cost_in):
-        """The filters' readings for the panel, and the entry check.
-
-        Read at the ENTRY threshold for the panel, so its numbers are
-        real before z ever gets there; judged at the actual z when a
-        stretch confirms. A filter that cannot be priced BLOCKS.
-        """
-        p = run.params
-        cost_in = cost_in or {}
-        qty = p['algo_qty']
-        k = cost_in.get('k')
-        width = None
-        if md and md.get('long_spread') is not None \
-                and md.get('short_spread') is not None:
-            width = md['long_spread'] - md['short_spread']
-        cost = algofilters.round_trip_cost(width, k, qty,
-                                           cost_in.get('commission'),
-                                           cost_in.get('slippage'))
-        sigma = stats.get('sigma') if stats.get('ready') else None
-        closes = run.candles.closes()
-        hl_candles = algofilters.half_life(closes)
-        hl_minutes = (None if hl_candles is None
-                      else hl_candles * p['timeframe_min'])
-        trend = algofilters.regime(closes[-2 * p['length']:],
-                                   p['regime_er_max'],
-                                   p['regime_min_crossings'])
-
-        def edge_at(z):
-            return algofilters.edge(z, sigma, k, qty, cost['total'],
-                                    p['edge_capture_frac'],
-                                    p['edge_multiple'])
-
-        def prob_at(z):
-            return algofilters.probability(z, sigma, k, qty, cost['total'],
-                                           stop_z=p['stop_z'],
-                                           min_win=p['min_win_prob'],
-                                           min_ev=p['min_ev'])
-
-        def check(side, z):
-            if p['edge_on']:
-                verdict = edge_at(z)
-                if verdict['ok'] is None:
-                    return 'edge filter: the round-trip cost is not priced yet'
-                if not verdict['ok']:
-                    return (f"edge filter: capture {verdict['ratio']:.2f}x "
-                            f"the cost, under the {p['edge_multiple']:g}x "
-                            f"required")
-            if p['regime_on'] and trend['state'] == 'TRENDING':
-                return (f"regime: the spread is TRENDING (efficiency "
-                        f"{trend['efficiency_ratio']:.2f}, "
-                        f"{trend['crossings']} crossings)")
-            if p['prob_on']:
-                verdict = prob_at(z)
-                if not verdict['ok']:
-                    return 'probability: ' + (verdict['reason'] or 'not met')
-            low, high = p['half_life_min_min'], p['half_life_max_min']
-            if low or high:
-                if hl_minutes is None:
-                    return 'half-life: the spread is not mean-reverting now'
-                if low and hl_minutes < low:
-                    return (f'half-life {hl_minutes:.0f} min under '
-                            f'{low:g} — reverts too fast (noise)')
-                if high and hl_minutes > high:
-                    return (f'half-life {hl_minutes:.0f} min over '
-                            f'{high:g} — reverts too slowly to hold')
-            return None
-
-        entry = p['entry_z']
-        preview_edge = edge_at(entry)
-        preview_prob = prob_at(entry)
-        filters = {
-            'ready': bool(stats.get('ready')),
-            'cost': cost, 'k': k, 'qty': qty,
-            'edge': dict(preview_edge, on=p['edge_on']),
-            'probability': dict(preview_prob, on=p['prob_on']),
-            'regime': dict(trend, on=p['regime_on']),
-            'half_life_candles': hl_candles,
-            'half_life_minutes': hl_minutes,
-            'half_life_band': [p['half_life_min_min'],
-                               p['half_life_max_min']],
-        }
-        return filters, check
+        """The filters' readings for the panel, and the entry check —
+        `judge_filters`, on this ladder's own candles."""
+        return judge_filters(run.params, md, stats, run.candles.closes(),
+                             cost_in)
 
     def _send(self, pair, run, intent, now):
         """Hand a LIVE intent to the live sink, and keep score."""
@@ -608,10 +531,21 @@ class AlgoDesk:
             history['state'] = 'collecting'
             history['note'] = note or 'collecting candles from the live price'
 
-    def _history(self, pair, run, now):
+    def history(self, pair, days):
+        """`days` of closed spread candles from MT5, for a backtest —
+        built exactly as the live band's history is. (rows, why not)."""
+        params = algo_module.clean_params(getattr(pair, 'algo_params', None))
+        anchor = bands.round_offset(self.offset_for(pair.account_a)) or 0.0
+        run = _Run(self._signature(pair), params, anchor, self.clock())
+        per_day = int(round(1440.0 / params['timeframe_min']))
+        return self._history(pair, run, self.clock(),
+                             count=int(days * per_day) + params['length'] * 2)
+
+    def _history(self, pair, run, now, count=None):
         """Closed spread candles from both legs' MT5 bars, and why not."""
         params = run.params
-        count = params['length'] * bands.KEEP_MULTIPLE + 2
+        if count is None:
+            count = params['length'] * bands.KEEP_MULTIPLE + 2
         leg_a = self.legs.get(pair.account_a)
         leg_b = self.legs.get(pair.account_b)
         if leg_a is None or leg_b is None:
@@ -641,3 +575,128 @@ class AlgoDesk:
             return [], ('the two legs share no closed bars — collecting '
                         'from the live price')
         return rows, None
+
+
+def trend_drift(closes, length, lookback, sigma):
+    """How far the band's middle (EMA) has moved over `lookback` candles,
+    in sigma: + rising, - falling. None until there is enough history to
+    measure it — and unmeasured is not flat."""
+    if not sigma or lookback < 1 or len(closes) < length + lookback:
+        return None
+    now = bands.ema(closes, length)
+    then = bands.ema(closes[:-lookback], length)
+    if now is None or then is None:
+        return None
+    return (now - then) / float(sigma)
+
+
+def judge_filters(p, md, stats, closes, cost_in):
+    """The filters' readings for the panel, and the entry check.
+
+    Read at the z an entry would be taken at for the panel, so its
+    numbers are real before z ever gets there; judged at the actual z
+    when a stretch confirms. A filter that cannot be priced BLOCKS.
+    One function for the live Algo and the backtest, so the backtest
+    judges exactly what the live one would.
+    """
+    cost_in = cost_in or {}
+    qty = p['algo_qty']
+    k = cost_in.get('k')
+    width = None
+    if md and md.get('long_spread') is not None \
+            and md.get('short_spread') is not None:
+        width = md['long_spread'] - md['short_spread']
+    cost = algofilters.round_trip_cost(width, k, qty,
+                                       cost_in.get('commission'),
+                                       cost_in.get('slippage'))
+    sigma = stats.get('sigma') if stats.get('ready') else None
+    hl_candles = algofilters.half_life(closes)
+    hl_minutes = (None if hl_candles is None
+                  else hl_candles * p['timeframe_min'])
+    regime = algofilters.regime(closes[-2 * p['length']:],
+                                p['regime_er_max'],
+                                p['regime_min_crossings'])
+    lookback = max(1, int(round(p['trend_lookback_min']
+                                / float(p['timeframe_min']))))
+    drift = trend_drift(closes, p['length'], lookback, sigma)
+
+    def edge_at(z):
+        return algofilters.edge(z, sigma, k, qty, cost['total'],
+                                p['edge_capture_frac'],
+                                p['edge_multiple'])
+
+    def prob_at(z):
+        return algofilters.probability(z, sigma, k, qty, cost['total'],
+                                       stop_z=p['stop_z'],
+                                       min_win=p['min_win_prob'],
+                                       min_ev=p['min_ev'])
+
+    def check(side, z):
+        if p['edge_on']:
+            verdict = edge_at(z)
+            if verdict['ok'] is None:
+                return 'edge filter: the round-trip cost is not priced yet'
+            if not verdict['ok']:
+                return (f"edge filter: capture {verdict['ratio']:.2f}x "
+                        f"the cost, under the {p['edge_multiple']:g}x "
+                        f"required")
+        if p['regime_on'] and regime['state'] == 'TRENDING':
+            return (f"regime: the spread is TRENDING (efficiency "
+                    f"{regime['efficiency_ratio']:.2f}, "
+                    f"{regime['crossings']} crossings)")
+        if p['trend_on']:
+            if drift is None:
+                return 'trend filter: not enough candles to measure it yet'
+            limit = p['trend_sigma']
+            if side == 'SELL' and drift >= limit:
+                return (f"trend: the middle ROSE {drift:.1f}σ in the last "
+                        f"{p['trend_lookback_min']:g} min — no H to L "
+                        f"against it")
+            if side == 'BUY' and drift <= -limit:
+                return (f"trend: the middle FELL {abs(drift):.1f}σ in the "
+                        f"last {p['trend_lookback_min']:g} min — no L to H "
+                        f"against it")
+        if p['prob_on']:
+            verdict = prob_at(z)
+            if not verdict['ok']:
+                return 'probability: ' + (verdict['reason'] or 'not met')
+        low, high = p['half_life_min_min'], p['half_life_max_min']
+        if low or high:
+            if hl_minutes is None:
+                return 'half-life: the spread is not mean-reverting now'
+            if low and hl_minutes < low:
+                return (f'half-life {hl_minutes:.0f} min under '
+                        f'{low:g} — reverts too fast (noise)')
+            if high and hl_minutes > high:
+                return (f'half-life {hl_minutes:.0f} min over '
+                        f'{high:g} — reverts too slowly to hold')
+        return None
+
+    # The z an entry is actually taken at: the band, or — with re-entry —
+    # the way back inside it.
+    entry = p['entry_z'] - (p['reentry_back'] if p['reentry_on'] else 0.0)
+    preview_edge = edge_at(entry)
+    preview_prob = prob_at(entry)
+    if drift is None:
+        direction = None
+    elif drift >= p['trend_sigma']:
+        direction = 'UP'
+    elif drift <= -p['trend_sigma']:
+        direction = 'DOWN'
+    else:
+        direction = 'FLAT'
+    filters = {
+        'ready': bool(stats.get('ready')),
+        'cost': cost, 'k': k, 'qty': qty,
+        'edge': dict(preview_edge, on=p['edge_on']),
+        'probability': dict(preview_prob, on=p['prob_on']),
+        'regime': dict(regime, on=p['regime_on']),
+        'trend': {'on': p['trend_on'], 'drift_sigma': drift,
+                  'state': direction, 'limit': p['trend_sigma'],
+                  'lookback_min': p['trend_lookback_min']},
+        'half_life_candles': hl_candles,
+        'half_life_minutes': hl_minutes,
+        'half_life_band': [p['half_life_min_min'],
+                           p['half_life_max_min']],
+    }
+    return filters, check
