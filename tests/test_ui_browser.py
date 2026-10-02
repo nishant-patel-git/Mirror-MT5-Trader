@@ -1287,7 +1287,21 @@ def drag(page, selector, dx, dy, steps=8):
     start = grab_point(page, selector)
     page.mouse.move(*start)
     page.mouse.down()
-    page.mouse.move(start[0] + dx, start[1] + dy, steps=steps)
+    # One step at a time, and what the window and the desk did at each,
+    # so a drag that stops short says WHERE and WHY in the failure.
+    page.trace = []
+    for i in range(1, steps + 1):
+        page.mouse.move(start[0] + dx * i / steps, start[1] + dy * i / steps)
+        page.trace.append(page.evaluate(
+            """(sel) => {
+                const node = document.querySelector(sel);
+                const desk = document.getElementById('desktop');
+                return {x: Math.round(node.getBoundingClientRect().left),
+                        left: node.style.left,
+                        dragging: node.classList.contains('dragging'),
+                        scroll: desk.scrollLeft, width: desk.clientWidth,
+                        windows: desk.querySelectorAll('.window').length};
+            }""", selector))
     assert started(page, selector), (
         'the press missed the title bar, so nothing was dragged')
     page.mouse.up()
@@ -1497,7 +1511,9 @@ def test_a_window_goes_where_it_is_dragged_and_is_still_there_after_a_reload(
     drag(page, '.window.ladder', 220, 130)
 
     after = page.locator('.window.ladder').first.bounding_box()
-    assert after['x'] - before['x'] == pytest.approx(220, abs=6)
+    assert after['x'] - before['x'] == pytest.approx(220, abs=6), (
+        f'room {room}, before {before}, after {after}, '
+        f'steps {getattr(page, "trace", None)}')
     assert after['y'] - before['y'] == pytest.approx(130, abs=6)
     assert page.locator('.window.ladder.floating').count() == 1
 
