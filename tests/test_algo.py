@@ -150,13 +150,20 @@ def test_the_band_is_arithmetic_and_nothing_else():
     assert names & (ORDER_VERBS | {'broker', 'legs'}) == set()
 
 
+def test_the_entry_filters_are_arithmetic_and_nothing_else():
+    names, imports = _code_names('mt5trader/algofilters.py')
+    assert imports == {'math'}, imports
+    assert names & (ORDER_VERBS | {'broker', 'legs'}) == set()
+
+
 def test_the_algo_runtime_reads_history_and_cannot_place_an_order():
     """The seam execution will plug into is the SINK. Until then, the
     module that runs the Algo must not be able to reach an order by any
     route — checked as code, because the way this breaks is an edit
     that looks harmless."""
     names, imports = _code_names('mt5trader/algodesk.py')
-    assert imports <= {'logging', 'collections:deque', '.:algo', '.:bands'}, \
+    assert imports <= {'logging', 'collections:deque', '.:algo', '.:bands',
+                       '.:algofilters'}, \
         imports
     assert names & ORDER_VERBS == set(), names & ORDER_VERBS
     # The control: the checker does see a verb when there is one.

@@ -38,7 +38,10 @@ class Clock:
 #: Settings that keep these tests about the Algo and not about the hour
 #: they happen to run at: no cutoff buffer (the session clock is real),
 #: one tick to confirm, no cap.
-QUIET = {'cutoff_buffer_min': 0, 'confirm_ticks': 1, 'max_entry_z': 0}
+QUIET = {'cutoff_buffer_min': 0, 'confirm_ticks': 1, 'max_entry_z': 0,
+         # The entry filters are tested on their own (test_algo_filters);
+         # these tests are about what happens once an entry is allowed.
+         'edge_on': False, 'regime_on': False, 'prob_on': False}
 
 
 def give_history(legs, count=40):

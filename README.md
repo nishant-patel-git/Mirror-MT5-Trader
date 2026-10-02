@@ -141,8 +141,27 @@ as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
   holds an exit.
 - **In position.** The window names it — `in BUY @ 59.11 — TP 59.31 · SL
   58.93` — and draws an SL ◄ entry ► TP bar with the closing price on it.
-- **Display.** In the Fair Spread window's own slots: the B/S rows carry z and
-  the band level, the hint line says what the Algo says. No new window.
+- **The filters** (from the stat-arb system's algo), every one judged before an
+  entry in dry run and LIVE alike — and one that cannot be priced blocks:
+  - *Edge*: expected capture (0.5 x |z| x sigma, in money) at least 1.5x the
+    round-trip cost — the spread's bid-ask crossed both ways, commission both
+    legs both ways, and the slippage budget.
+  - *Regime*: no entry while the spread is TRENDING (Kaufman efficiency ratio
+    >= 0.6 and <= 4 crossings of its mean).
+  - *Probability / EV*: the Ornstein-Uhlenbeck chance of reaching the mean
+    before the stop z at least 60%, and a positive expected value after costs.
+  - *Half-life band*: off until bounds (minutes) are typed.
+  - *Ready*: collecting candles always blocks.
+- **The switch** is on each ladder's title bar — ALGO OFF / ALGO DRY / ALGO
+  LIVE; click it for the menu. LIVE still asks to confirm.
+- **The Algo window** opens while the Algo is on, with the stat-arb dashboard's
+  three panels: *Signal & Position* (sell/buy spread tiles with their z and
+  entry line, FLAT/LONG/SHORT, and in a position the entry, each leg's fill and
+  close-now price, BE/TP/SL and the SL-entry-TP bar), *Statistics* (EMA mean,
+  sigma, half-life, regime, candles, band, data progress) and *Filters* (Edge /
+  Regime / Prob / Ready badges, capture / cost against the requirement, round
+  trip, win chance, EV, the day's counts, and the last signal blocked and why).
+  Closing it turns the Algo off.
 - **Record.** Every signal goes to the audit trail; *Algo signals CSV* on the
   Fills tab exports them, with what an exit would have made after costs.
 - **Dry run or LIVE.** *Algo: Dry run* records signals and sends nothing.

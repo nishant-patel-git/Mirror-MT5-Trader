@@ -161,6 +161,26 @@ DEFAULT_PARAMS = {
     #: minus this. Off until a desk sets its own number.
     'daily_loss_limit': 0.0,
     'max_losses_row': 3,
+    # The entry FILTERS (see `algofilters`). Each must clear before an
+    # entry, in dry run and LIVE alike; collecting candles always blocks.
+    #: Edge: expected capture (capture_frac x |z| x sigma, in money) must
+    #: be at least edge_multiple x the round-trip cost.
+    'edge_on': True,
+    'edge_multiple': 1.5,
+    'edge_capture_frac': 0.5,
+    #: Regime: no entry while the spread is TRENDING.
+    'regime_on': True,
+    'regime_er_max': 0.6,
+    'regime_min_crossings': 4,
+    #: Probability / EV: the OU win chance to the mean before the stop z,
+    #: and the expected value after costs.
+    'prob_on': True,
+    'min_win_prob': 0.60,
+    'min_ev': 0.0,
+    #: Half-life band in MINUTES: no entry when the spread reverts faster
+    #: than the floor (noise) or slower than the ceiling. 0 = that end off.
+    'half_life_min_min': 0.0,
+    'half_life_max_min': 0.0,
     # The three optional exits — every one OFF until a ladder asks.
     'stop_z_on': False,
     'stop_z': 4.0,
@@ -170,9 +190,9 @@ DEFAULT_PARAMS = {
 }
 
 _BOOLS = ('stop_z_on', 'reversion_on', 'time_stop_on', 'stop_loss_on',
-          'progress_bar')
+          'progress_bar', 'edge_on', 'regime_on', 'prob_on')
 _INTS = ('timeframe_min', 'length', 'confirm_ticks', 'time_stop_candles',
-         'max_trades_day', 'max_losses_row')
+         'max_trades_day', 'max_losses_row', 'regime_min_crossings')
 
 
 def clean_params(raw):
@@ -280,7 +300,9 @@ class AlgoSignal:
         - `gates`: {'health': why the price cannot be trusted, or None;
           'cutoff_min': minutes to the session cutoff, negative past
           it, None unmeasured; 'halt': a day's limit that has been hit,
-          in words, or None}.
+          in words, or None; 'entry_check': f(side, z) -> why a
+          stretch that HAS confirmed may still not be entered (the
+          filters), or None}.
         """
         p = self.params
         gates = gates or {}
@@ -385,6 +407,11 @@ class AlgoSignal:
         if blocked:
             body['state'] = 'BLOCKED'
             body['blocked'] = blocked
+            # A signal that WOULD have entered: the side and z it was
+            # held back at, for "Last signal blocked".
+            body['blocked_side'] = side
+            body['blocked_z'] = (body['z_sell'] if side == 'SELL'
+                                 else body['z_buy'])
             self._entry_live = None
             return
         body['state'] = 'SIGNAL'
@@ -427,6 +454,12 @@ class AlgoSignal:
             if z is not None and abs(z) > p['max_entry_z']:
                 return (f'z {z:+.2f} is past the {p["max_entry_z"]:g} cap — '
                         f'a blow-out, not a stretch')
+        check = gates.get('entry_check')
+        if side is not None and check is not None:
+            # The filters — edge, regime, probability, half-life — judged
+            # at the z this entry would actually be taken at.
+            z = body['z_sell'] if side == 'SELL' else body['z_buy']
+            return check(side, z)
         return None
 
     def entry_failed(self, now):

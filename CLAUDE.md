@@ -32,8 +32,10 @@ from.
   LIVE it takes NO new manual orders (closes still work), and LIVE is
   refused on a ladder holding a manual position or a working order.
   The Algo trades through the same executor a click uses: MARKET both
-  legs in, closes by TICKET. `algo.py`, `bands.py` and `algodesk.py`
-  decide and must not reach an order; `algoexec.py` is the one module
+  legs in, closes by TICKET. It never enters while it is collecting
+  candles, or past a filter it has switched on (edge, regime,
+  probability, half-life) — and a filter it cannot price BLOCKS. `algo.py`, `bands.py`, `algofilters.py` and
+  `algodesk.py` decide and must not reach an order; `algoexec.py` is the one module
   that sends, and only via the coordinator — `tests/test_algo.py`
   fails the build otherwise. Nothing else places, modifies or cancels
   an order by itself.

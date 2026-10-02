@@ -37,6 +37,7 @@ import logging
 from collections import deque
 
 from . import algo as algo_module
+from . import algofilters
 from . import bands
 
 #: How often a ladder that is still short of candles asks MT5 again.
@@ -111,6 +112,11 @@ class _Run:
                         'candles': 0}
         self.recent = deque(maxlen=20)
         self.body = None
+        #: The last stretch that confirmed and was HELD BACK: side, z,
+        #: when, and why — what "Last signal blocked" shows.
+        self.last_blocked = None
+        #: position id -> the z the Algo entered it at.
+        self.entry_z = {}
 
 
 class AlgoDesk:
@@ -234,8 +240,15 @@ class AlgoDesk:
             if closed is not None and self.store is not None:
                 self._save(pair, run, [closed], 'live')
         self._backfill_if_due(pair, run, now)
-        body = run.signal.evaluate(now, md, run.candles.stats(), positions,
-                                   gates)
+        stats = run.candles.stats()
+        filters, check = self._filters(run, md, stats, gates.get('cost'))
+        gates['entry_check'] = check
+        body = run.signal.evaluate(now, md, stats, positions, gates)
+        body['filters'] = filters
+        if body.get('blocked_side'):
+            run.last_blocked = {'side': body['blocked_side'],
+                                'z': body.get('blocked_z'), 'at': now,
+                                'reason': body.get('blocked')}
         for intent in body['intents']:
             recorded = self.sink.handle(pair.key, intent, run.mode)
             if run.mode == algo_module.LIVE:
@@ -249,6 +262,89 @@ class AlgoDesk:
         body['halt'] = halt
         run.body = body
         return body
+
+    def _filters(self, run, md, stats, cost_in):
+        """The filters' readings for the panel, and the entry check.
+
+        Read at the ENTRY threshold for the panel, so its numbers are
+        real before z ever gets there; judged at the actual z when a
+        stretch confirms. A filter that cannot be priced BLOCKS.
+        """
+        p = run.params
+        cost_in = cost_in or {}
+        qty = p['algo_qty']
+        k = cost_in.get('k')
+        width = None
+        if md and md.get('long_spread') is not None \
+                and md.get('short_spread') is not None:
+            width = md['long_spread'] - md['short_spread']
+        cost = algofilters.round_trip_cost(width, k, qty,
+                                           cost_in.get('commission'),
+                                           cost_in.get('slippage'))
+        sigma = stats.get('sigma') if stats.get('ready') else None
+        closes = run.candles.closes()
+        hl_candles = algofilters.half_life(closes)
+        hl_minutes = (None if hl_candles is None
+                      else hl_candles * p['timeframe_min'])
+        trend = algofilters.regime(closes[-2 * p['length']:],
+                                   p['regime_er_max'],
+                                   p['regime_min_crossings'])
+
+        def edge_at(z):
+            return algofilters.edge(z, sigma, k, qty, cost['total'],
+                                    p['edge_capture_frac'],
+                                    p['edge_multiple'])
+
+        def prob_at(z):
+            return algofilters.probability(z, sigma, k, qty, cost['total'],
+                                           stop_z=p['stop_z'],
+                                           min_win=p['min_win_prob'],
+                                           min_ev=p['min_ev'])
+
+        def check(side, z):
+            if p['edge_on']:
+                verdict = edge_at(z)
+                if verdict['ok'] is None:
+                    return 'edge filter: the round-trip cost is not priced yet'
+                if not verdict['ok']:
+                    return (f"edge filter: capture {verdict['ratio']:.2f}x "
+                            f"the cost, under the {p['edge_multiple']:g}x "
+                            f"required")
+            if p['regime_on'] and trend['state'] == 'TRENDING':
+                return (f"regime: the spread is TRENDING (efficiency "
+                        f"{trend['efficiency_ratio']:.2f}, "
+                        f"{trend['crossings']} crossings)")
+            if p['prob_on']:
+                verdict = prob_at(z)
+                if not verdict['ok']:
+                    return 'probability: ' + (verdict['reason'] or 'not met')
+            low, high = p['half_life_min_min'], p['half_life_max_min']
+            if low or high:
+                if hl_minutes is None:
+                    return 'half-life: the spread is not mean-reverting now'
+                if low and hl_minutes < low:
+                    return (f'half-life {hl_minutes:.0f} min under '
+                            f'{low:g} — reverts too fast (noise)')
+                if high and hl_minutes > high:
+                    return (f'half-life {hl_minutes:.0f} min over '
+                            f'{high:g} — reverts too slowly to hold')
+            return None
+
+        entry = p['entry_z']
+        preview_edge = edge_at(entry)
+        preview_prob = prob_at(entry)
+        filters = {
+            'ready': bool(stats.get('ready')),
+            'cost': cost, 'k': k, 'qty': qty,
+            'edge': dict(preview_edge, on=p['edge_on']),
+            'probability': dict(preview_prob, on=p['prob_on']),
+            'regime': dict(trend, on=p['regime_on']),
+            'half_life_candles': hl_candles,
+            'half_life_minutes': hl_minutes,
+            'half_life_band': [p['half_life_min_min'],
+                               p['half_life_max_min']],
+        }
+        return filters, check
 
     def _send(self, pair, run, intent, now):
         """Hand a LIVE intent to the live sink, and keep score."""
@@ -267,6 +363,7 @@ class AlgoDesk:
                 run.day['trades'] += 1
                 if answer.get('position_id'):
                     run.mine.add(answer['position_id'])
+                    run.entry_z[answer['position_id']] = intent.get('z')
             else:
                 run.signal.entry_failed(now)
         elif not answer.get('ok'):
@@ -317,8 +414,12 @@ class AlgoDesk:
         body = dict(run.body or {'algo': algo_module.ALGO, 'state': 'STARTING',
                                  'params': dict(run.params)})
         body.pop('intents', None)
+        for row in body.get('positions') or ():
+            row['entry_z'] = run.entry_z.get(row.get('position_id'))
         body.update(on=True, mode=run.mode, day=dict(run.day),
                     owned=sorted(run.mine), history=dict(run.history),
+                    last_blocked=(dict(run.last_blocked)
+                                  if run.last_blocked else None),
                     recent=list(run.recent), started_at=run.started_at,
                     timeframe_min=run.params['timeframe_min'],
                     length=run.params['length'])

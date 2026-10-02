@@ -1949,32 +1949,147 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
   cursor: not-allowed;
 }
 
-/* The Algo's in-position bar: stop loss on the left, take-profit on
- * the right, the entry marked between them and the closing price as a
- * tick on it. Green is the way to the target, red the way to the stop. */
-.fairwin .algo-progress { margin: 3px 0 2px; }
-.fairwin .ap-track {
-  position: relative;
-  height: 8px;
-  background: var(--frame-line, #ccc);
+/* ---- The Algo window: Signal & Position, Statistics, Filters ---------- */
+.window.algowin {
+  width: 340px;
+  min-width: 300px;
+  max-width: 420px;
+}
+.window.algowin .aw-body { padding: 0; background: #fff; }
+.window.algowin .aw-mode {
+  font: 700 10px var(--font);
+  padding: 0 5px;
   border-radius: 2px;
-  overflow: hidden;
+  margin-left: 6px;
 }
-.fairwin .ap-fill { position: absolute; top: 0; bottom: 0; }
-.fairwin .ap-fill.up { background: #2e9e4f; }
-.fairwin .ap-fill.down { background: #c0392b; }
-.fairwin .ap-entry, .fairwin .ap-mark {
-  position: absolute; top: -1px; bottom: -1px; width: 2px;
+.window.algowin .aw-mode.live { background: #c0392b; color: #fff; }
+.window.algowin .aw-mode.dry { background: #e8a33d; color: #fff; }
+.window.algowin .aw-section {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--frame-line);
+  font-size: 11px;
 }
-.fairwin .ap-entry { background: #555; }
-.fairwin .ap-mark { background: #000; }
-.fairwin .ap-pct { font-size: 9px; text-align: center; }
-.fairwin .ap-ends {
-  display: flex;
-  justify-content: space-between;
-  font-size: 9px;
-  color: var(--muted, #666);
+.window.algowin .aw-head {
+  font: 700 10px var(--font);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--frame-muted);
+  margin-bottom: 3px;
+}
+.window.algowin .aw-head2 { font-weight: 700; margin-bottom: 1px; }
+.window.algowin .aw-tiles {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 4px;
+  align-items: stretch;
+}
+.window.algowin .aw-tile {
+  border: 2px solid transparent;
+  border-radius: 3px;
+  padding: 2px 4px;
+  text-align: center;
+  background: #f6f6f6;
+}
+.window.algowin .aw-tile.hit { border-color: currentColor; background: #fff; }
+.window.algowin .aw-tile.sell { color: var(--bid, #1f6fd1); }
+.window.algowin .aw-tile.buy { color: var(--ask, #c0392b); }
+.window.algowin .aw-tile-head { font: 700 9px var(--font); color: var(--frame-text); }
+.window.algowin .aw-tile-price { font: 700 16px var(--mono); }
+.window.algowin .aw-tile-z { font: 700 13px var(--mono); }
+.window.algowin .aw-tile-entry { font-size: 9px; color: var(--frame-muted); }
+.window.algowin .aw-pos {
+  align-self: center;
+  font: 700 12px var(--font);
+  padding: 4px 6px;
+  border-radius: 3px;
+  color: #fff;
+  background: #888;
+  white-space: nowrap;
+}
+.window.algowin .aw-pos.long { background: #2e9e4f; }
+.window.algowin .aw-pos.short { background: #c0392b; }
+.window.algowin .aw-line { margin: 3px 0; font-weight: 700; }
+.window.algowin .aw-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px 10px;
+}
+.window.algowin .aw-kv { display: flex; justify-content: space-between; gap: 6px; }
+.window.algowin .aw-kv.wide { grid-column: 1 / -1; }
+.window.algowin .aw-kv > span { color: var(--frame-muted); white-space: nowrap; }
+.window.algowin .aw-kv > b { font: 700 11px var(--mono); text-align: right; }
+.window.algowin .aw-kv > b.up { color: #2e9e4f; }
+.window.algowin .aw-kv > b.down { color: #c0392b; }
+.window.algowin .aw-data {
+  display: flex; align-items: center; gap: 6px; margin-top: 3px;
+  color: var(--frame-muted);
+}
+.window.algowin .aw-bar {
+  flex: 1; height: 6px; background: #e3e3e3; border-radius: 3px; overflow: hidden;
+}
+.window.algowin .aw-bar > div { height: 100%; }
+.window.algowin .aw-bar > .ok { background: #2e9e4f; }
+.window.algowin .aw-bar > .wait { background: #e8a33d; }
+.window.algowin .aw-badges {
+  display: flex; gap: 8px; margin-bottom: 4px; text-align: center;
+}
+.window.algowin .aw-badges small { display: block; font-size: 9px; color: var(--frame-muted); }
+.window.algowin .aw-badge {
+  display: inline-block; min-width: 26px; padding: 0 4px;
+  border-radius: 2px; font: 700 10px var(--font); color: #fff;
+}
+.window.algowin .aw-badge.ok { background: #2e9e4f; }
+.window.algowin .aw-badge.bad { background: #c0392b; }
+.window.algowin .aw-badge.wait { background: #e8a33d; }
+.window.algowin .aw-badge.off { background: #999; }
+.window.algowin .aw-blocked {
+  margin-top: 4px; padding: 3px 4px; background: #f3f3f3; border-radius: 3px;
 }
 
-/* The Algo window's heading while the Algo is LIVE: it trades. */
-.fairwin .rail-label.algo-live { color: #c0392b; font-weight: 700; }
+/* SL <- entry -> TP: the stop on the left, the target on the right, the
+ * entry marked and the closing price a tick on it. */
+.window.algowin .algo-progress { margin: 3px 0 1px; }
+.window.algowin .ap-pct { font-size: 9px; text-align: center; }
+.window.algowin .ap-track {
+  position: relative; height: 8px; background: #e3e3e3;
+  border-radius: 2px; overflow: hidden;
+}
+.window.algowin .ap-fill { position: absolute; top: 0; bottom: 0; }
+.window.algowin .ap-fill.up { background: #2e9e4f; }
+.window.algowin .ap-fill.down { background: #c0392b; }
+.window.algowin .ap-entry, .window.algowin .ap-mark {
+  position: absolute; top: -1px; bottom: -1px; width: 2px;
+}
+.window.algowin .ap-entry { background: #555; }
+.window.algowin .ap-mark { background: #000; }
+.window.algowin .ap-ends {
+  display: flex; justify-content: space-between; font-size: 9px;
+  color: var(--frame-muted);
+}
+
+/* ---- The Algo switch in a ladder's title bar ------------------------- */
+.titlebar .algo-switch { position: relative; margin-left: 4px; }
+.titlebar .algo-btn {
+  font: 700 10px var(--font);
+  padding: 0 6px;
+  border: 1px solid rgba(0, 0, 0, .25);
+  border-radius: 2px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.titlebar .algo-btn.off { background: #e9e9e9; color: #444; }
+.titlebar .algo-btn.dry { background: #e8a33d; color: #fff; }
+.titlebar .algo-btn.live { background: #c0392b; color: #fff; }
+.titlebar .algo-menu {
+  position: absolute; right: 0; top: 100%; z-index: 50;
+  display: flex; flex-direction: column; min-width: 170px;
+  background: #fff; border: 1px solid var(--frame-line);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .2);
+}
+.titlebar .algo-menu[hidden] { display: none; }
+.titlebar .algo-menu button {
+  text-align: left; padding: 4px 8px; border: 0; background: #fff;
+  font: 11px var(--font); cursor: pointer; color: #222;
+}
+.titlebar .algo-menu button:hover { background: #eef3fb; }
+.titlebar .algo-menu button.live { color: #c0392b; font-weight: 700; }

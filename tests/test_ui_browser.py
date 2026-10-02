@@ -242,6 +242,8 @@ def snapshot(order_type='LIMIT', confirm=False, same_login=None,
                 # it; None where neither caps volume.
                 'max_qty': max_qty,
                 'algo': algo,
+                'algo_on': algo == 'ALGO',
+                'algo_mode': (algo_block or {}).get('mode') or 'DRY_RUN',
                 'algo_window': show_fair_window,
                 'algo_block': algo_block or {'algo': algo,
                                              'window': show_fair_window},
@@ -4997,89 +4999,176 @@ def test_an_unreadable_account_leaves_the_row_UNMEASURED(page):
         page.evaluate(RELEASE_THE_SNAPSHOT)
 
 
-def test_the_Algo_reads_in_the_fair_windows_own_slots(page):
-    """The Algo adds no window, tab or panel: with it on, the Fair
-    Spread window's two B/S rows carry z and the band, and its hint line
-    says what the Algo says. The control — the same window with the Algo
-    off — is the fair spread again, labels and all."""
+def _algo_block(**over):
+    block = {
+        'algo': 'ALGO', 'on': True, 'mode': 'DRY_RUN', 'state': 'SIGNAL',
+        'signal': 'SELL', 'ready': True, 'z_sell': 2.61, 'z_buy': 1.9,
+        'mean': 59.0, 'sigma': 0.04, 'upper': 59.10, 'lower': 58.90,
+        'count': 20, 'needed': 20, 'timeframe_min': 15, 'length': 20,
+        'params': {'entry_z': 2.5, 'confirm_ticks': 3, 'progress_bar': True,
+                   'stop_loss_on': True, 'max_trades_day': 10,
+                   'edge_capture_frac': 0.5},
+        'history': {'note': 'mt5'}, 'positions': [], 'health': None,
+        'day': {'trades': 2, 'losses_row': 0, 'pnl': 1.4},
+        'last_blocked': None, 'window': True,
+        'filters': {
+            'ready': True, 'qty': 1,
+            'cost': {'crossing': 2.0, 'commission': 1.0, 'slippage': 0.0,
+                     'total': 3.0},
+            'edge': {'on': True, 'ok': True, 'ratio': 2.4, 'required': 1.5,
+                     'capture': 7.2},
+            'probability': {'on': True, 'ok': True, 'win': 0.986,
+                            'ev': 4.1},
+            'regime': {'on': True, 'state': 'RANGE',
+                       'efficiency_ratio': 0.2, 'crossings': 9},
+            'half_life_minutes': 42.0, 'half_life_band': [0, 0]}}
+    block.update(over)
+    return block
+
+
+def test_the_Algo_has_a_window_of_its_own_with_the_three_panels(page):
+    """Signal & Position, Statistics, Filters — the stat-arb dashboard's
+    three panels — in one window per ladder while its Algo is on. The
+    control: the Algo off, and the window is gone."""
     open_ladder(page)
     publisher = page.paths['publisher']
-    publisher.show_fair_window = True
     publisher.algo = 'ALGO'
-    publisher.algo_block = {
-        'algo': 'ALGO', 'on': True, 'state': 'SIGNAL', 'signal': 'SELL',
-        'ready': True, 'z_sell': 2.61, 'z_buy': 1.9, 'mean': 59.0,
-        'sigma': 0.04, 'upper': 59.10, 'lower': 58.90, 'count': 20,
-        'needed': 20, 'params': {'entry_z': 2.5, 'confirm_ticks': 3},
-        'timeframe_min': 15, 'length': 20, 'history': {'note': 'mt5'},
-        'positions': [], 'health': None, 'window': True}
+    publisher.algo_block = _algo_block()
     try:
         publisher.publish()
+        page.wait_for_selector('.window.algowin', timeout=WAIT)
         page.wait_for_function(
-            "() => (document.querySelector('.window.fairwin .fair-kind')"
-            " || {}).textContent.includes('SELL signal')", timeout=WAIT)
-        label = page.text_content('.window.fairwin .fair .rail-label')
-        assert label.strip().startswith('Algo')
-        assert page.text_content('.window.fairwin .fair-sell') == '+2.61'
-        assert page.text_content('.window.fairwin .gap-sell') == '59.10'
-        assert page.locator('.window.fairwin').count() == 1
-    finally:
-        # The control: Algo off, and the window is the fair spread again.
-        publisher.algo = 'NONE'
-        publisher.algo_block = None
-        publisher.publish()
-    page.wait_for_function(
-        "() => (document.querySelector('.window.fairwin .fair .rail-label')"
-        " || {}).textContent.trim().startsWith('Fair spread')", timeout=WAIT)
-    assert 'SELL' not in page.text_content('.window.fairwin .fair-kind')
-
-
-def test_in_a_position_the_Algo_names_the_entry_and_draws_the_bar(page):
-    """In a position the Algo says what it is in — side and the price it
-    went on at — and draws SL <- entry -> TP with the closing price on
-    it. The control: flat, there is no bar."""
-    open_ladder(page)
-    publisher = page.paths['publisher']
-    publisher.show_fair_window = True
-    publisher.algo = 'ALGO'
-    base = {
-        'algo': 'ALGO', 'on': True, 'ready': True, 'z_sell': 0.4,
-        'z_buy': 0.6, 'mean': 59.0, 'sigma': 0.04, 'upper': 59.10,
-        'lower': 58.90, 'count': 20, 'needed': 20,
-        'params': {'entry_z': 2.5, 'progress_bar': True,
-                   'stop_loss_on': True, 'stop_loss_pct': 2.0},
-        'timeframe_min': 15, 'length': 20, 'history': {}, 'health': None,
-        'sl_buy': 58.80, 'sl_sell': 59.40, 'window': True}
-    publisher.algo_block = dict(base, state='IN_POSITION', positions=[{
-        'position_id': 'POS-7', 'side': 'BUY', 'entry_spread': 59.11,
-        'closing_spread': 59.21, 'tp': 59.31, 'sl': 58.91,
-        'progress': 0.5, 'exit': None}])
-    try:
-        publisher.publish()
-        page.wait_for_function(
-            "() => (document.querySelector('.window.fairwin .fair-kind')"
-            " || {}).textContent.includes('BUY @ 59.11')", timeout=WAIT)
-        kind = page.text_content('.window.fairwin .fair-kind')
-        assert 'TP 59.31' in kind and 'SL 58.91' in kind
-        assert page.is_visible('.window.fairwin .algo-progress')
-        assert '50% to TP' in page.text_content('.window.fairwin .ap-pct')
-        assert page.is_visible('.window.fairwin .algo-sl-row')
-
-        # The control: flat again, and the bar is gone.
-        publisher.algo_block = dict(base, state='WATCHING', positions=[])
-        publisher.publish()
-        page.wait_for_function(
-            "() => document.querySelector('.window.fairwin .algo-progress')"
-            ".hidden", timeout=WAIT)
+            "() => (document.querySelector('.window.algowin .aw-signal')"
+            " || {textContent: ''}).textContent.includes('SELL signal')", timeout=WAIT)
+        text = page.text_content('.window.algowin')
+        for heading in ('Signal & Position', 'Statistics', 'Filters'):
+            assert heading.upper() in text.upper(), heading
+        assert 'SELL SPREAD' in text and 'BUY SPREAD' in text
+        assert '2.40' in text and 'req 1.5' in text        # capture / cost
+        assert 'Mean-rev' in text and '42 min' in text
+        assert page.locator('.window.algowin .aw-tile.sell.hit').count() == 1
+        assert page.text_content('.window.algowin .aw-mode') == 'DRY RUN'
+        # The Fair Spread window no longer carries the Algo.
+        assert 'SELL signal' not in (page.text_content('.window.fairwin')
+                                     if page.locator('.window.fairwin').count()
+                                     else '')
     finally:
         publisher.algo = 'NONE'
         publisher.algo_block = None
         publisher.publish()
-    # ...and with the Algo off, neither the bar nor the SL row exists.
     page.wait_for_function(
-        "() => document.querySelector('.window.fairwin .algo-sl-row')"
-        ".hidden", timeout=WAIT)
+        "() => !document.querySelector('.window.algowin')", timeout=WAIT)
 
+
+def test_a_blocked_signal_names_the_filter_that_held_it(page):
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(
+        state='BLOCKED', signal=None,
+        blocked='edge filter: capture 0.42x the cost, under the 1.5x required',
+        last_blocked={'side': 'SELL', 'z': 3.04, 'at': time.time(),
+                      'reason': 'edge filter: capture 0.42x the cost, under '
+                                'the 1.5x required'})
+    publisher.algo_block['filters']['edge'].update(ok=False, ratio=0.42)
+    try:
+        publisher.publish()
+        page.wait_for_function(
+            "() => (document.querySelector('.window.algowin .aw-blocked')"
+            " || {textContent: ''}).textContent.includes('edge filter')", timeout=WAIT)
+        assert 'SELL' in page.text_content('.window.algowin .aw-blocked')
+        assert page.locator('.window.algowin .aw-badge.bad').count() >= 1
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def test_in_a_position_the_Algo_window_shows_entry_legs_levels_and_the_bar(
+        page):
+    """In a position: what it is in, at what price, each leg's fill and
+    where it would close now, BE/TP/SL, and SL <- entry -> TP. The
+    control: flat, there is no position detail and no bar."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+    held = {'position_id': 'POS-7', 'side': 'BUY', 'quantity': 1,
+            'entry_spread': 59.11, 'closing_spread': 59.21, 'tp': 59.31,
+            'sl': 58.91, 'break_even': 59.13, 'progress': 0.5, 'exit': None,
+            'net_pnl': 0.8, 'entry_z': -2.6, 'age_sec': 125,
+            'leg_a_side': 'SELL', 'leg_a_entry': 4292.0, 'leg_a_now': 4292.2,
+            'leg_b_side': 'BUY', 'leg_b_entry': 4351.1, 'leg_b_now': 4351.4}
+    publisher.algo_block = _algo_block(state='IN_POSITION', signal=None,
+                                       positions=[held])
+    try:
+        publisher.publish()
+        page.wait_for_function(
+            "() => (document.querySelector('.window.algowin .aw-signal')"
+            " || {textContent: ''}).textContent.includes('BUY @ 59.11')", timeout=WAIT)
+        text = page.text_content('.window.algowin .aw-signal')
+        assert 'LONG' in text and 'TP 59.31' in text and 'SL 58.91' in text
+        assert '4351.10' in text and '4351.40' in text      # leg B fill/now
+        assert '50% to TP' in text
+        publisher.algo_block = _algo_block(state='WATCHING', signal=None)
+        publisher.publish()
+        page.wait_for_function(
+            "() => !document.querySelector('.window.algowin .algo-progress')",
+            timeout=WAIT)
+        assert 'FLAT' in page.text_content('.window.algowin .aw-signal')
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def test_the_ladder_title_bar_carries_the_Algo_switch(page):
+    """One click from the ladder: OFF / DRY RUN / LIVE. Picking LIVE
+    still asks first and sends nothing until confirmed."""
+    open_ladder(page)
+    page.paths['publisher'].publish()
+    page.wait_for_function(
+        "() => (document.querySelector('.ladder .algo-btn') || {})"
+        ".textContent === 'ALGO OFF'", timeout=WAIT)
+    page.evaluate(SPY_ON_COMMANDS)
+    try:
+        page.click('.ladder .algo-btn')
+        page.wait_for_selector('.ladder .algo-menu:not([hidden])',
+                               timeout=WAIT)
+        page.click('.ladder .algo-menu button[data-algo="ALGO_LIVE"]')
+        page.wait_for_selector('#modal:not(.hidden)', timeout=WAIT)
+        assert 'LIVE' in page.text_content('#modal-title')
+        assert algo_commands(page) == []                 # nothing sent yet
+        page.click('#modal-cancel')
+        # The control: a dry run goes straight through.
+        page.click('.ladder .algo-btn')
+        page.click('.ladder .algo-menu button[data-algo="ALGO"]')
+        page.wait_for_function(
+            "() => window.__commands.some(c => c.kind === 'set_algo')",
+            timeout=WAIT)
+        assert algo_commands(page)[-1]['payload']['mode'] == 'DRY_RUN'
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch; }')
+
+
+def test_the_switch_says_LIVE_when_the_Algo_trades(page):
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(mode='LIVE')
+    try:
+        publisher.publish()
+        page.wait_for_function(
+            "() => (document.querySelector('.ladder .algo-btn') || {})"
+            ".textContent === 'ALGO LIVE'", timeout=WAIT)
+        assert 'live' in page.get_attribute('.ladder .algo-btn', 'class')
+        assert page.text_content('.window.algowin .aw-mode') == 'LIVE'
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+    page.wait_for_function(
+        "() => (document.querySelector('.ladder .algo-btn') || {})"
+        ".textContent === 'ALGO OFF'", timeout=WAIT)
 
 #: Capture every engine command the page sends, answering each as the
 #: engine would — so a test can read exactly what was asked for.

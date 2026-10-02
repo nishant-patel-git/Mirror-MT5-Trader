@@ -186,18 +186,6 @@
           <tr><th>Gap</th><td class="gap-buy">—</td><td class="gap-sell">—</td></tr>
         </table>
         <div class="fair-kind hint"></div>
-        <!-- The Algo only, while a position is on: where the closing
-             price sits between the stop loss and the take-profit, with
-             the entry marked. Hidden for Fair spread and when flat. -->
-        <div class="algo-progress" hidden>
-          <div class="ap-pct"></div>
-          <div class="ap-track">
-            <div class="ap-fill"></div>
-            <div class="ap-entry" title="entry"></div>
-            <div class="ap-mark"></div>
-          </div>
-          <div class="ap-ends"><span class="ap-sl"></span><span class="ap-tp"></span></div>
-        </div>
         <div class="fair-note hint"></div>
         <!-- A conclusion drawn from an input that can be proven wrong
              does not render at all: the warning REPLACES the reading,
@@ -223,15 +211,32 @@
           <tr class="heads"><th></th><th class="col-b" title="Buying the spread">B</th><th class="col-s" title="Selling the spread">S</th></tr>
           <tr><th>B/E</th><td class="be-buy">—</td><td class="be-sell">—</td></tr>
           <tr><th>TP</th><td class="tp-buy">—</td><td class="tp-sell">—</td></tr>
-          <!-- The Algo's stop loss for a NEW entry: break-even less its
-               % of margin. Shown only while the Algo is on. -->
-          <tr class="algo-sl-row" hidden><th title="stop loss: break-even less the Algo&#8217;s SL % of margin">SL</th><td class="sl-buy">—</td><td class="sl-sell">—</td></tr>
           <!-- The other thing that decides where a position ends,
                read-only beside the two that price it. -->
           <tr><th>o/n</th><td class="x-overnight" colspan="2">—</td></tr>
         </table>
         <div class="exit-note hint"></div>
       </div>
+    </div>
+  </section>
+</template>
+
+<!-- The Algo, one window per ladder while it is on: SIGNAL & POSITION,
+     STATISTICS, FILTERS. Filled from the engine's Algo block on every
+     poll; nothing in it trades — the switch is on the ladder's title
+     bar, and closing this window turns the Algo off. -->
+<template id="algo-template">
+  <section class="window algowin">
+    <div class="titlebar">
+      <span class="swatch"></span>
+      <span class="title aw-pair"></span>
+      <span class="aw-mode"></span>
+      <span class="winbtns"><button class="winbtn aw-cog" title="This ladder&#8217;s Algo settings">&#9881;</button><button class="winbtn close" title="Close — and turn the Algo off for this ladder">&times;</button></span>
+    </div>
+    <div class="aw-body">
+      <div class="aw-section aw-signal"></div>
+      <div class="aw-section aw-stats"></div>
+      <div class="aw-section aw-filters"></div>
     </div>
   </section>
 </template>
@@ -243,6 +248,17 @@
       <span class="title"></span>
       <span class="route"></span>
       <span class="mode-badge"></span>
+      <!-- The Algo's switch, where the ladder is: OFF / DRY RUN / LIVE,
+           one click to the menu. LIVE still asks to confirm, and the
+           engine still refuses what it cannot do. -->
+      <span class="algo-switch">
+        <button type="button" class="algo-btn" title="This ladder's Algo — click to turn it off, to a dry run, or LIVE">ALGO OFF</button>
+        <span class="algo-menu" hidden>
+          <button type="button" data-algo="NONE">Off</button>
+          <button type="button" data-algo="ALGO">Dry run — signals only</button>
+          <button type="button" data-algo="ALGO_LIVE" class="live">LIVE — it trades</button>
+        </span>
+      </span>
       <span class="winbtns"><button class="winbtn ladder-cog" title="This ladder's own settings — mode, exit costs, carry, Algo">&#9881;</button><button class="winbtn close" title="Close this ladder">&times;</button></span>
     </div>
     <div class="quotestrip">
@@ -556,6 +572,26 @@
           <label class="lsf" title="Entries stop for the day after this many losing Algo trades in a row. 0 = off.">
             <span>Losses in a row</span>
             <input class="ls-az-losses" type="number" min="0" step="1"></label>
+          <label class="lsf check-row" title="Edge filter: no entry unless the expected capture (capture fraction x |z| x sigma, in money) is at least this many times the round-trip cost — crossing + commission + slippage.">
+            <span>Edge filter &#215;</span>
+            <input type="checkbox" class="ls-az-edge-on">
+            <input class="ls-az-edge" type="number" min="0" step="0.1"></label>
+          <label class="lsf" title="How much of the full reversion (|z| x sigma) a trade is expected to capture. 0.5 = half.">
+            <span>Capture fraction</span>
+            <input class="ls-az-capture" type="number" min="0.05" max="1" step="0.05"></label>
+          <label class="lsf check-row" title="No entry while the spread is TRENDING: a high efficiency ratio and few crossings of its mean.">
+            <span>Regime filter</span>
+            <input type="checkbox" class="ls-az-regime-on"></label>
+          <label class="lsf check-row" title="No entry unless the Ornstein-Uhlenbeck chance of reaching the mean before the stop z is at least this, and the expected value after costs is positive.">
+            <span>Min win chance</span>
+            <input type="checkbox" class="ls-az-prob-on">
+            <input class="ls-az-prob" type="number" min="0" max="1" step="0.05"></label>
+          <label class="lsf" title="No entry when the spread reverts faster than this (minutes) — noise. 0 = off.">
+            <span>Half-life min (min)</span>
+            <input class="ls-az-hl-min" type="number" min="0" step="1"></label>
+          <label class="lsf" title="No entry when the spread reverts slower than this (minutes) — it will not revert inside a hold. 0 = off.">
+            <span>Half-life max (min)</span>
+            <input class="ls-az-hl-max" type="number" min="0" step="1"></label>
           <label class="lsf check-row" title="Signal EXIT when the position falls to break-even less this % of the margin one spread ties up — the mirror of TP % of margin.">
             <span>SL % margin</span>
             <input type="checkbox" class="ls-az-sl-on">

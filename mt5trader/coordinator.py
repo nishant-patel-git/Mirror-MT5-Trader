@@ -1025,11 +1025,36 @@ class Coordinator:
             rows.append({'position_id': position.position_id,
                          'side': position.side.value,
                          'source': getattr(position, 'source', MANUAL),
+                         'quantity': position.quantity,
                          'entry_spread': position.entry_spread,
                          'opened_at': position.opened_at,
+                         'age_sec': self.clock() - (position.opened_at
+                                                    or self.clock()),
                          'break_even': be, 'tp': tp, 'sl': sl,
-                         'net_pnl': net_pnl})
+                         'net_pnl': net_pnl,
+                         **self._leg_marks(position, md)})
         return rows
+
+    @staticmethod
+    def _leg_marks(position, md):
+        """Each leg's fill and the price it would CLOSE at now.
+
+        A leg bought closes on its bid, a leg sold on its offer — the
+        same opposite-touch rule the spread's own mark follows.
+        """
+        out = {}
+        for leg in ('a', 'b'):
+            fill = getattr(position, 'leg_' + leg, None)
+            entry = getattr(fill, 'price', None)
+            side = getattr(getattr(fill, 'side', None), 'value', None)
+            now = None
+            if md:
+                now = md.get(f'leg_{leg}_bid' if side == 'BUY'
+                             else f'leg_{leg}_ask')
+            out[f'leg_{leg}_side'] = side
+            out[f'leg_{leg}_entry'] = entry
+            out[f'leg_{leg}_now'] = now
+        return out
 
     def _algo_stop_points(self, pair, quantity, units, margin=None):
         """The stop loss's distance from break-even, in spread points:
@@ -1061,7 +1086,25 @@ class Coordinator:
         # The day the Algo's limits are counted over: the broker's, as
         # the session is; this machine's while that is unmeasured.
         day = (now or datetime.now()).date().isoformat()
-        return {'health': health, 'cutoff_min': cutoff_min, 'day': day}
+        return {'health': health, 'cutoff_min': cutoff_min, 'day': day,
+                'cost': self._algo_cost(pair)}
+
+    def _algo_cost(self, pair):
+        """What one Algo trade costs besides the crossing, and `k`.
+
+        The same terms break-even uses: commission on both legs, both
+        ways, for the Algo's own qty, and the slippage budget. `k` is
+        money per 1.00 of spread for ONE spread; the crossing is priced
+        from the live touches by the filters themselves.
+        """
+        settings = pair.exit_settings(self.config.settings)
+        qty = algo_module.clean_params(pair.algo_params)['algo_qty']
+        allowance = settings.get('SLIPPAGE_ALLOWANCE')
+        return {'k': sizing.spread_units(
+                    pair.clip_lots_b, (pair.meta_b or {}).get('contract_size')),
+                'commission': takeprofit.commission(pair, settings, qty),
+                'slippage': (0.0 if allowance in (None, '')
+                             else float(allowance) * float(qty))}
 
     def holding_carry(self, pair, direction, nights):
         """What holding one spread `nights` nights costs, in money.
