@@ -1198,6 +1198,9 @@ def main():
                                '%(message)s',
                         handlers=[logging.StreamHandler()])
     logsetup.setup('web')
+    # The screen polls three times a second; a line for each poll buried
+    # every error in web.log. Button presses and failures still log.
+    logsetup.quiet_polling()
     app = create_app(args.status, args.commands, args.results, args.config,
                      args.db)
     app.run(host=args.host, port=args.port, threaded=True)
