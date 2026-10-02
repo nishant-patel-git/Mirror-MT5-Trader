@@ -1268,8 +1268,6 @@
     ['.ls-az-edge', 'edge_multiple', 'number'],
     ['.ls-az-capture', 'edge_capture_frac', 'number'],
     ['.ls-az-regime-on', 'regime_on', 'check'],
-    ['.ls-az-prob-on', 'prob_on', 'check'],
-    ['.ls-az-prob', 'min_win_prob', 'number'],
     ['.ls-az-hl-min', 'half_life_min_min', 'number'],
     ['.ls-az-hl-max', 'half_life_max_min', 'number'],
     ['.ls-az-stop-on', 'stop_z_on', 'check'],
@@ -2442,7 +2440,6 @@
 
     // -- FILTERS -----------------------------------------------------------
     var edge = filters.edge || {};
-    var prob = filters.probability || {};
     var cost = filters.cost || {};
     var band = filters.half_life_band || [0, 0];
     function onOff(on, ok, yes, no, why) {
@@ -2462,8 +2459,6 @@
           ? 'MR' : 'WAIT'), trending ? 'bad' : (regime.state === 'RANGE'
           ? 'ok' : 'wait')) : badge('OFF', 'off')) +
       '<small>Regime</small></div>' +
-      '<div>' + onOff(prob.on, prob.ok, '\u2713', '\u2717', prob.reason || '') +
-      '<small>Prob</small></div>' +
       '<div>' + badge(filters.ready ? 'YES' : 'NO', filters.ready ? 'ok' : 'wait')
       + '<small>Ready</small></div>' +
       ((band[0] || band[1]) ? '<div>' + badge(
@@ -2480,13 +2475,6 @@
       kv('Round trip', moneyOr(cost.total), '',
          'crossing ' + moneyOr(cost.crossing) + ' + commission ' +
          moneyOr(cost.commission) + ' + slippage ' + moneyOr(cost.slippage)) +
-      kv('Win chance', prob.win === null || prob.win === undefined ? DASH
-          : Math.round(prob.win * 100) + '%', '',
-         'OU chance the spread reaches the mean before the stop z, '
-         + 'from the entry z') +
-      kv('EV', moneyOr(prob.ev), prob.ev === null || prob.ev === undefined
-         ? '' : (prob.ev >= 0 ? 'up' : 'down'),
-         'expected value of one trade after costs') +
       kv('Today', (day.trades || 0) + (params.max_trades_day
           ? '/' + params.max_trades_day : '') + ' trades · ' +
           (day.losses_row || 0) + ' in a row · ' + moneyOr(day.pnl),

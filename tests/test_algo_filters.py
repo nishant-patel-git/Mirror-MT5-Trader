@@ -155,17 +155,19 @@ def test_a_trending_spread_is_not_entered(config, pair, legs):
     assert len(coordinator.book.positions(pair.key)) == 1
 
 
-def test_a_stretch_past_the_stop_fails_the_probability_gate(config, pair,
-                                                            legs):
+def test_the_probability_gate_is_withdrawn_even_if_a_config_asks_for_it(
+        config, pair, legs):
+    """It priced the mean before the z-stop, not TP before SL, and read
+    ~99% on every entry. Withdrawn: a saved prob_on=True must not keep
+    it filtering trades from behind a screen that no longer shows it."""
+    from mt5trader import algo
+    assert algo.DEFAULT_PARAMS['prob_on'] is False
+    assert algo.clean_params({'prob_on': True})['prob_on'] is False
     give_history(legs)
-    # A stop close behind the entry: little room to win before it.
+    # A stop close behind the entry: the gate WOULD have blocked this.
     coordinator, pair = engine(config, legs, {'prob_on': True, 'stop_z': 3.2})
     body = stretched(coordinator, legs, pair)
-    assert coordinator.book.positions(pair.key) == []
-    assert 'probability' in body['blocked']
-    # The control.
-    pair.algo_params = dict(QUIET, prob_on=False, stop_z=3.2)
-    coordinator.poll_once()
+    assert 'probability' not in (body['blocked'] or '')
     assert len(coordinator.book.positions(pair.key)) == 1
 
 
@@ -195,5 +197,4 @@ def test_the_panel_reads_the_filters_at_the_entry_threshold(config, pair,
         filters['cost']['crossing'] + (filters['cost']['commission'] or 0)
         + (filters['cost']['slippage'] or 0))
     assert filters['edge']['capture'] > 0
-    assert 0 < filters['probability']['win'] <= 1
     assert filters['regime']['state'] in ('RANGE', 'TRENDING')

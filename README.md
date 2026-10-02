@@ -155,8 +155,6 @@ as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
     legs both ways, and the slippage budget.
   - *Regime*: no entry while the spread is TRENDING (Kaufman efficiency ratio
     >= 0.6 and <= 4 crossings of its mean).
-  - *Probability / EV*: the Ornstein-Uhlenbeck chance of reaching the mean
-    before the stop z at least 60%, and a positive expected value after costs.
   - *Half-life band*: off until bounds (minutes) are typed.
   - *Ready*: collecting candles, or a warm-up not yet done, always blocks.
 - **The switch** is on each ladder's title bar — ALGO OFF / ALGO DRY / ALGO
@@ -166,8 +164,8 @@ as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
   entry line, FLAT/LONG/SHORT, and in a position the entry, each leg's fill and
   close-now price, BE/TP/SL and the SL-entry-TP bar), *Statistics* (EMA mean,
   sigma, half-life, regime, candles, band, data progress) and *Filters* (Edge /
-  Regime / Prob / Ready badges, capture / cost against the requirement, round
-  trip, win chance, EV, the day's counts, and the last signal blocked and why).
+  Regime / Ready badges, capture / cost against the requirement, round
+  trip, the day's counts, and the last signal blocked and why).
   Closing it turns the Algo off.
 - **Record.** Every signal goes to the audit trail; *Algo signals CSV* on the
   Fills tab exports them, with what an exit would have made after costs.

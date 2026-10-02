@@ -182,9 +182,12 @@ DEFAULT_PARAMS = {
     'regime_on': True,
     'regime_er_max': 0.6,
     'regime_min_crossings': 4,
-    #: Probability / EV: the OU win chance to the mean before the stop z,
-    #: and the expected value after costs.
-    'prob_on': True,
+    #: Probability / EV — WITHDRAWN for now. It priced the chance of
+    #: reaching the mean before the z-stop (4.0), not the Algo's real TP
+    #: before its real SL, so it read ~99% on every entry and gated
+    #: nothing. Forced off in `clean_params`; the arithmetic stays in
+    #: `algofilters` for when it is rebuilt on the real exits.
+    'prob_on': False,
     'min_win_prob': 0.60,
     'min_ev': 0.0,
     #: Half-life band in MINUTES: no entry when the spread reverts faster
@@ -243,6 +246,9 @@ def clean_params(raw):
     out['length'] = max(2, out['length'])
     out['confirm_ticks'] = max(1, out['confirm_ticks'])
     out['time_stop_candles'] = max(1, out['time_stop_candles'])
+    # Withdrawn: a config saved while it was offered must not keep it
+    # filtering trades from behind a screen that no longer shows it.
+    out['prob_on'] = False
     if out['entry_z'] <= 0:
         out['entry_z'] = DEFAULT_PARAMS['entry_z']
     if out['algo_qty'] <= 0:
