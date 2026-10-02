@@ -1158,6 +1158,9 @@ def test_the_operator_is_told_when_the_system_is_connected(page):
     # Nothing is really connected in this fixture, and it says so
     # plainly rather than showing a green light.
     assert 'NOT READY' in page.text_content('.conn')
+    # A toast an earlier test left up (an "applied to ..." lasts four
+    # seconds) is not the one this test is about.
+    page.evaluate("() => document.getElementById('toasts').innerHTML = ''")
 
     page.evaluate("""() => {
         window.__realFetch = window.__realFetch || window.fetch;
@@ -1189,8 +1192,8 @@ def test_the_operator_is_told_when_the_system_is_connected(page):
     assert "the 16:55 cutoff is on the broker's clock" in \
         page.text_content('.conn.up')
     # It is also said once, out loud.
-    page.wait_for_selector('.toast.ok', timeout=WAIT)
-    assert 'You can trade' in page.text_content('.toast.ok')
+    page.wait_for_selector('.toast.ok:has-text("You can trade")',
+                           timeout=WAIT)
     page.evaluate('() => { window.fetch = window.__realFetch; }')
 
 
@@ -5039,17 +5042,17 @@ def test_the_Algo_has_a_window_of_its_own_with_the_three_panels(page):
         page.wait_for_selector('.window.algowin', timeout=WAIT)
         page.wait_for_function(
             "() => (document.querySelector('.window.algowin .aw-signal')"
-            " || {textContent: ''}).textContent.includes('SELL signal')", timeout=WAIT)
+            " || {textContent: ''}).textContent.includes('H to L signal')", timeout=WAIT)
         text = page.text_content('.window.algowin')
         for heading in ('Signal & Position', 'Statistics', 'Filters'):
             assert heading.upper() in text.upper(), heading
-        assert 'SELL SPREAD' in text and 'BUY SPREAD' in text
+        assert 'H to L' in text and 'L to H' in text
         assert '2.40' in text and 'req 1.5' in text        # capture / cost
         assert 'Mean-rev' in text and '42 min' in text
         assert page.locator('.window.algowin .aw-tile.sell.hit').count() == 1
         assert page.text_content('.window.algowin .aw-mode') == 'DRY RUN'
         # The Fair Spread window no longer carries the Algo.
-        assert 'SELL signal' not in (page.text_content('.window.fairwin')
+        assert 'H to L signal' not in (page.text_content('.window.fairwin')
                                      if page.locator('.window.fairwin').count()
                                      else '')
     finally:

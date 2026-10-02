@@ -1991,6 +1991,8 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
   background: #f6f6f6;
 }
 .window.algowin .aw-tile.hit { border-color: currentColor; background: #fff; }
+.window.algowin .aw-tile.off { opacity: .45; }
+.window.algowin .aw-tile-head small { font-weight: 400; }
 .window.algowin .aw-tile.sell { color: var(--bid, #1f6fd1); }
 .window.algowin .aw-tile.buy { color: var(--ask, #c0392b); }
 .window.algowin .aw-tile-head { font: 700 9px var(--font); color: var(--frame-text); }

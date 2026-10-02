@@ -130,6 +130,10 @@ TIMEFRAMES = (1, 5, 15, 30, 60, 240)
 #: panel are one number, not two that can disagree.
 DEFAULT_PARAMS = {
     'entry_z': 2.5,
+    #: Which way the Algo may ENTER: BOTH, H_TO_L (sell the spread
+    #: only) or L_TO_H (buy it only). Exits are never restricted — a
+    #: position on either side always gets out.
+    'direction': 'BOTH',
     'timeframe_min': 15,
     'length': 20,
     'confirm_ticks': 3,
@@ -195,6 +199,11 @@ _INTS = ('timeframe_min', 'length', 'confirm_ticks', 'time_stop_candles',
          'max_trades_day', 'max_losses_row', 'regime_min_crossings')
 
 
+#: The directions an entry may take, and the side each one is.
+DIRECTIONS = {'BOTH': ('SELL', 'BUY'), 'H_TO_L': ('SELL',),
+              'L_TO_H': ('BUY',)}
+
+
 def clean_params(raw):
     """The Algo's settings, every one present and of the right type.
 
@@ -208,6 +217,11 @@ def clean_params(raw):
         if key not in DEFAULT_PARAMS or value in (None, ''):
             continue
         try:
+            if key == 'direction':
+                chosen = str(value).strip().upper()
+                if chosen in DIRECTIONS:
+                    out[key] = chosen
+                continue
             if key in _BOOLS:
                 out[key] = (value if isinstance(value, bool) else
                             str(value).strip().lower()
@@ -238,6 +252,11 @@ def check_params(raw):
             problems.append(f'{key} is not an Algo setting')
             continue
         if value in (None, '') or key in _BOOLS:
+            continue
+        if key == 'direction':
+            if str(value).strip().upper() not in DIRECTIONS:
+                problems.append(f'direction {value!r} — choose BOTH, '
+                                f'H_TO_L or L_TO_H')
             continue
         try:
             number = float(value)
@@ -392,7 +411,12 @@ class AlgoSignal:
     def _judge_entry(self, body, md, gates):
         p = self.params
         side = None
+        allowed = DIRECTIONS.get(p['direction'], DIRECTIONS['BOTH'])
         for candidate in ('SELL', 'BUY'):
+            if candidate not in allowed:
+                # This ladder only enters the other way. The stretch is
+                # still shown; it is just not an entry here.
+                continue
             if self._streak[candidate] >= p['confirm_ticks']:
                 side = candidate
         blocked = self._entry_gate(body, md, gates, side)

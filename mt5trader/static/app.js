@@ -1235,6 +1235,7 @@
   //: the box shows — the engine's effective value, from the snapshot.
   var ALGO_FIELDS = [
     ['.ls-az-entry', 'entry_z', 'number'],
+    ['.ls-az-direction', 'direction', 'text'],
     ['.ls-az-tf', 'timeframe_min', 'number'],
     ['.ls-az-length', 'length', 'number'],
     ['.ls-az-confirm', 'confirm_ticks', 'number'],
@@ -1645,6 +1646,7 @@
       if (entry[2] === 'check') { params[entry[1]] = !!input.checked; return; }
       var raw = (input.value || '').trim();
       if (raw === '') { return; }
+      if (entry[2] === 'text') { params[entry[1]] = raw; return; }
       var number = parseFloat(raw);
       if (!isNaN(number)) { params[entry[1]] = number; }
     });
@@ -2113,7 +2115,7 @@
     var state = block.state;
     if (state === 'SIGNAL') {
       var z = block.signal === 'SELL' ? block.z_sell : block.z_buy;
-      return (block.signal === 'SELL' ? 'SELL' : 'BUY') + ' signal  z ' +
+      return (block.signal === 'SELL' ? 'H to L' : 'L to H') + ' signal  z ' +
         signed(z);
     }
     if (state === 'EXIT') {
@@ -2278,19 +2280,25 @@
     var entryZ = params.entry_z;
 
     // -- SIGNAL & POSITION ------------------------------------------------
+    var direction = params.direction || 'BOTH';
     function tile(side) {
       var sell = side === 'SELL';
       var z = sell ? block.z_sell : block.z_buy;
       var hit = z !== null && z !== undefined && entryZ &&
         (sell ? z >= entryZ : z <= -entryZ);
+      // This ladder may be set to enter one way only. The other tile is
+      // still drawn — it is how the spread is read — but it says so.
+      var off = (sell && direction === 'L_TO_H') ||
+        (!sell && direction === 'H_TO_L');
       return '<div class="aw-tile ' + (sell ? 'sell' : 'buy') +
-        (hit ? ' hit' : '') + '" title="' + (sell
+        (hit ? ' hit' : '') + (off ? ' off' : '') + '" title="' + (sell
           ? 'What SELLING the spread gets now (the bid side). The Algo '
             + 'sells when this z reaches +' + entryZ + ', and closes a long here.'
           : 'What BUYING the spread costs now (the offer side). The Algo '
             + 'buys when this z reaches \u2212' + entryZ + ', and closes a short here.')
-        + '"><div class="aw-tile-head">' + (sell ? 'SELL SPREAD' : 'BUY SPREAD')
-        + '</div><div class="aw-tile-price">' +
+        + '"><div class="aw-tile-head">' + (sell ? 'H to L' : 'L to H') +
+        (off ? ' <small>(entries off)</small>' : '') +
+        '</div><div class="aw-tile-price">' +
         fmt(sell ? market.short_spread : market.long_spread, digits) +
         '</div><div class="aw-tile-z">z ' + signed(z) + '</div>' +
         '<div class="aw-tile-entry">' + (sell ? 'short' : 'long') + ' at ' +

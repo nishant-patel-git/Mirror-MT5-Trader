@@ -372,3 +372,37 @@ def test_each_position_row_carries_its_entry_and_progress():
     row = body['positions'][0]
     assert row['entry_spread'] == 10.26 and row['sl'] == 10.46
     assert row['progress'] == pytest.approx(0.25)
+
+
+
+def test_a_ladder_set_to_one_direction_enters_only_that_way():
+    """H to L only: a stretch DOWN is shown, never entered. The control:
+    Both, and the same stretch is a BUY."""
+    down = (9.72, 9.74)                          # offer z about -2.6
+    one_way = algo.AlgoSignal({'direction': 'H_TO_L'})
+    body = feed(one_way, *down, 3)
+    assert body['signal'] is None and body['intents'] == []
+    assert body['z_buy'] <= -2.5                 # still measured and shown
+    both = algo.AlgoSignal({'direction': 'BOTH'})
+    assert feed(both, *down, 3)['signal'] == 'BUY'
+
+
+def test_L_to_H_only_never_sells_and_still_buys():
+    one_way = algo.AlgoSignal({'direction': 'L_TO_H'})
+    assert feed(one_way, 10.26, 10.30, 3)['signal'] is None
+    assert feed(one_way, 9.72, 9.74, 3, start=10)['signal'] == 'BUY'
+
+
+def test_direction_never_holds_back_an_exit():
+    """A long on an H-to-L-only ladder (opened before the setting
+    changed) still gets out."""
+    signal = algo.AlgoSignal({'direction': 'H_TO_L'})
+    held = [position(side='BUY', tp=10.10, be=10.0, entry=10.0)]
+    assert run(signal, market(10.10, 10.20, 1),
+               positions=held)['positions'][0]['exit'] == 'PROFIT_TARGET'
+
+
+def test_a_direction_that_does_not_exist_is_named():
+    assert algo.clean_params({'direction': 'sideways'})['direction'] == 'BOTH'
+    assert algo.check_params({'direction': 'sideways'})
+    assert algo.check_params({'direction': 'l_to_h'}) == []
