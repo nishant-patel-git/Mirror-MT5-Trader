@@ -12,7 +12,7 @@ from mt5trader.coordinator import Coordinator
 
 from test_algo_desk import QUIET, Clock, give_history
 
-STRETCH = (4351.60, 4351.70)
+STRETCH = (4352.00, 4352.10)
 
 
 # -- the arithmetic ---------------------------------------------------------
@@ -158,12 +158,13 @@ def test_a_trending_spread_is_not_entered(config, pair, legs):
 def test_a_stretch_past_the_stop_fails_the_probability_gate(config, pair,
                                                             legs):
     give_history(legs)
-    coordinator, pair = engine(config, legs, {'prob_on': True})
+    # A stop close behind the entry: little room to win before it.
+    coordinator, pair = engine(config, legs, {'prob_on': True, 'stop_z': 3.2})
     body = stretched(coordinator, legs, pair)
     assert coordinator.book.positions(pair.key) == []
     assert 'probability' in body['blocked']
     # The control.
-    pair.algo_params = dict(QUIET, prob_on=False)
+    pair.algo_params = dict(QUIET, prob_on=False, stop_z=3.2)
     coordinator.poll_once()
     assert len(coordinator.book.positions(pair.key)) == 1
 

@@ -1242,6 +1242,7 @@
     ['.ls-az-max', 'max_entry_z', 'number'],
     ['.ls-az-buffer', 'cutoff_buffer_min', 'number'],
     ['.ls-az-cooldown', 'cooldown_min', 'number'],
+    ['.ls-az-warmup', 'warmup_min', 'number'],
     ['.ls-az-sl-on', 'stop_loss_on', 'check'],
     ['.ls-az-sl', 'stop_loss_pct', 'number'],
     ['.ls-az-progress', 'progress_bar', 'check'],
@@ -1270,6 +1271,24 @@
       return row.algo_mode === 'LIVE' ? 'ALGO_LIVE' : 'ALGO';
     }
     return row && row.algo_window ? 'FAIR_SPREAD' : 'NONE';
+  }
+
+  function warmupHtml(warmup) {
+    /* The live warm-up: minutes of live prices watched since the Algo
+     * was turned on, against the minutes it needs. No entry until full —
+     * a band loaded from MT5's history in a second is not a feed that
+     * has been watched. */
+    if (!warmup || !warmup.need_sec) { return ''; }
+    var done = !!warmup.done;
+    var pct = done ? 100 : Math.floor(100 * warmup.sec / warmup.need_sec);
+    return '<div class="aw-data aw-warmup" title="No entry until the Algo '
+      + 'has watched this long of live prices. Time with no price does not '
+      + 'count.">'
+      + '<span>Live</span><div class="aw-bar"><div class="'
+      + (done ? 'ok' : 'wait') + '" style="width:' + pct + '%"></div></div>'
+      + '<span>' + (done ? 'warmed up'
+        : 'warming up ' + Math.floor(warmup.sec / 60) + '/'
+          + Math.round(warmup.need_sec / 60) + ' min') + '</span></div>';
   }
 
   function renderAlgoSwitch(node, key, row) {
@@ -2394,8 +2413,8 @@
       '<span>Data</span><div class="aw-bar"><div class="' +
       (block.ready ? 'ok' : 'wait') + '" style="width:' +
       (block.ready ? 100 : pct) + '%"></div></div><span>' +
-      (block.ready ? 'ready' : count + '/' + needed + ' candles') +
-      '</span></div>';
+      (block.ready ? 'candles ready' : count + '/' + needed + ' candles') +
+      '</span></div>' + warmupHtml(block.warmup);
 
     // -- FILTERS -----------------------------------------------------------
     var edge = filters.edge || {};

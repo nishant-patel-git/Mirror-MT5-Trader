@@ -26,7 +26,7 @@ from test_algo_desk import QUIET, Clock, give_history
 
 #: The SELL stretch every test here uses: the future's bid lifted far
 #: over the band (see test_algo_desk.give_history for the band).
-STRETCH = (4351.60, 4351.70)
+STRETCH = (4352.00, 4352.10)
 #: ...and back: the offer a short closes at, under what it was sold at.
 BACK = (4350.80, 4350.90)
 

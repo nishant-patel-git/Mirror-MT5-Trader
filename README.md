@@ -128,6 +128,13 @@ as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
   terminals will not give history, candles are built from the live price and
   the window says `candles 7/20`. Closed candles are saved, so a restart keeps
   them.
+- **Warm-up.** History fills the band at once, but no entry is taken until the
+  Algo has watched `Warm-up (min)` of LIVE prices since it was turned on — 90 by
+  default, 0 = off. Time with no price does not count; dry-run time does, so a
+  ladder can warm up in DRY and go LIVE without waiting again. Turning the Algo
+  off starts it over. The window shows `Live ... warming up 23/90 min`.
+- **Direction.** Both (default), H to L only, or L to H only — entries only;
+  an open position is always managed to its exit.
 - **Entry.** SELL when the z of the bid-side spread is >= +2.5, BUY when the z
   of the offer-side spread is <= -2.5, held for 3 fresh quotes, only on a flat
   ladder. Held back — and the reason shown — by a stale or jumping price, too
@@ -151,7 +158,7 @@ as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
   - *Probability / EV*: the Ornstein-Uhlenbeck chance of reaching the mean
     before the stop z at least 60%, and a positive expected value after costs.
   - *Half-life band*: off until bounds (minutes) are typed.
-  - *Ready*: collecting candles always blocks.
+  - *Ready*: collecting candles, or a warm-up not yet done, always blocks.
 - **The switch** is on each ladder's title bar — ALGO OFF / ALGO DRY / ALGO
   LIVE; click it for the menu. LIVE still asks to confirm.
 - **The Algo window** opens while the Algo is on, with the stat-arb dashboard's

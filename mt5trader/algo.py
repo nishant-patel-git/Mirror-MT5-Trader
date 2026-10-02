@@ -145,6 +145,12 @@ DEFAULT_PARAMS = {
     'cutoff_buffer_min': 20,
     #: No entry signal for this long after an exit signal or a close.
     'cooldown_min': 5,
+    #: WARM-UP: no entry until the Algo has watched this many minutes of
+    #: LIVE prices since it was turned on. The band can be full at once
+    #: from MT5's history, but history is not this session's tape: a
+    #: feed that has not been watched has not been checked. Time with no
+    #: price (a leg down, the market shut) does not count. 0 = off.
+    'warmup_min': 90,
     #: The STOP LOSS, as a percentage of the margin one spread ties up —
     #: the mirror of the take-profit, measured from the same break-even.
     #: ON by default at the take-profit's own 2%: a signal that says
@@ -317,6 +323,8 @@ class AlgoSignal:
           is off), and no exit is signalled on a number that does not
           exist.
         - `gates`: {'health': why the price cannot be trusted, or None;
+          'warmup': {sec, need_sec, done} — live time watched since the
+          Algo was turned on; no entry until it is done;
           'cutoff_min': minutes to the session cutoff, negative past
           it, None unmeasured; 'halt': a day's limit that has been hit,
           in words, or None; 'entry_check': f(side, z) -> why a
@@ -341,7 +349,8 @@ class AlgoSignal:
             'z_buy': None, 'z_sell': None, 'z_mid': None,
             'state': 'WATCHING', 'signal': None, 'blocked': None,
             'health': gates.get('health'),
-            'cooldown_sec': None, 'positions': [], 'intents': []}
+            'cooldown_sec': None, 'positions': [], 'intents': [],
+            'warmup': gates.get('warmup')}
         short = (md or {}).get('short_spread')
         long_ = (md or {}).get('long_spread')
         if md and ready:
@@ -466,6 +475,11 @@ class AlgoSignal:
             return (body.get('note') or
                     f"collecting candles {body.get('count') or 0}"
                     f"/{body.get('needed')}")
+        warmup = gates.get('warmup')
+        if warmup and not warmup.get('done'):
+            return (f"warming up: {warmup['sec'] / 60.0:.0f} of "
+                    f"{warmup['need_sec'] / 60.0:.0f} min of live prices "
+                    f"watched")
         if body.get('cooldown_sec'):
             return f"cooldown {_mmss(body['cooldown_sec'])}"
         buffer_min = p['cutoff_buffer_min']

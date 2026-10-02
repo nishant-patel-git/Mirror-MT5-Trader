@@ -43,6 +43,10 @@ from . import bands
 #: How often a ladder that is still short of candles asks MT5 again.
 BACKFILL_RETRY_SEC = 60.0
 
+#: The longest gap between two live prices that still counts toward the
+#: warm-up. Longer than this is a feed that stopped, not one watched.
+WARMUP_GAP_SEC = 10.0
+
 #: How long after an exit that was SENT and did not close it is sent
 #: again. Not every poll: a close the broker refuses three times a
 #: second is a flood, not a retry.
@@ -117,6 +121,10 @@ class _Run:
         self.last_blocked = None
         #: position id -> the z the Algo entered it at.
         self.entry_z = {}
+        #: Seconds of LIVE prices watched since it was turned on, and
+        #: when the last one counted came in — the warm-up.
+        self.live_sec = 0.0
+        self.live_at = None
 
 
 class AlgoDesk:
@@ -214,7 +222,18 @@ class AlgoDesk:
         if run.signature != self._signature(pair):
             # A new timeframe, length or beta is a different series:
             # start it again from what is saved and what MT5 has.
+            was = run
             run = self._runs[pair.key] = self._new_run(pair)
+            # A new series, the SAME Algo: it is still LIVE or dry, still
+            # owns its positions and still has today's count. Starting
+            # those over dropped a LIVE ladder to a dry run, and forgot
+            # the positions it had to close. The live tape it has
+            # watched has still been watched: the warm-up carries too.
+            for name in ('mode', 'mine', 'day', 'retry', 'entry_z',
+                         'recent', 'last_blocked', 'live_sec', 'live_at',
+                         'signal'):
+                setattr(run, name, getattr(was, name))
+            run.signal.params = run.params
         params = algo_module.clean_params(getattr(pair, 'algo_params', None))
         if params != run.params:
             # A new threshold is the same series read differently: the
@@ -231,6 +250,19 @@ class AlgoDesk:
             if now - failed_at >= EXIT_RETRY_SEC:
                 del run.retry[position_id]
                 run.signal.exit_failed(position_id)
+        live = (md and md.get('mid_spread') is not None
+                and not md.get('jump_reason') and not gates.get('health'))
+        if live:
+            if run.live_at is not None:
+                run.live_sec += max(0.0, min(now - run.live_at,
+                                             WARMUP_GAP_SEC))
+            run.live_at = now
+        else:
+            run.live_at = None
+        need = float(params['warmup_min']) * 60.0
+        gates['warmup'] = {'sec': min(run.live_sec, need) if need else 0.0,
+                           'need_sec': need,
+                           'done': run.live_sec >= need}
         if md and md.get('mid_spread') is not None \
                 and not md.get('jump_reason'):
             # A price the jump guard is holding back is not fed to the
@@ -242,6 +274,10 @@ class AlgoDesk:
         self._backfill_if_due(pair, run, now)
         stats = run.candles.stats()
         filters, check = self._filters(run, md, stats, gates.get('cost'))
+        # READY is the band AND the warm-up: a band loaded from history
+        # in a second is not a feed that has been watched.
+        filters['ready'] = bool(filters['ready'] and gates['warmup']['done'])
+        filters['warmup'] = gates['warmup']
         gates['entry_check'] = check
         body = run.signal.evaluate(now, md, stats, positions, gates)
         body['filters'] = filters

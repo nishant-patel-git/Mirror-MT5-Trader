@@ -41,7 +41,9 @@ class Clock:
 QUIET = {'cutoff_buffer_min': 0, 'confirm_ticks': 1, 'max_entry_z': 0,
          # The entry filters are tested on their own (test_algo_filters);
          # these tests are about what happens once an entry is allowed.
-         'edge_on': False, 'regime_on': False, 'prob_on': False}
+         'edge_on': False, 'regime_on': False, 'prob_on': False,
+         # The live warm-up is tested on its own (test_algo_warmup).
+         'warmup_min': 0}
 
 
 def give_history(legs, count=40):
@@ -142,7 +144,7 @@ def test_a_signal_is_RECORDED_and_nothing_is_sent(config, pair, legs,
     assert block(coordinator, pair)['signal'] is None      # at the mean
 
     # The future's bid lifts: the bid-side spread is far over the band.
-    legs['acct_b'].broker.quote('GC1226', 4351.60, 4351.70)
+    legs['acct_b'].broker.quote('GC1226', 4352.00, 4352.10)
     coordinator.poll_once()
     body = block(coordinator, pair)
     assert body['state'] == 'SIGNAL' and body['signal'] == 'SELL'
@@ -227,7 +229,7 @@ def test_a_click_is_IDENTICAL_with_the_algo_on_and_signalling(config, pair,
     pair.order_type = OrderType.MARKET
 
     def click_once(algo_on):
-        legs['acct_b'].broker.quote('GC1226', 4351.60, 4351.70)
+        legs['acct_b'].broker.quote('GC1226', 4352.00, 4352.10)
         coordinator = engine(config, legs)
         if algo_on:
             coordinator.set_algo(pair.key, 'ALGO')

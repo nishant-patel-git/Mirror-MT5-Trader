@@ -560,6 +560,9 @@
           <label class="lsf" title="No new entry signal for this long after an exit signal or a close.">
             <span>Cooldown (min)</span>
             <input class="ls-az-cooldown" type="number" min="0" step="1"></label>
+          <label class="lsf" title="No entry until the Algo has watched this many minutes of LIVE prices since it was turned on — even when MT5's history fills the band at once. Time with no price does not count. Dry run counts: warm up in Dry run, then switch to LIVE. 0 = off.">
+            <span>Warm-up (min)</span>
+            <input class="ls-az-warmup" type="number" min="0" step="1"></label>
           <label class="lsf check-row" title="Also signal EXIT if the spread runs against the position to this |z|.">
             <span>Z-stop at</span>
             <input type="checkbox" class="ls-az-stop-on">
