@@ -1285,11 +1285,25 @@ def drag(page, selector, dx, dy, steps=8):
     """
     settle(page, selector)
     start = grab_point(page, selector)
+    # The whole desk at the press, and just after it: on CI the ladder
+    # has been seen to be at x 141 when measured and at x 4 by the
+    # first step, so the jump is somewhere around here.
+    desk = """(sel) => {
+        const node = document.querySelector(sel);
+        const desk = document.getElementById('desktop');
+        return {node: Math.round(node.getBoundingClientRect().left),
+                scroll: desk.scrollLeft, active: window.MT5Trader.state.active,
+                windows: Array.from(desk.querySelectorAll('.window')).map(
+                    w => w.className.replace('window ', '') + '@' +
+                         Math.round(w.getBoundingClientRect().left) + '/' +
+                         Math.round(w.getBoundingClientRect().width))};
+    }"""
+    page.trace = [{'pre': page.evaluate(desk, selector), 'grab': start}]
     page.mouse.move(*start)
     page.mouse.down()
+    page.trace.append({'down': page.evaluate(desk, selector)})
     # One step at a time, and what the window and the desk did at each,
     # so a drag that stops short says WHERE and WHY in the failure.
-    page.trace = []
     for i in range(1, steps + 1):
         page.mouse.move(start[0] + dx * i / steps, start[1] + dy * i / steps)
         page.trace.append(page.evaluate(
@@ -1424,11 +1438,9 @@ RELEASE_THE_SNAPSHOT = ("() => { if (window.__realFetch) "
 def tidy(page):
     """Tidy the desk, and WAIT for it to be tidy.
 
-    Tidy re-lays the row, and on a slow runner the windows are still
-    moving when the click returns. A position read then is where a
-    window WAS: the drag test measured its ladder at x 141, the desk
-    then settled it at x 4, and a perfect 220px drag from there was
-    reported as an 82px one.
+    Tidy re-lays the row, and on a slow runner the windows can still be
+    moving when the click returns; a position read then is where a
+    window WAS.
     """
     page.click('#tidy')
     # A fresh baseline: two readings from THIS layout, not one left
