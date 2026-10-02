@@ -1422,7 +1422,19 @@ RELEASE_THE_SNAPSHOT = ("() => { if (window.__realFetch) "
 
 
 def tidy(page):
+    """Tidy the desk, and WAIT for it to be tidy.
+
+    Tidy re-lays the row, and on a slow runner the windows are still
+    moving when the click returns. A position read then is where a
+    window WAS: the drag test measured its ladder at x 141, the desk
+    then settled it at x 4, and a perfect 220px drag from there was
+    reported as an 82px one.
+    """
     page.click('#tidy')
+    # A fresh baseline: two readings from THIS layout, not one left
+    # over from a previous test's.
+    page.evaluate("() => { window.__settleWas = {}; }")
+    settle(page, '.window.ladder')
 
 
 def open_ladder(page):
