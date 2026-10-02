@@ -127,6 +127,20 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS events_at ON events (at);
+
+-- The Algo's CLOSED spread candles, so a restart does not start the
+-- band from nothing. Keyed by the beta they were built with: a spread
+-- of B - 0.98 x A is a different series from B - 1.00 x A, and mixing
+-- the two draws a band around neither.
+CREATE TABLE IF NOT EXISTS algo_candles (
+    pair_key        TEXT NOT NULL,
+    timeframe_sec   REAL NOT NULL,
+    beta            REAL NOT NULL,
+    bucket          REAL NOT NULL,      -- candle start, UTC seconds
+    close           REAL NOT NULL,
+    source          TEXT,               -- 'mt5' backfill or 'live'
+    PRIMARY KEY (pair_key, timeframe_sec, beta, bucket)
+);
 """
 
 
@@ -169,6 +183,9 @@ class Store:
     #: file still works.
     LATER_COLUMNS = (
         ('positions', 'naked_ms', 'REAL'),
+        # MANUAL or ALGO. NULL on a row written before it existed, which
+        # reads back as MANUAL: nothing traded by itself then either.
+        ('positions', 'source', 'TEXT'),
     )
 
     def _add_missing_columns(self, connection):
@@ -196,15 +213,17 @@ class Store:
                    (position_id, pair_key, side, quantity, entry_spread,
                     exit_spread, spread_units, order_type, opened_at,
                     closed_at, close_reason, realized_pnl, entry_slippage,
-                    exit_slippage, click_to_on_ms, naked_ms, leg_a, leg_b)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    exit_slippage, click_to_on_ms, naked_ms, leg_a, leg_b,
+                    source)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (row['position_id'], row['pair_key'], row['side'],
                  row['quantity'], row['entry_spread'], row['exit_spread'],
                  row['spread_units'], row['order_type'], row['opened_at'],
                  row['closed_at'], row['close_reason'], row['realized_pnl'],
                  row['entry_slippage'], row['exit_slippage'],
                  row['click_to_on_ms'], row.get('naked_ms'),
-                 json.dumps(row['leg_a']), json.dumps(row['leg_b'])))
+                 json.dumps(row['leg_a']), json.dumps(row['leg_b']),
+                 row.get('source')))
         return position
 
     def remember_tickets(self, rows):
@@ -429,6 +448,33 @@ class Store:
                 'VALUES (?,?,?,?)',
                 (self.clock(), kind, pair_key, json.dumps(detail,
                                                           default=str)))
+
+    # -- the Algo's candles ---------------------------------------------------
+
+    def save_candles(self, pair_key, timeframe_sec, beta, rows,
+                     source='live'):
+        """Closed candles [(bucket, close), ...]. A candle is written once:
+        one we watched close ourselves is never replaced by a backfill."""
+        rows = [(pair_key, float(timeframe_sec), float(beta), float(b),
+                 float(c), source) for b, c in rows or () if c is not None]
+        if not rows:
+            return 0
+        verb = 'INSERT OR REPLACE' if source == 'live' else 'INSERT OR IGNORE'
+        with self._connect() as connection:
+            connection.executemany(
+                f'{verb} INTO algo_candles (pair_key, timeframe_sec, beta, '
+                f'bucket, close, source) VALUES (?,?,?,?,?,?)', rows)
+        return len(rows)
+
+    def candles(self, pair_key, timeframe_sec, beta, limit=500):
+        """The newest `limit` closed candles, oldest first."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                'SELECT bucket, close FROM algo_candles WHERE pair_key = ? '
+                'AND timeframe_sec = ? AND beta = ? ORDER BY bucket DESC '
+                'LIMIT ?', (pair_key, float(timeframe_sec), float(beta),
+                            int(limit))).fetchall()
+        return [(row['bucket'], row['close']) for row in reversed(rows)]
 
     def events(self, kind=None, limit=200):
         clause = 'WHERE kind = ?' if kind else ''

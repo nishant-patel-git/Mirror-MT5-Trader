@@ -395,7 +395,8 @@ class PairConfig:
                  commission_per_lot_b=None, slippage_allowance=None,
                  break_even_nights=None, tp_target_pct_of_margin=None,
                  carry_rate_pct=None,
-                 show_fair_window=False, algo=None, algo_window=None):
+                 show_fair_window=False, algo=None, algo_window=None,
+                 algo_params=None):
         self.key = key
         self.name = name or key
         self.leg_a = dict(leg_a or {})      # {'account': ..., 'symbol': ...}
@@ -521,29 +522,43 @@ class PairConfig:
         #: reason — see the `algo` property.
         self.algo_window = bool(show_fair_window if algo_window is None
                                 else algo_window)
+        #: The Algo's own numbers for THIS ladder — entry z, candle
+        #: timeframe and length, the gates and the optional exits. Only
+        #: what was typed is kept; a blank is the default, read through
+        #: `algo.clean_params`. Whether the Algo is ON is not here: that
+        #: is held by the running engine and is off after every restart.
+        self.algo_params = _clean_algo_params(algo_params)
         #: Cached MT5 metadata per leg, refreshed by the coordinator.
         self.meta_a = {}
         self.meta_b = {}
 
     @property
     def algo(self):
-        """Which algo this ladder runs. DERIVED, not chosen.
+        """Which READING this ladder's window shows from config: Fair
+        spread when the window is ticked, NONE when it is not.
 
-        There was a dropdown here while a second algo was being built.
-        That algo was taken back out, which left one choice presented
-        as two controls — pick Fair spread, then tick Show window —
-        either of which alone did nothing anybody could see. So the
-        tick is the whole decision now: the window is open and the
-        reading is computed, or neither.
-
-        Still NONE when the window is shut, and for the same reason it
-        always was: a ladder nobody is reading costs nothing on the
-        wire either. And still only a reading — it does not place,
-        modify or cancel an order, and a click on the ladder behaves
-        identically whichever way this reads.
+        The Algo itself is not decided here. It is switched on in the
+        RUNNING engine, per ladder, and is off after every restart, so
+        no config file can bring a signal back that nobody turned on
+        today. The snapshot says ALGO for a ladder whose Algo is on.
         """
         from .algo import FAIR_SPREAD, NONE
         return FAIR_SPREAD if self.algo_window else NONE
+
+    @algo.setter
+    def algo(self, value):
+        """NONE shuts the window, FAIR_SPREAD opens it. ALGO is the
+        engine's switch, not a config value, and changes nothing here.
+
+        This used to have no setter at all, so sending `algo` through
+        the settings path raised AttributeError mid-save.
+        """
+        from .algo import FAIR_SPREAD, NONE
+        chosen = str(value or NONE).upper()
+        if chosen == NONE:
+            self.algo_window = False
+        elif chosen == FAIR_SPREAD:
+            self.algo_window = True
 
     @property
     def symbol_a(self):
@@ -658,7 +673,8 @@ class PairConfig:
                    'clip_lots_a', 'clip_lots_b',
                    'contract_size_a', 'contract_size_b',
                    'max_quote_age_sec',
-                   'algo_window', 'show_fair_window', 'pair_type')
+                   'algo_window', 'show_fair_window', 'pair_type',
+                   'algo_params')
                   + tuple(EXIT_FIELDS))
 
     def apply_hot(self, raw):
@@ -680,6 +696,8 @@ class PairConfig:
                 value = bool(value)
             elif field == 'pair_type':
                 value = pair_type_name(value)
+            elif field == 'algo_params':
+                value = _clean_algo_params(value)
             elif field == 'order_type':
                 value = _choice(OrderType, value, self.order_type.value,
                                 self.key, field)
@@ -746,6 +764,7 @@ class PairConfig:
             'tp_target_pct_of_margin': self.tp_target_pct_of_margin,
             'carry_rate_pct': self.carry_rate_pct,
             'algo': self.algo, 'algo_window': self.algo_window,
+            'algo_params': dict(self.algo_params),
         }
 
     @classmethod
@@ -780,6 +799,13 @@ class PairConfig:
                 key, ', '.join(unknown),
                 'them' if len(unknown) > 1 else 'it')
         return cls(key, **raw)
+
+
+def _clean_algo_params(raw):
+    """The typed Algo settings only, by name; blanks dropped."""
+    from .algo import DEFAULT_PARAMS
+    return {key: value for key, value in dict(raw or {}).items()
+            if key in DEFAULT_PARAMS and value not in (None, '')}
 
 
 class TraderConfig:

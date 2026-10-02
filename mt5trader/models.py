@@ -203,6 +203,11 @@ class LegFill:
                    contract_size=raw.get('contract_size'), at=raw.get('at'))
 
 
+#: Who opened a position. See `SpreadPosition.source`.
+MANUAL = 'MANUAL'
+ALGO_SOURCE = 'ALGO'
+
+
 class SpreadPosition:
     """A pair that is ON: leg A and leg B, both filled, both ours.
 
@@ -263,6 +268,11 @@ class SpreadPosition:
         self.recovered = False
         #: Set once the reconciler has seen both legs at the broker.
         self.confirmed = False
+        #: Who put it on: MANUAL (a click) or ALGO. Every position is
+        #: MANUAL today — nothing trades by itself — but the tag is
+        #: stored from now, so when execution arrives an algo re-adopts
+        #: only what IT opened after a restart, and never a trader's.
+        self.source = MANUAL
 
     @property
     def is_open(self):
@@ -370,6 +380,7 @@ class SpreadPosition:
             'naked_ms': self.naked_ms,
             'recovered': self.recovered,
             'confirmed': self.confirmed,
+            'source': self.source,
             'leg_a': self.leg_a.to_dict() if self.leg_a else None,
             'leg_b': self.leg_b.to_dict() if self.leg_b else None,
         }
@@ -399,6 +410,7 @@ class SpreadPosition:
         position.exit_slippage = raw.get('exit_slippage')
         position.click_to_on_ms = raw.get('click_to_on_ms')
         position.naked_ms = raw.get('naked_ms')
+        position.source = raw.get('source') or MANUAL
         #: Recovered from disk rather than seen happen. The monitor says
         #: so until the reconciler has confirmed both legs at the broker.
         position.recovered = True

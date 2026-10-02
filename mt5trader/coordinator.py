@@ -24,6 +24,7 @@ from . import algo as algo_module, atomicfile, carry, \
     config as config_module, depth as depth_book, fairvalue, hedgeratio, \
     sizing, takeprofit
 from . import book as book_module
+from .algodesk import AlgoDesk
 from .book import Book
 from .database import Store
 from .executor import PairExecutor, mark_position
@@ -144,6 +145,10 @@ class Coordinator:
         #: the snapshot so a broken pair is VISIBLE rather than absent
         #: (spec §17: never hide a broken row).
         self.errors = {}
+        #: Each ladder's Algo switch, OFF for every ladder at start. It
+        #: signals and records; it sends nothing (see `algodesk`).
+        self.algos = AlgoDesk(legs, store=store, clock=clock,
+                              offset_for=self._offset_of)
 
     # -- startup ------------------------------------------------------------
 
@@ -521,6 +526,7 @@ class Coordinator:
                 # watches what is already at the broker.
                 self.market[key] = None
                 self._go_dark(key, pair, tick_a, tick_b)
+                self._work_algo(pair, None)
                 continue
             self._dark.pop(key, None)
             md = compute_spread(pair, tick_a, tick_b, pair.hedge_ratio,
@@ -554,6 +560,7 @@ class Coordinator:
             md['feed_badge'] = _badge(md, stale, jumped)
             self._observe_session(key, md, pair)
             self.market[key] = md
+            self._work_algo(pair, md)
             # LIMIT-mode orders are worked on the SAME pass that priced
             # them: a peg re-priced off a snapshot older than the one on
             # screen is a peg holding a level nobody is showing.
@@ -849,6 +856,25 @@ class Coordinator:
         consulted by the click path: an algo is a reading beside the
         market, exactly like the fair spread was before it had a name.
         """
+        running = self.algos.block(pair.key)
+        if running is not None:
+            body = dict(running, window=pair.algo_window)
+            # Where a NEW entry's stop would be, beside the take-profit
+            # the Exit panel already shows for it: the same break-even,
+            # the other way.
+            stop = self._algo_stop_points(pair, pair.default_quantity,
+                                          sizing.spread_units(
+                                              pair.clip_lots_b,
+                                              (pair.meta_b or {}).get(
+                                                  'contract_size')))
+            levels = exit_levels or {}
+            body['sl_buy'] = (None if stop is None or
+                              levels.get('break_even_buy') is None
+                              else levels['break_even_buy'] - stop)
+            body['sl_sell'] = (None if stop is None or
+                               levels.get('break_even_sell') is None
+                               else levels['break_even_sell'] + stop)
+            return body
         selected = pair.algo or algo_module.NONE
         body = {'algo': selected, 'window': pair.algo_window}
         if selected == algo_module.FAIR_SPREAD:
@@ -856,6 +882,125 @@ class Coordinator:
             body['kind'] = body['fair'].get('kind')
             body['kind_note'] = body['fair'].get('kind_note')
         return body
+
+    # -- the Algo -------------------------------------------------------------
+
+    def set_algo(self, pair_key, choice):
+        """Pick what a ladder runs: NONE, FAIR_SPREAD or ALGO.
+
+        ALGO is a switch on the RUNNING engine and is never saved —
+        every restart comes up with it off. The other two are the Fair
+        Spread window, which IS the pair's saved setting.
+        """
+        pair = self.config.pairs.get(pair_key)
+        if pair is None:
+            return {'ok': False, 'reason': f'no pair {pair_key}'}
+        chosen = str(choice or algo_module.NONE).upper()
+        if chosen not in algo_module.ALGOS:
+            return {'ok': False, 'pair': pair_key,
+                    'reason': f'{choice!r} is not an algo — choose one of '
+                              + ', '.join(algo_module.ALGOS)}
+        with self.lock:
+            if chosen == algo_module.ALGO:
+                answer = self.algos.turn_on(pair)
+            else:
+                self.algos.turn_off(pair_key)
+                pair.algo = chosen
+                answer = {'ok': True, 'pair': pair_key, 'on': False}
+        if self.store is not None:
+            try:
+                self.store.event('algo_switch', pair_key, algo=chosen,
+                                 ok=answer.get('ok'),
+                                 reason=answer.get('reason'))
+            except Exception as e:
+                logging.error('could not record the Algo switch: %s', e)
+        return dict(answer, algo=chosen if answer.get('ok') else None)
+
+    def _offset_of(self, account):
+        """One broker's measured offset from UTC, or None."""
+        self.broker_offset()           # measures each account when due
+        cached = self._offsets.get(account)
+        return cached[1] if cached else None
+
+    def _work_algo(self, pair, md):
+        """Feed this pass's market to the ladder's Algo, if it is on.
+
+        A ladder whose Algo is off is not touched at all — not a candle,
+        not a lookup. A failure in here is logged and the poll goes on:
+        a signal is never allowed to stop the loop that watches money.
+        """
+        if not self.algos.is_on(pair.key):
+            return None
+        try:
+            return self.algos.observe(pair, md, self._algo_positions(pair, md),
+                                      self._algo_gates(pair, md))
+        except Exception as e:
+            logging.exception('[ALGO %s] skipped this pass: %s', pair.key, e)
+            return None
+
+    def _algo_positions(self, pair, md):
+        """This ladder's open positions as the Algo reads them: each with
+        the break-even and take-profit the Exit panel shows for it."""
+        settings = pair.exit_settings(self.config.settings)
+        nights = float(settings.get('BREAK_EVEN_NIGHTS', 0.0) or 0.0)
+        margin = (self.margin_detail(pair) or {}).get('money')
+        pct = settings.get('TP_TARGET_PCT_OF_MARGIN')
+        rows = []
+        for position in self.book.positions(pair.key):
+            levels = takeprofit.for_position(
+                position, md, pair, settings, margin, nights=nights,
+                carry_for=self.holding_carry(pair, position.side.value,
+                                             nights)) or {}
+            tp = levels.get('tp')
+            if pct and not levels.get('target_points'):
+                # A target was asked for and could not be priced (no
+                # margin from the terminals yet). Break-even is not the
+                # target, so no profit exit is signalled on it.
+                tp = None
+            _gross, net_pnl, _closing = mark_position(position, md, settings)
+            be = levels.get('break_even')
+            stop = self._algo_stop_points(pair, position.quantity or 1.0,
+                                          position.spread_units, margin)
+            sl = None
+            if stop is not None and be is not None:
+                sl = be - stop if position.side is SpreadSide.BUY \
+                    else be + stop
+            rows.append({'position_id': position.position_id,
+                         'side': position.side.value,
+                         'entry_spread': position.entry_spread,
+                         'opened_at': position.opened_at,
+                         'break_even': be, 'tp': tp, 'sl': sl,
+                         'net_pnl': net_pnl})
+        return rows
+
+    def _algo_stop_points(self, pair, quantity, units, margin=None):
+        """The stop loss's distance from break-even, in spread points:
+        `stop_loss_pct` of the margin `quantity` spreads tie up, through
+        the one `k`. None when the stop is off or cannot be priced —
+        never 0, which would put the stop AT break-even."""
+        params = algo_module.clean_params(pair.algo_params)
+        if not params['stop_loss_on'] or not params['stop_loss_pct']:
+            return None
+        if margin is None:
+            margin = (self.margin_detail(pair) or {}).get('money')
+        if not margin:
+            return None
+        return takeprofit.points(
+            params['stop_loss_pct'] / 100.0 * float(margin) * float(quantity),
+            units, quantity)
+
+    def _algo_gates(self, pair, md):
+        """What can hold an Algo ENTRY back on this pass."""
+        health = (md or {}).get('guard_reason')
+        cutoff_min = None
+        now = self.session_clock.broker_now()
+        if now is not None:
+            cutoff = now.replace(
+                hour=int(self.config.get('OVERNIGHT_CLOSE_HOUR', 16)),
+                minute=int(self.config.get('OVERNIGHT_CLOSE_MINUTE', 55)),
+                second=0, microsecond=0)
+            cutoff_min = (cutoff - now).total_seconds() / 60.0
+        return {'health': health, 'cutoff_min': cutoff_min}
 
     def holding_carry(self, pair, direction, nights):
         """What holding one spread `nights` nights costs, in money.
@@ -1131,6 +1276,12 @@ class Coordinator:
         pair = self.config.pairs.get(pair_key)
         if pair is None:
             return {'ok': False, 'reason': f'no pair {pair_key}'}
+        # Algo or Manual, never both — once the Algo can trade. Today it
+        # only signals and this is always None, so every click goes
+        # through exactly as it did before there was an Algo.
+        refusal = self.algos.manual_order_refusal(pair_key)
+        if refusal:
+            return self._refuse(pair_key, side, level, refusal)
         shared = self.legs_share_an_account(pair)
         if shared and self.config.get('REFUSE_SHARED_ACCOUNT', False):
             # OFF by default. Two accounts on one terminal is usually a
@@ -2079,7 +2230,10 @@ class Coordinator:
                 # The selected algo, and what it says. NONE publishes
                 # only its own name — a ladder running nothing costs
                 # nothing on the wire either.
-                'algo': pair.algo,
+                'algo': (algo_module.ALGO if self.algos.is_on(key)
+                         else pair.algo),
+                'algo_on': self.algos.is_on(key),
+                'algo_params': algo_module.clean_params(pair.algo_params),
                 'algo_window': pair.algo_window,
                 'algo_block': self.algo_block(pair, md, row_exit),
                 'show_fair_window': pair.algo_window,   # the old name

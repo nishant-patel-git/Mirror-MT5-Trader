@@ -470,6 +470,41 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                  'Content-Disposition':
                      'attachment; filename=slippage.csv'})
 
+    @app.get('/api/algo_signals.csv')
+    def api_algo_signals_csv():
+        """Every Algo signal, for a spreadsheet: what it said, when, at
+        what z and spread — and, for an exit, what the position would
+        have made after costs. Signals only: nothing here was sent.
+
+        Empty cells, not zeros, where nothing was measured.
+        """
+        import csv
+        import io
+        db = store()
+        if db is None:
+            return 'the database could not be opened', 503
+        rows = db.events('algo_signal',
+                         min(int(request.args.get('limit', 5000)), 50000))
+        buffer = io.StringIO()
+        columns = ['at', 'pair_key', 'mode', 'action', 'side', 'reason', 'z',
+                   'spread', 'mid_spread', 'mean', 'sigma', 'upper', 'lower',
+                   'entry_z', 'position_id', 'entry_spread', 'break_even',
+                   'tp', 'net_pnl']
+        writer = csv.DictWriter(buffer, fieldnames=columns,
+                                extrasaction='ignore')
+        writer.writeheader()
+        for row in reversed(rows):                  # oldest first
+            line = dict(row.get('detail') or {})
+            line['at'] = time.strftime('%Y-%m-%d %H:%M:%S',
+                                       time.localtime(row['at']))
+            line['pair_key'] = row.get('pair_key')
+            writer.writerow({c: ('' if line.get(c) is None else line.get(c))
+                             for c in columns})
+        return (buffer.getvalue(), 200,
+                {'Content-Type': 'text/csv',
+                 'Content-Disposition':
+                     'attachment; filename=algo_signals.csv'})
+
     @app.get('/api/events')
     def api_events():
         db = store()
@@ -1007,6 +1042,15 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         # are computed from the pair's CURRENT clip, so a position
         # entered at 0.01 would silently acquire the target of a 0.10
         # one. It is refused while anything is on.
+        # The Algo's numbers are checked BEFORE anything is written: a
+        # timeframe MT5 has no bars for, or an entry z of 0, saved
+        # quietly would signal on every tick or never.
+        if 'algo_params' in payload:
+            from . import algo as algo_module
+            problems = algo_module.check_params(payload['algo_params'] or {})
+            if problems:
+                return jsonify({'ok': False,
+                                'error': 'Algo: ' + '; '.join(problems)}), 400
         resizing = ('clip_lots_a' in payload
                     and _changed(payload['clip_lots_a'],
                                  pair.get('clip_lots_a')))
@@ -1036,7 +1080,7 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                       'slippage_allowance', 'break_even_nights',
                       'tp_target_pct_of_margin',
                       'carry_rate_pct',
-                      'show_fair_window', 'algo', 'algo_window'):
+                      'show_fair_window', 'algo_window', 'algo_params'):
             if field in payload:
                 pair[field] = payload[field]
         # A date that will not parse is REPORTED and the old value kept:

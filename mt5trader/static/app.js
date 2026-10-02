@@ -773,6 +773,13 @@
     if (on) { openPanel(id); } else { closePanel(id); }
     setPair(key, {algo_window: !!on});
     var row = (state.snapshot.pairs || {})[key];
+    if (!on && row && row.algo_on) {
+      // The window IS the Algo's display. Closed, the Algo goes off
+      // with it — a signal nobody can see is a signal nobody watches.
+      send('set_algo', {pair: key, algo: 'NONE'});
+      row.algo_on = false;
+      toast(key + ': Algo off');
+    }
     if (row) { row.algo_window = !!on; }           // before the next poll
     fetch('/api/pairs/' + encodeURIComponent(key), {
       method: 'POST',
@@ -792,8 +799,7 @@
     title.title = key + ' — leg A ' + (row.symbol_a || '?') + ', leg B '
       + (row.symbol_b || '?');
     // WHICH algo, first: the window shows one reading, not two.
-    renderAlgo(node, row);
-    renderFair(node, row);
+    renderFair(node, row, renderAlgo(node, row));
   }
 
   function wireLadder(node, key) {
@@ -1194,10 +1200,10 @@
     ['.ls-contract-b', 'contract_size_b', 'blank-number'],
     ['.ls-quoting', 'quoting_leg', 'live'],
     ['.ls-auto-route', 'auto_route', 'check'],
-    // The Fair Spread window. One tick, and `algo` follows it on the
-    // engine — there is one algo, and a dropdown to pick it plus a
-    // tick to see it was two controls for one decision.
-    ['.ls-algo-window', 'algo_window', 'check'],
+    // What the window reads: None, Fair spread or Algo. ONE control
+    // for one decision. Fair spread is the saved `algo_window`; Algo is
+    // a switch on the running engine, never saved, off after a restart.
+    ['.ls-algo', 'algo_window', 'algo-choice'],
     ['.ls-comm-a', 'commission_per_lot_a', 'number', 'COMMISSION_PER_LOT_A'],
     ['.ls-comm-b', 'commission_per_lot_b', 'number', 'COMMISSION_PER_LOT_B'],
     // Blank is a REAL state: it means the desk-wide threshold.
@@ -1217,6 +1223,33 @@
     ['.ls-swap-b-short', 'swap_b_short_per_lot', 'text']
 
   ];
+
+  //: The Algo's own numbers: the control, the name inside the pair's
+  //: `algo_params`, and how to read it. Blank means the default, which
+  //: the box shows — the engine's effective value, from the snapshot.
+  var ALGO_FIELDS = [
+    ['.ls-az-entry', 'entry_z', 'number'],
+    ['.ls-az-tf', 'timeframe_min', 'number'],
+    ['.ls-az-length', 'length', 'number'],
+    ['.ls-az-confirm', 'confirm_ticks', 'number'],
+    ['.ls-az-max', 'max_entry_z', 'number'],
+    ['.ls-az-buffer', 'cutoff_buffer_min', 'number'],
+    ['.ls-az-cooldown', 'cooldown_min', 'number'],
+    ['.ls-az-sl-on', 'stop_loss_on', 'check'],
+    ['.ls-az-sl', 'stop_loss_pct', 'number'],
+    ['.ls-az-progress', 'progress_bar', 'check'],
+    ['.ls-az-stop-on', 'stop_z_on', 'check'],
+    ['.ls-az-stop', 'stop_z', 'number'],
+    ['.ls-az-revert-on', 'reversion_on', 'check'],
+    ['.ls-az-time-on', 'time_stop_on', 'check'],
+    ['.ls-az-time', 'time_stop_candles', 'number']
+  ];
+
+  function algoChoiceOf(row) {
+    /* What the ladder's window reads NOW, as the dropdown names it. */
+    if (row && row.algo_on) { return 'ALGO'; }
+    return row && row.algo_window ? 'FAIR_SPREAD' : 'NONE';
+  }
 
   function openLadderSettings(node, key) {
     /* THIS ladder's settings, showing what is ACTUALLY IN FORCE.
@@ -1261,6 +1294,14 @@
         // Edited since this pane opened: leave it alone. What the
         // operator chose outranks what the file said a moment ago.
         if (input.dataset.touched) { return; }
+        if (kind === 'algo-choice') {
+          // The ENGINE says whether the Algo is on — it is never in the
+          // file. The window tick is the file's.
+          input.value = live.algo_on ? 'ALGO'
+            : ((own === undefined || own === null ? live.algo_window : own)
+                ? 'FAIR_SPREAD' : 'NONE');
+          return;
+        }
         if (kind === 'check') {
           input.checked = !!(own === undefined || own === null
             ? live[entry[4] || field] : own);
@@ -1300,6 +1341,22 @@
       // NOW says. Reading `saved` here would put the note and the
       // enabled/disabled rows back to the file's answer even though
       // the control beside them is left showing the operator's.
+      var typed = saved.algo_params || {};
+      var effective = live.algo_params || {};
+      ALGO_FIELDS.forEach(function (entry) {
+        var input = pane.querySelector(entry[0]);
+        if (!input || input.dataset.touched) { return; }
+        var value = typed[entry[1]];
+        if (value === undefined || value === null || value === '') {
+          value = effective[entry[1]];
+        }
+        if (entry[2] === 'check') { input.checked = !!value; return; }
+        input.value = (value === undefined || value === null) ? '' : value;
+      });
+      var algoState = pane.querySelector('.ls-algo-state');
+      if (algoState) {
+        algoState.textContent = live.algo_on ? 'on — signals only' : '';
+      }
       var typeBox = pane.querySelector('.ls-pair-type');
       fairKindFields(pane, {pair_type:
         (typeBox && typeBox.dataset.touched && typeBox.value)
@@ -1431,6 +1488,8 @@
     var pane = node.querySelector('.ladder-settings');
     var payload = {};
     var live = {};
+    var before = algoChoiceOf((state.snapshot.pairs || {})[key]);
+    var choice = before;
     LADDER_FIELDS.forEach(function (entry) {
       var input = pane.querySelector(entry[0]);
       if (!input) { return; }
@@ -1438,7 +1497,13 @@
       var kind = entry[2];
       var raw = (input.value || '').trim();
       var value;
-      if (kind === 'check') {
+      if (kind === 'algo-choice') {
+        choice = raw || 'NONE';
+        // Algo leaves the saved window tick as it was: the Algo is the
+        // engine's switch, and a restart goes back to what is saved.
+        if (choice === 'ALGO') { return; }
+        value = choice === 'FAIR_SPREAD';
+      } else if (kind === 'check') {
         value = input.checked;
       } else if (kind === 'live') {
         if (!raw && field !== 'quoting_leg') { return; }   // never a null
@@ -1462,6 +1527,19 @@
       payload[field] = value;
       if (value !== null) { live[field] = value; }
     });
+    // The Algo's numbers, typed ones only: an empty box is the default.
+    var params = {};
+    ALGO_FIELDS.forEach(function (entry) {
+      var input = pane.querySelector(entry[0]);
+      if (!input) { return; }
+      if (entry[2] === 'check') { params[entry[1]] = !!input.checked; return; }
+      var raw = (input.value || '').trim();
+      if (raw === '') { return; }
+      var number = parseFloat(raw);
+      if (!isNaN(number)) { params[entry[1]] = number; }
+    });
+    payload.algo_params = params;
+    live.algo_params = params;
     fetch('/api/pairs/' + encodeURIComponent(key), {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -1475,10 +1553,16 @@
       // poll, and the live send changes the ladder in front of the
       // trader now rather than a poll later.
       setPair(key, live);
+      if (choice !== before) {
+        // ON or OFF in the running engine. Its refusal, if any, comes
+        // back in its own words through `send`.
+        send('set_algo', {pair: key, algo: choice});
+      }
       var row = (state.snapshot.pairs || {})[key];
       if (row) {
-        row.algo_window = !!payload.algo_window;
-        row.algo = payload.algo_window ? 'FAIR_SPREAD' : 'NONE';
+        if (choice !== 'ALGO') { row.algo_window = !!payload.algo_window; }
+        row.algo_on = choice === 'ALGO';
+        row.algo = choice;
       }
       (answer.notes || []).forEach(function (note) { toast(note); });
       if (!(answer.notes || []).length) { toast('applied to ' + key, 'ok'); }
@@ -1486,7 +1570,8 @@
       // One door for the window, so the pane and the window's own X
       // cannot disagree about whether it is open.
       var fairId = panelId('fair', key);
-      var wanted = !!payload.algo_window;
+      var wanted = choice !== 'NONE';
+      if (wanted) { delete state.closed[fairId]; }
       if (wanted !== (state.open.indexOf(fairId) >= 0)) {
         if (wanted) { openPanel(fairId); } else { closePanel(fairId); }
       } else {
@@ -1918,24 +2003,221 @@
 
   }
 
+  //: What the Algo is doing, in the trader's words. The engine's
+  //: state names are for the code.
+  var ALGO_EXIT_WORDS = {
+    STOP_LOSS: 'stop loss',
+    PROFIT_TARGET: 'profit target', Z_STOP: 'z-stop',
+    MEAN_REVERSION: 'back to the mean', TIME_STOP: 'time stop'
+  };
+
+  function algoLine(block, digits) {
+    /* One short line: what the Algo says right now. */
+    var state = block.state;
+    if (state === 'SIGNAL') {
+      var z = block.signal === 'SELL' ? block.z_sell : block.z_buy;
+      return (block.signal === 'SELL' ? 'SELL' : 'BUY') + ' signal  z ' +
+        signed(z);
+    }
+    if (state === 'EXIT') {
+      // WHICH position, by what it is: the side and the price it went
+      // on at. With two on the ladder, "exit" alone is half a sentence.
+      var rows = (block.positions || []).filter(function (p) {
+        return p.exit;
+      });
+      return rows.map(function (p) {
+        return 'EXIT ' + positionWords(p, digits) + ': ' +
+          (ALGO_EXIT_WORDS[p.exit] || p.exit);
+      }).join('; ');
+    }
+    if (state === 'IN_POSITION') {
+      var held = block.positions || [];
+      var first = held[0] || {};
+      return 'in ' + positionWords(first, digits) +
+        (held.length > 1 ? ' (+' + (held.length - 1) + ' more)' : '') +
+        ' — TP ' + fmt(first.tp, digits) + ' · SL ' +
+        (first.sl === null || first.sl === undefined
+          ? (((block.params || {}).stop_loss_on) ? '—' : 'off')
+          : fmt(first.sl, digits));
+    }
+    if (state === 'BLOCKED') { return 'held: ' + (block.blocked || ''); }
+    if (state === 'CONFIRMING') {
+      var streak = block.streak || {};
+      return 'confirming ' + Math.max(streak.BUY || 0, streak.SELL || 0) +
+        '/' + ((block.params || {}).confirm_ticks || '?');
+    }
+    if (state === 'STARTING') { return 'starting…'; }
+    return 'watching';
+  }
+
+  function positionWords(position, digits) {
+    /* "BUY @ 59.11": the side and the spread it was ENTERED at. */
+    return (position.side || '?') + ' @ ' + fmt(position.entry_spread, digits);
+  }
+
+  function renderProgress(node, block, digits) {
+    /* SL <- entry -> TP, with the closing price on it. The Algo only,
+     * while a position is on, and only if the ladder has it turned on. */
+    var bar = node.querySelector('.algo-progress');
+    if (!bar) { return; }
+    var first = (block && (block.positions || [])[0]) || null;
+    var wanted = !!(block && block.algo === 'ALGO' && first &&
+                    (block.params || {}).progress_bar !== false);
+    bar.hidden = !wanted;
+    if (!wanted) { return; }
+    // The entry sits where the stop and the target put it: the two
+    // halves are drawn to their own scale, as the engine measures them.
+    var entry = first.entry_spread;
+    var toTp = first.tp === null || first.tp === undefined
+      ? null : Math.abs(first.tp - entry);
+    var toSl = first.sl === null || first.sl === undefined
+      ? null : Math.abs(entry - first.sl);
+    var split = (toTp && toSl) ? toSl / (toSl + toTp) : (toSl ? 0.5 : 0);
+    var p = first.progress;
+    var at = (p === null || p === undefined) ? null
+      : (p >= 0 ? split + p * (1 - split) : split + p * split);
+    var fill = bar.querySelector('.ap-fill');
+    var mark = bar.querySelector('.ap-mark');
+    bar.querySelector('.ap-entry').style.left = (split * 100) + '%';
+    if (at === null) {
+      fill.style.width = '0';
+      mark.hidden = true;
+    } else {
+      mark.hidden = false;
+      mark.style.left = 'calc(' + (at * 100) + '% - 1px)';
+      fill.className = 'ap-fill ' + (p >= 0 ? 'up' : 'down');
+      fill.style.left = (Math.min(at, split) * 100) + '%';
+      fill.style.width = (Math.abs(at - split) * 100) + '%';
+    }
+    bar.querySelector('.ap-sl').textContent =
+      toSl === null ? 'no SL' : 'SL ' + fmt(first.sl, digits);
+    bar.querySelector('.ap-tp').textContent =
+      toTp === null ? 'no TP' : 'TP ' + fmt(first.tp, digits);
+    bar.querySelector('.ap-pct').textContent = p === null || p === undefined
+      ? '—' : (p >= 0 ? Math.round(p * 100) + '% to TP'
+                      : Math.round(-p * 100) + '% to SL');
+    bar.title = positionWords(first, digits) + ', closing at ' +
+      fmt(first.closing_spread, digits) + ' — a signal only, nothing is sent';
+  }
+
+  function signed(value) {
+    if (value === null || value === undefined || isNaN(value)) { return '—'; }
+    return (value > 0 ? '+' : '') + Number(value).toFixed(2);
+  }
+
   function renderAlgo(node, row) {
-    /* Which algo this ladder is running. FAIR SPREAD, or none.
+    /* Which algo this ladder is running: FAIR SPREAD, ALGO, or none.
      *
      * It MEASURES: it does not place, modify or cancel an order, and a
      * click on the ladder behaves identically either way.
+     *
+     * With the Algo on, the window keeps its shape and its slots — the
+     * two B/S rows carry z and the band instead of fair and gap — so
+     * nothing new appears on the screen. Returns true when it drew the
+     * Algo, so the fair reading is not drawn over it.
      */
     var block = row.algo_block || {};
     var selected = block.algo || row.algo || 'NONE';
-    var kind = node.querySelector('.fair-kind');
-    if (kind) {
-      // Which arithmetic this pair gets — spot against a future, a
-      // calendar, or two instruments with no carry between them.
-      kind.textContent = selected === 'FAIR_SPREAD'
-        ? (block.kind_note || '') : '';
+    var isAlgo = selected === 'ALGO';
+    var fair = node.querySelector('.fair');
+    var label = fair && fair.querySelector('.rail-label');
+    if (label && label.firstChild && label.firstChild.nodeType === 3) {
+      label.firstChild.nodeValue = isAlgo ? 'Algo' : 'Fair spread';
     }
+    var heads = fair ? fair.querySelectorAll('table.fairs tr > th') : [];
+    // [blank, B, S, Fair, Gap]: the two row labels are the 4th and 5th.
+    if (heads.length >= 5) {
+      heads[3].textContent = isAlgo ? 'z' : 'Fair';
+      heads[3].title = isAlgo ? 'z of the price each side trades at: '
+        + 'B at the offer, S at the bid' : '';
+      heads[4].textContent = isAlgo ? 'Band' : 'Gap';
+      heads[4].title = isAlgo ? 'where each side signals: B at or under the '
+        + 'lower band, S at or over the upper' : '';
+    }
+    var kind = node.querySelector('.fair-kind');
+    var slRow = node.querySelector('.algo-sl-row');
+    if (slRow) {
+      slRow.hidden = !isAlgo;
+    }
+    renderProgress(node, isAlgo ? block : null, digitsFor(row.increment));
+    if (!isAlgo) {
+      if (kind) {
+        // Which arithmetic this pair gets — spot against a future, a
+        // calendar, or two instruments with no carry between them.
+        kind.textContent = selected === 'FAIR_SPREAD'
+          ? (block.kind_note || '') : '';
+        kind.className = 'fair-kind hint';
+      }
+      return false;
+    }
+    if (fair) {
+      fair.title = 'Algo: Bollinger bands on the spread. A signal only — '
+        + 'nothing here is sent to the broker, and clicks are unaffected.';
+    }
+    var digits = digitsFor(row.increment);
+    var entry = (block.params || {}).entry_z;
+    var hits = {
+      buy: block.z_buy !== null && block.z_buy !== undefined && entry
+        && block.z_buy <= -entry,
+      sell: block.z_sell !== null && block.z_sell !== undefined && entry
+        && block.z_sell >= entry
+    };
+    ['buy', 'sell'].forEach(function (side) {
+      var cell = node.querySelector('.fair-' + side);
+      if (!cell) { return; }
+      cell.textContent = signed(block['z_' + side]);
+      cell.className = 'fair-' + side + (hits[side]
+        ? (side === 'buy' ? ' up' : ' down') : '');
+      var band = node.querySelector('.gap-' + side);
+      if (band) {
+        band.textContent = fmt(side === 'buy' ? block.lower : block.upper,
+                               digits);
+        band.className = 'gap-' + side;
+        band.title = side === 'buy'
+          ? 'BUY signals when the offer-side spread is at or under this'
+          : 'SELL signals when the bid-side spread is at or over this';
+      }
+    });
+    if (slRow) {
+      slRow.querySelector('.sl-buy').textContent = fmt(block.sl_buy, digits);
+      slRow.querySelector('.sl-sell').textContent = fmt(block.sl_sell,
+                                                        digits);
+      slRow.title = (block.params || {}).stop_loss_on
+        ? 'stop loss for a new entry: break-even less '
+          + (block.params || {}).stop_loss_pct + '% of margin'
+        : 'stop loss off for this ladder';
+    }
+    if (kind) {
+      // A price that cannot be trusted is said on this one line, in the
+      // window's own size — it does not shout over the reading.
+      var line = algoLine(block, digits);
+      if (block.health && block.state !== 'BLOCKED') {
+        line += ' — ' + block.health;
+      }
+      kind.textContent = line;
+      kind.className = 'fair-kind hint';
+      kind.title = block.blocked || block.health || '';
+    }
+    var note = node.querySelector('.fair-note');
+    if (note) {
+      var history = block.history || {};
+      note.textContent = block.ready
+        ? 'EMA ' + fmt(block.mean, digits) + ' σ ' + fmt(block.sigma, digits)
+          + ' · ' + (block.timeframe_min || '?') + 'm×' + (block.length || '?')
+        : 'candles ' + (block.count || 0) + '/' + (block.needed || '?');
+      note.title = (history.note || '') +
+        ' — dry run: signals are recorded, nothing is sent.';
+    }
+    var warn = node.querySelector('.fair-warn');
+    if (warn) {
+      // The carry's warning box belongs to the fair spread. The Algo
+      // says its own trouble on its state line instead.
+      warn.hidden = true;
+    }
+    return true;
   }
 
-  function renderFair(node, row) {
+  function renderFair(node, row, algoShown) {
     /* What the CARRY says this basis should be — both directions.
      *
      * Two columns, because buying the spread pays the offer and
@@ -1950,8 +2232,16 @@
     var buy = node.querySelector('.fair-buy');
     if (!buy) { return; }          // a page from an older template
     var digits = digitsFor(row.increment);
-    node.querySelector('.fair-buy').textContent = fmt(fair.fair_buy, digits);
-    node.querySelector('.fair-sell').textContent = fmt(fair.fair_sell, digits);
+    if (!algoShown) {
+      node.querySelector('.fair-buy').textContent = fmt(fair.fair_buy, digits);
+      node.querySelector('.fair-sell').textContent = fmt(fair.fair_sell,
+                                                         digits);
+      node.querySelector('.fair-buy').className = 'fair-buy';
+      node.querySelector('.fair-sell').className = 'fair-sell';
+      node.querySelector('.fair').title = 'What the carry says this basis '
+        + 'should be: the broker\'s own swap over the nights to expiry, '
+        + 'divided by k. A reference reading — it feeds nothing.';
+    }
     // Rich = the market is above what the carry justifies, which is the
     // side a trader sells. Said in colour as well as sign: the
     // direction of a basis is the thing everyone gets backwards once.
@@ -1973,7 +2263,8 @@
         : '';
     });
 
-    ['buy', 'sell'].forEach(function (side) {
+    // With the Algo on, these rows are its band — drawn by renderAlgo.
+    (algoShown ? [] : ['buy', 'sell']).forEach(function (side) {
       var cell = node.querySelector('.gap-' + side);
       var gap = fair['gap_' + side];
       if (gap === null || gap === undefined) {
@@ -1988,31 +2279,33 @@
         ? 'the market is RICH to its own carry here'
         : 'the market is CHEAP to its own carry here';
     });
-    // The rail is 100px wide: a sentence does not fit in it. The short
-    // form is shown; the engine's full wording is the tooltip.
-    var note = node.querySelector('.fair-note');
-    var expiring = fair.days_to_expiry;
-    note.textContent = fair.fair_buy === null || fair.fair_buy === undefined
-      ? (fair.expects_expiry === false ? '' : 'set expiry + swap')
-      : (expiring === null || expiring === undefined
-          ? '' : expiring + 'd to expiry');
-    note.title = fair.note || '';
+    if (!algoShown) {
+      // The rail is 100px wide: a sentence does not fit in it. The short
+      // form is shown; the engine's full wording is the tooltip.
+      var note = node.querySelector('.fair-note');
+      var expiring = fair.days_to_expiry;
+      note.textContent = fair.fair_buy === null || fair.fair_buy === undefined
+        ? (fair.expects_expiry === false ? '' : 'set expiry + swap')
+        : (expiring === null || expiring === undefined
+            ? '' : expiring + 'd to expiry');
+      note.title = fair.note || '';
 
-    // A swap that disagrees with an annual rate — or a long leg showing
-    // a credit — REPLACES the reading rather than printing beneath it.
-    var warn = node.querySelector('.fair-warn');
-    var fix = node.querySelector('.fair-fix');
-    if (!warn) { return; }
-    warn.hidden = !fair.warning;
-    node.querySelector('.fair-warn-text').textContent = fair.warning || '';
-    fix.hidden = !fair.fix;
-    if (fair.fix) {
-      // Named field, named value, ONE click — and still an explicit
-      // action. A sign the engine flipped by itself is a sign nobody
-      // would ever notice was wrong.
-      fix.textContent = 'set ' + fair.fix.field.replace(/_/g, ' ') +
-        ' = ' + fmt(fair.fix.value, 2);
-      fix.onclick = function () { applyCarryFix(row.key, fair.fix); };
+      // A swap that disagrees with an annual rate — or a long leg showing
+      // a credit — REPLACES the reading rather than printing beneath it.
+      var warn = node.querySelector('.fair-warn');
+      var fix = node.querySelector('.fair-fix');
+      if (!warn) { return; }
+      warn.hidden = !fair.warning;
+      node.querySelector('.fair-warn-text').textContent = fair.warning || '';
+      fix.hidden = !fair.fix;
+      if (fair.fix) {
+        // Named field, named value, ONE click — and still an explicit
+        // action. A sign the engine flipped by itself is a sign nobody
+        // would ever notice was wrong.
+        fix.textContent = 'set ' + fair.fix.field.replace(/_/g, ' ') +
+          ' = ' + fmt(fair.fix.value, 2);
+        fix.onclick = function () { applyCarryFix(row.key, fair.fix); };
+      }
     }
     // The other two things that decide where a position ends, beside
     // the two figures that price it: read-only here, because both are
@@ -3143,6 +3436,10 @@
       '<label class="check"><input type="checkbox" class="ours-only"' +
       (state.fillsFilter.ours ? ' checked' : '') + '> ours only</label>' +
       '<a class="btn" href="/api/fills.csv" download>Export CSV</a>' +
+      '<a class="btn" href="/api/algo_signals.csv" download ' +
+      'title="Every Algo entry and exit signal: time, z, spread, and what ' +
+      'an exit would have made after costs. Signals only — none was sent.">' +
+      'Algo signals CSV</a>' +
       '<span class="hint">Read back from MT5\'s own deal history — so it ' +
       'carries the trader\'s terminal clicks too, marked as not ours.' +
       '</span></div>';
@@ -3883,7 +4180,8 @@
       // says, because a window that vanishes when the engine hiccups
       // is a window the trader cannot rely on.
       var fairId = panelId('fair', key);
-      if (snapshot.pairs[key].algo_window && !state.closed[fairId]
+      if ((snapshot.pairs[key].algo_window || snapshot.pairs[key].algo_on)
+          && !state.closed[fairId]
           && state.open.indexOf(fairId) < 0) {
         state.open.push(fairId);
       }

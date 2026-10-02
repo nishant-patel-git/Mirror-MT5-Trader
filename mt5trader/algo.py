@@ -1,23 +1,25 @@
-"""The two algos, and the switch that says which one is running.
+"""The algos, and the switch that says which one is running.
 
-This system is a MANUAL ladder. Every rule it is built on says so, and
-the two most important of them are worth repeating here because this
-module is where they would be lost:
+This system is a MANUAL ladder with a SIGNAL beside it. The rule this
+module is where it would be lost:
 
-    No strategy and no loops. No signals, no automatic entries or
-    exits, nothing that re-enters by itself.
+    Signals may be computed and shown. Nothing places an order by
+    itself — no automatic entries, no automatic exits, nothing that
+    re-enters by itself.
 
-So what follows is deliberately only half of an algo. It measures, and
-it says what it would do. **It does not place, modify or cancel an
-order, and nothing in this file touches the manual path** — a click on
-the ladder behaves identically whether an algo is selected or not, and
-whether it is screaming BUY or saying nothing at all.
+So what follows DECIDES and says what it would do. **It does not place,
+modify or cancel an order, and nothing in this file touches the manual
+path** — a click on the ladder behaves identically whether an algo is
+selected or not, and whether it is saying BUY or nothing at all. A test
+reads this file as code and fails the build if it can reach a broker.
 
-Turning the other half on — letting one of these actually trade — is a
-separate, deliberate step that has to be asked for. Reading a number
-off a screen and deciding is the trader's job today.
+What it decides leaves as an INTENT — "enter, selling the spread",
+"exit position POS-12, profit target" — handed to a sink (`algodesk`).
+Today the only sink records the intent and shows it. Execution, when
+it is asked for, is a second sink behind the same seam; nothing in here
+changes when it arrives.
 
-One algo, per ladder, and NONE by default:
+One algo per ladder, and NONE by default:
 
 **FAIR_SPREAD** — what the basis SHOULD be, on financing alone. It
 first asks what kind of pair this is, because the answer changes the
@@ -31,19 +33,47 @@ arithmetic:
 - *two different instruments*: nothing forces them together and there
   is no fair value to quote. Saying so is the honest answer.
 
-A z-score algo was started here and has been TAKEN BACK OUT, on
-purpose. It needs a specification before it needs code: what it
-measures, how long it warms for, which gates hold it back, and — the
-part that decides everything else — whether it ever places an order.
-Half of it in the tree is worse than none of it, because the half that
-exists is the half that looks finished.
+**ALGO** — Bollinger bands on the spread (`B - beta x A`, from the mid):
+
+- *the band*: EMA(N) of the spread's candles, plus and minus
+  `entry_z` x sigma (population, last N closes, the forming candle
+  included). See `bands`.
+- *entry*: SELL the spread when the z of the BID-side spread (what a
+  sell receives) is at or above `+entry_z`; BUY when the z of the
+  ASK-side spread (what a buy pays) is at or below `-entry_z`. It must
+  hold for `confirm_ticks` fresh quotes in a row, and only on a ladder
+  with no position open.
+- *gates* hold an ENTRY back and say why: no price or a stale/jumping
+  one, not enough candles, the cooldown after an exit, the last
+  `cutoff_buffer_min` of the session, and a |z| already past
+  `max_entry_z` (a blow-out, not a stretch). **A gate never holds back
+  an exit.**
+- *exit*, for each REAL position on the ladder, measured from its own
+  fill: the closing side reaching break-even after every cost plus the
+  take-profit (% of margin) — the same TP the Exit panel shows — or
+  falling to the STOP LOSS, break-even minus `stop_loss_pct` of margin
+  (on by default). Three more, each OFF unless the ladder turns it on:
+  a z-stop, a z mean reversion taken only in profit, and a time stop in
+  candles.
+
+The switch is per ladder, held in memory, and OFF after every restart:
+an algo nobody turned on today is an algo nobody is watching.
 """
+
+import math
 
 #: What can be selected, per ladder. Exactly one, and NONE is the
 #: default — an algo nobody asked for is an algo nobody is watching.
 NONE = 'NONE'
 FAIR_SPREAD = 'FAIR_SPREAD'
-ALGOS = (NONE, FAIR_SPREAD)
+ALGO = 'ALGO'
+ALGOS = (NONE, FAIR_SPREAD, ALGO)
+
+#: How the Algo's intents are handled. Only DRY_RUN exists: intents are
+#: recorded and shown, never sent. A LIVE mode is the step that has to
+#: be asked for — it is refused here until it is.
+DRY_RUN = 'DRY_RUN'
+MODES = (DRY_RUN,)
 
 #: What kind of pair this is, which decides the fair-value arithmetic.
 SPOT_FUTURE = 'SPOT_FUTURE'
@@ -89,3 +119,393 @@ def carry_nights(kind, days_a, days_b):
     if days_b is None:
         return None, "set the future’s expiry to price its carry"
     return days_b, f'spot vs a future — {days_b:g} night(s) to expiry'
+
+
+# -- ALGO: Bollinger bands on the spread ------------------------------------
+
+#: The timeframes a candle can be, in minutes — the ones MT5 can backfill.
+TIMEFRAMES = (1, 5, 15, 30, 60, 240)
+
+#: Every number the Algo reads, and what it is when nothing was typed.
+#: Per ladder: a gold basis and an oil differential do not stretch the
+#: same way. The take-profit is NOT here — it is the ladder's existing
+#: `tp_target_pct_of_margin`, so the exit signal and the TP on the Exit
+#: panel are one number, not two that can disagree.
+DEFAULT_PARAMS = {
+    'entry_z': 2.5,
+    'timeframe_min': 15,
+    'length': 20,
+    'confirm_ticks': 3,
+    #: No entry signal past this |z|: that is a blow-out, not a stretch.
+    #: 0 = no cap.
+    'max_entry_z': 3.5,
+    #: No entry signal in the last this-many minutes before the session
+    #: cutoff, or after it. 0 = off.
+    'cutoff_buffer_min': 20,
+    #: No entry signal for this long after an exit signal or a close.
+    'cooldown_min': 5,
+    #: The STOP LOSS, as a percentage of the margin one spread ties up —
+    #: the mirror of the take-profit, measured from the same break-even.
+    #: ON by default at the take-profit's own 2%: a signal that says
+    #: where to get out in profit and never where to get out in a loss
+    #: is half an exit.
+    'stop_loss_on': True,
+    'stop_loss_pct': 2.0,
+    #: Show the SL <- entry -> TP bar while a position is on.
+    'progress_bar': True,
+    # The three optional exits — every one OFF until a ladder asks.
+    'stop_z_on': False,
+    'stop_z': 4.0,
+    'reversion_on': False,
+    'time_stop_on': False,
+    'time_stop_candles': 20,
+}
+
+_BOOLS = ('stop_z_on', 'reversion_on', 'time_stop_on', 'stop_loss_on',
+          'progress_bar')
+_INTS = ('timeframe_min', 'length', 'confirm_ticks', 'time_stop_candles')
+
+
+def clean_params(raw):
+    """The Algo's settings, every one present and of the right type.
+
+    Blank means the default, never zero: a blank entry z read as 0
+    would signal on every tick. A value that will not read is the
+    default too — and the save that sent it is told by `check_params`,
+    which the settings path calls first.
+    """
+    out = dict(DEFAULT_PARAMS)
+    for key, value in (raw or {}).items():
+        if key not in DEFAULT_PARAMS or value in (None, ''):
+            continue
+        try:
+            if key in _BOOLS:
+                out[key] = (value if isinstance(value, bool) else
+                            str(value).strip().lower()
+                            in ('1', 'true', 'yes', 'on'))
+            elif key in _INTS:
+                out[key] = int(float(value))
+            else:
+                out[key] = float(value)
+        except (TypeError, ValueError):
+            continue
+    if out['timeframe_min'] not in TIMEFRAMES:
+        out['timeframe_min'] = DEFAULT_PARAMS['timeframe_min']
+    out['length'] = max(2, out['length'])
+    out['confirm_ticks'] = max(1, out['confirm_ticks'])
+    out['time_stop_candles'] = max(1, out['time_stop_candles'])
+    if out['entry_z'] <= 0:
+        out['entry_z'] = DEFAULT_PARAMS['entry_z']
+    return out
+
+
+def check_params(raw):
+    """What is WRONG with typed Algo settings, in words, or []."""
+    problems = []
+    for key, value in (raw or {}).items():
+        if key not in DEFAULT_PARAMS:
+            problems.append(f'{key} is not an Algo setting')
+            continue
+        if value in (None, '') or key in _BOOLS:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            problems.append(f'{key}: {value!r} is not a number')
+            continue
+        if key == 'timeframe_min' and int(number) not in TIMEFRAMES:
+            problems.append(f'timeframe {value} min — choose one of '
+                            + ', '.join(str(t) for t in TIMEFRAMES))
+        elif key == 'entry_z' and number <= 0:
+            problems.append('entry z must be above 0')
+        elif number < 0:
+            problems.append(f'{key} cannot be negative')
+    return problems
+
+
+def zscore(value, mean, sigma):
+    """(value - mean) / sigma, or None when any of them is unmeasured."""
+    if value is None or mean is None or not sigma:
+        return None
+    return (float(value) - float(mean)) / float(sigma)
+
+
+class AlgoSignal:
+    """One ladder's Algo: it watches, decides, and says so.
+
+    `evaluate` is called on every poll with what the coordinator already
+    has — the market, the band, the ladder's open positions and the
+    gates — and returns what the Algo says NOW, plus the INTENTS that
+    became true on this call. An intent is reported once, on the edge
+    where it becomes true, so the record is one line per signal and not
+    one per poll.
+    """
+
+    def __init__(self, params=None):
+        self.params = clean_params(params)
+        self._streak = {'BUY': 0, 'SELL': 0}
+        self._last_quote = None
+        self._entry_live = None          # the side whose signal is showing
+        self._exits_live = {}            # position id -> reason showing
+        self._known = set()              # position ids seen last call
+        self._cooldown_until = None
+
+    def evaluate(self, now, md, stats, positions=(), gates=None):
+        """What the Algo says, and what it decided on this call.
+
+        - `now`: seconds, on the clock the cooldown and the time stop
+          are measured on.
+        - `md`: the pair's market — `short_spread` (what a sell
+          receives), `long_spread` (what a buy pays), `mid_spread`,
+          `quote_id`. None when a leg has no price.
+        - `stats`: `bands.SpreadCandles.stats()`.
+        - `positions`: this ladder's OPEN positions, each {position_id,
+          side, entry_spread, opened_at, break_even, tp, sl, net_pnl}.
+          `tp` or `sl` None means that level is not priced (or the stop
+          is off), and no exit is signalled on a number that does not
+          exist.
+        - `gates`: {'health': why the price cannot be trusted, or None;
+          'cutoff_min': minutes to the session cutoff, negative past
+          it, None unmeasured}.
+        """
+        p = self.params
+        gates = gates or {}
+        stats = stats or {}
+        positions = list(positions or ())
+        ready = bool(stats.get('ready'))
+        mean = stats.get('mean') if ready else None
+        sigma = stats.get('sigma') if ready else None
+        band = None if not ready else p['entry_z'] * sigma
+        body = {
+            'algo': ALGO, 'params': dict(p),
+            'ready': ready, 'count': stats.get('count'),
+            'needed': stats.get('needed'), 'note': stats.get('note'),
+            'mean': mean, 'sigma': sigma,
+            'upper': None if band is None else mean + band,
+            'lower': None if band is None else mean - band,
+            'z_buy': None, 'z_sell': None, 'z_mid': None,
+            'state': 'WATCHING', 'signal': None, 'blocked': None,
+            'health': gates.get('health'),
+            'cooldown_sec': None, 'positions': [], 'intents': []}
+        short = (md or {}).get('short_spread')
+        long_ = (md or {}).get('long_spread')
+        if md and ready:
+            body['z_sell'] = zscore(short, mean, sigma)
+            body['z_buy'] = zscore(long_, mean, sigma)
+            body['z_mid'] = zscore(md.get('mid_spread'), mean, sigma)
+
+        # A position that has gone since the last call starts the
+        # cooldown: whatever closed it, the next entry waits.
+        current = {pos['position_id'] for pos in positions}
+        if self._known - current:
+            self._start_cooldown(now)
+        self._known = current
+        for gone in set(self._exits_live) - current:
+            del self._exits_live[gone]
+
+        fresh = self._fresh_quote(md)
+        self._count(body, fresh)
+
+        for pos in positions:
+            body['positions'].append(self._judge_exit(now, md, pos, body))
+
+        if self._cooldown_until is not None and now < self._cooldown_until:
+            body['cooldown_sec'] = self._cooldown_until - now
+
+        if positions:
+            body['state'] = 'IN_POSITION'
+            self._entry_live = None
+            if any(row['exit'] for row in body['positions']):
+                body['state'] = 'EXIT'
+            return body
+
+        self._judge_entry(body, md, gates)
+        return body
+
+    # -- entry ------------------------------------------------------------
+
+    def _fresh_quote(self, md):
+        """Is this a NEW price, or the same one polled again?
+
+        "Three ticks in a row" means three prices. A poll that finds the
+        same quote is not a second confirmation of it.
+        """
+        if not md:
+            self._last_quote = None
+            return False
+        quote = md.get('quote_id')
+        if quote is None:
+            return True
+        if quote == self._last_quote:
+            return False
+        self._last_quote = quote
+        return True
+
+    def _count(self, body, fresh):
+        entry = self.params['entry_z']
+        z_sell, z_buy = body['z_sell'], body['z_buy']
+        hits = {'SELL': z_sell is not None and z_sell >= entry,
+                'BUY': z_buy is not None and z_buy <= -entry}
+        for side, hit in hits.items():
+            if not hit:
+                self._streak[side] = 0
+            elif fresh:
+                self._streak[side] += 1
+        body['streak'] = dict(self._streak)
+
+    def _judge_entry(self, body, md, gates):
+        p = self.params
+        side = None
+        for candidate in ('SELL', 'BUY'):
+            if self._streak[candidate] >= p['confirm_ticks']:
+                side = candidate
+        blocked = self._entry_gate(body, md, gates, side)
+        if side is None:
+            self._entry_live = None
+            if blocked:
+                body['state'] = 'BLOCKED'
+                body['blocked'] = blocked
+            elif any(self._streak.values()):
+                body['state'] = 'CONFIRMING'
+            return
+        if blocked:
+            body['state'] = 'BLOCKED'
+            body['blocked'] = blocked
+            self._entry_live = None
+            return
+        body['state'] = 'SIGNAL'
+        body['signal'] = side
+        if self._entry_live != side:
+            self._entry_live = side
+            z = body['z_sell'] if side == 'SELL' else body['z_buy']
+            body['intents'].append({
+                'action': 'ENTER', 'side': side, 'z': z,
+                'spread': md.get('short_spread' if side == 'SELL'
+                                 else 'long_spread'),
+                'mid_spread': md.get('mid_spread'),
+                'mean': body['mean'], 'sigma': body['sigma'],
+                'upper': body['upper'], 'lower': body['lower'],
+                'entry_z': p['entry_z']})
+
+    def _entry_gate(self, body, md, gates, side):
+        """Why an entry is held back now, in words, or None."""
+        p = self.params
+        if not md:
+            return 'no price on one leg'
+        if gates.get('health'):
+            return gates['health']
+        if not body['ready']:
+            return (body.get('note') or
+                    f"collecting candles {body.get('count') or 0}"
+                    f"/{body.get('needed')}")
+        if body.get('cooldown_sec'):
+            return f"cooldown {_mmss(body['cooldown_sec'])}"
+        buffer_min = p['cutoff_buffer_min']
+        cutoff = gates.get('cutoff_min')
+        if buffer_min and cutoff is not None and cutoff <= buffer_min:
+            return ('past the session cutoff' if cutoff <= 0 else
+                    f'{cutoff:.0f} min to the session cutoff')
+        if side is not None and p['max_entry_z']:
+            z = body['z_sell'] if side == 'SELL' else body['z_buy']
+            if z is not None and abs(z) > p['max_entry_z']:
+                return (f'z {z:+.2f} is past the {p["max_entry_z"]:g} cap — '
+                        f'a blow-out, not a stretch')
+        return None
+
+    def _start_cooldown(self, now):
+        minutes = self.params['cooldown_min']
+        if minutes:
+            self._cooldown_until = now + 60.0 * minutes
+
+    # -- exit -------------------------------------------------------------
+
+    def _judge_exit(self, now, md, pos, body):
+        """Should THIS position come off, and why. Never gated."""
+        p = self.params
+        side = pos.get('side')
+        closing = (md or {}).get('short_spread' if side == 'BUY'
+                                 else 'long_spread')
+        z_close = zscore(closing, body['mean'], body['sigma'])
+        tp = pos.get('tp')
+        sl = pos.get('sl')
+        be = pos.get('break_even')
+        entry = pos.get('entry_spread')
+        row = {'position_id': pos['position_id'], 'side': side,
+               'entry_spread': entry, 'closing_spread': closing,
+               'z_close': z_close, 'tp': tp, 'sl': sl, 'break_even': be,
+               'net_pnl': pos.get('net_pnl'), 'exit': None,
+               'progress': progress(side, entry, closing, tp, sl)}
+        reason = None
+        if closing is not None and sl is not None and (
+                closing <= sl if side == 'BUY' else closing >= sl):
+            reason = 'STOP_LOSS'
+        elif closing is not None and tp is not None and (
+                closing >= tp if side == 'BUY' else closing <= tp):
+            reason = 'PROFIT_TARGET'
+        elif p['stop_z_on'] and z_close is not None and (
+                z_close <= -p['stop_z'] if side == 'BUY'
+                else z_close >= p['stop_z']):
+            reason = 'Z_STOP'
+        elif p['reversion_on'] and z_close is not None and be is not None \
+                and closing is not None and (
+                    (z_close >= 0 and closing >= be) if side == 'BUY'
+                    else (z_close <= 0 and closing <= be)):
+            reason = 'MEAN_REVERSION'
+        elif p['time_stop_on'] and pos.get('opened_at') is not None and (
+                now - float(pos['opened_at'])
+                >= p['time_stop_candles'] * p['timeframe_min'] * 60.0):
+            reason = 'TIME_STOP'
+        row['exit'] = reason
+        if reason is None:
+            self._exits_live.pop(pos['position_id'], None)
+            return row
+        if self._exits_live.get(pos['position_id']) != reason:
+            self._exits_live[pos['position_id']] = reason
+            self._start_cooldown(now)
+            body['intents'].append({
+                'action': 'EXIT', 'position_id': pos['position_id'],
+                'side': side, 'reason': reason, 'spread': closing,
+                'z': z_close, 'entry_spread': entry,
+                'break_even': be, 'tp': tp, 'sl': sl,
+                'net_pnl': pos.get('net_pnl')})
+        return row
+
+
+def progress(side, entry, closing, tp, sl):
+    """Where the closing price sits between the stop and the target.
+
+    +1.0 is AT the take-profit, -1.0 is AT the stop loss, 0 is the
+    entry; past either end it is clamped there. The two halves are
+    scaled separately, because the stop and the target are rarely the
+    same distance from the entry. None when the closing price or the
+    entry is unknown — and a missing stop or target leaves only its own
+    half unmeasured.
+    """
+    if closing is None or entry is None:
+        return None
+    sign = 1.0 if side == 'BUY' else -1.0
+    gained = sign * (float(closing) - float(entry))
+    if gained >= 0:
+        if tp is None:
+            return None
+        room = sign * (float(tp) - float(entry))
+        return 1.0 if room <= 0 else min(1.0, gained / room)
+    if sl is None:
+        return None
+    room = sign * (float(entry) - float(sl))
+    return -1.0 if room <= 0 else max(-1.0, gained / room)
+
+
+#: The reasons an exit is signalled, in the trader's words.
+EXIT_WORDS = {
+    'STOP_LOSS': 'stop loss',
+    'PROFIT_TARGET': 'profit target (after costs)',
+    'Z_STOP': 'z-stop',
+    'MEAN_REVERSION': 'back to the mean, in profit',
+    'TIME_STOP': 'time stop',
+}
+
+
+def _mmss(seconds):
+    seconds = max(0, int(math.ceil(seconds)))
+    return f'{seconds // 60}:{seconds % 60:02d}'

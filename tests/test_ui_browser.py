@@ -1027,8 +1027,11 @@ def test_every_setting_shows_the_value_ACTUALLY_IN_FORCE(page):
     try:
         page.click('.ladder .ladder-cog')
         page.wait_for_function(
-            "() => document.querySelector('.ladder .ls-comm-a').value !== ''",
-            timeout=WAIT)
+            # The pair's OWN cost, which only the stubbed fetch carries:
+            # the form has been filled from it. "Not blank" was met by a
+            # value left in the box from before the fetch landed.
+            "() => document.querySelector('.ladder .ls-comm-b').value "
+            "=== '3.5'", timeout=WAIT)
 
         # What the ladder is RUNNING, from the snapshot — never blank.
         assert page.input_value('.ladder .ls-order-type') == 'LIMIT'
@@ -1398,8 +1401,10 @@ def settle(page, selector):
 #: does in life, and can never overwrite what the test put there.
 HOLD_THE_SNAPSHOT = """() => {
     window.__realFetch = window.__realFetch || window.fetch;
+    window.__held = 0;
     window.fetch = function (url, options) {
         if (String(url).indexOf('/api/status') >= 0) {
+            window.__held += 1;
             return Promise.resolve(new Response(
               JSON.stringify(window.MT5Trader.state.snapshot || {}),
               {status: 200, headers: {'Content-Type': 'application/json'}}));
@@ -1873,16 +1878,29 @@ def test_the_pairs_table_says_whether_each_ladder_is_actually_quoting(page):
     assert 'CONNECTED' in cell.text_content()
 
     # ...and when the engine reports a problem on that pair, the row
-    # carries the engine's own words rather than a green light.
-    page.evaluate("""() => {
-        const pairs = window.MT5Trader.state.snapshot.pairs;
-        const key = Object.keys(pairs)[0];
-        pairs[key].errors = ["leg A: 'XAUUSD_' is not on account 'leg_a'"];
-        window.MT5Settings.render();
-    }""")
-    text = page.text_content('td.pair-status')
-    assert "is not on account" in text
-    assert page.locator('td.pair-status.c-fail').count() >= 1
+    # carries the engine's own words rather than a green light. HELD
+    # first: a poll landing after the error is written replaces the
+    # snapshot and takes the error away before the row is read.
+    page.evaluate(HOLD_THE_SNAPSHOT)
+    try:
+        page.wait_for_function("() => window.__held >= 2", timeout=WAIT)
+        page.evaluate("""() => {
+            const pairs = window.MT5Trader.state.snapshot.pairs;
+            const key = Object.keys(pairs)[0];
+            pairs[key].errors = ["leg A: 'XAUUSD_' is not on account 'leg_a'"];
+            window.MT5Settings.render();
+        }""")
+        text = page.text_content('td.pair-status')
+        assert "is not on account" in text
+        assert page.locator('td.pair-status.c-fail').count() >= 1
+    finally:
+        page.evaluate("""() => {
+            const pairs = window.MT5Trader.state.snapshot.pairs;
+            Object.keys(pairs).forEach(function (key) {
+                delete pairs[key].errors;
+            });
+        }""")
+        page.evaluate(RELEASE_THE_SNAPSHOT)
 
 
 def test_a_repaint_under_the_pointer_does_not_swallow_the_click(page):
@@ -2152,44 +2170,52 @@ def test_the_sounds_are_generated_here_and_can_be_silenced(page):
 def test_a_pair_added_while_the_screen_is_open_gets_its_own_ladder(page):
     """A pair configured on the Exchanges page and then nowhere to be
     seen is the whole setup looking broken. It appears beside the
-    others, and a ladder the trader CLOSED stays closed."""
-    page.evaluate("""() => {
-        const state = window.MT5Trader.state;
-        state.closed = {};
-        const pairs = state.snapshot.pairs;
-        const copy = JSON.parse(JSON.stringify(pairs['XAUUSD_|GC1226']));
-        copy.key = 'EURUSD|GBPUSD';
-        copy.name = 'EURUSD - GBPUSD';
-        copy.symbol_a = 'EURUSD';
-        copy.symbol_b = 'GBPUSD';
-        pairs['EURUSD|GBPUSD'] = copy;
-        window.MT5Trader.render();
-    }""")
-    # The snapshot the publisher writes does not have it, so drive one
-    # poll's worth of the same logic the poller runs.
-    page.evaluate("""() => {
-        const state = window.MT5Trader.state;
-        Object.keys(state.snapshot.pairs).forEach(function (key) {
-            const id = window.MT5Trader.panelId('ladder', key);
-            if (state.open.indexOf(id) < 0 && !state.closed[id]) {
-                state.open.unshift(id);
-            }
-        });
-        window.MT5Trader.render();
-    }""")
+    others, and a ladder the trader CLOSED stays closed.
 
-    assert page.locator('.window.ladder').count() == 2
-    assert 'EURUSD - GBPUSD' in page.text_content('#tabs')
-
-    # Closed stays closed.
-    page.evaluate("""() => window.MT5Trader.closePanel(
-        window.MT5Trader.panelId('ladder', 'EURUSD|GBPUSD'))""")
-    page.wait_for_timeout(700)
-    assert page.locator('.window.ladder').count() == 1
+    The SERVER gains the pair: every /api/status from here on carries
+    it, and the real poller opens its ladder. Pushing it into the page's
+    snapshot by hand raced that poller — a poll landing between two
+    steps replaced the snapshot and took the added pair away with it.
+    """
     page.evaluate("""() => {
-        delete window.MT5Trader.state.snapshot.pairs['EURUSD|GBPUSD'];
-        window.MT5Trader.render();
+        window.MT5Trader.state.closed = {};
+        window.__realFetch = window.__realFetch || window.fetch;
+        window.fetch = function (url, options) {
+            const answer = window.__realFetch(url, options);
+            if (String(url).indexOf('/api/status') < 0) { return answer; }
+            return answer.then(function (r) { return r.json(); })
+              .then(function (snapshot) {
+                const pairs = snapshot.pairs || {};
+                const copy = JSON.parse(JSON.stringify(
+                    pairs['XAUUSD_|GC1226']));
+                copy.key = 'EURUSD|GBPUSD';
+                copy.name = 'EURUSD - GBPUSD';
+                copy.symbol_a = 'EURUSD';
+                copy.symbol_b = 'GBPUSD';
+                pairs['EURUSD|GBPUSD'] = copy;
+                return new Response(JSON.stringify(snapshot), {status: 200,
+                    headers: {'Content-Type': 'application/json'}});
+              });
+        };
     }""")
+    try:
+        page.wait_for_function(
+            "() => document.querySelectorAll('.window.ladder').length === 2",
+            timeout=WAIT)
+        assert 'EURUSD - GBPUSD' in page.text_content('#tabs')
+
+        # Closed stays closed — across polls that still carry the pair.
+        page.evaluate("""() => window.MT5Trader.closePanel(
+            window.MT5Trader.panelId('ladder', 'EURUSD|GBPUSD'))""")
+        page.wait_for_timeout(1200)
+        assert page.locator('.window.ladder').count() == 1
+    finally:
+        page.evaluate("""() => {
+            window.fetch = window.__realFetch || window.fetch;
+        }""")
+        page.wait_for_function(
+            "() => !('EURUSD|GBPUSD' in "
+            "(window.MT5Trader.state.snapshot.pairs || {}))", timeout=WAIT)
 
 
 def test_a_window_opened_at_the_end_of_the_row_is_scrolled_into_view(page):
@@ -2841,28 +2867,26 @@ def test_the_fair_window_is_no_bigger_than_the_figures_in_it(page):
     assert clipped == 0
 
 
-def test_the_fair_window_is_ONE_tick_on_the_ladder_it_belongs_to(page):
-    """Per ladder, off by default, and one control for one decision.
+def test_the_window_is_ONE_choice_on_the_ladder_it_belongs_to(page):
+    """Per ladder, None by default, and one control for one decision.
 
-    There was a dropdown here (None / Fair spread) beside a Show window
-    tick, back when a second algo was being built. That algo was taken
-    out; two controls for one decision stayed, and either one alone did
-    nothing anybody could see."""
+    There was a dropdown (None / Fair spread) beside a Show window tick
+    once, and either alone did nothing anybody could see. Now there are
+    two readings — Fair spread and the Algo — and still ONE control
+    picks which the window shows. No tick beside it."""
     open_ladder(page)
     page.click('.ladder .ladder-cog')
-    page.wait_for_selector('.ladder .ls-algo-window', timeout=WAIT)
+    page.wait_for_selector('.ladder .ls-algo', timeout=WAIT)
 
-    assert page.locator('.ladder .ls-algo').count() == 0
-    assert page.locator('.ladder .ls-algo-window').count() == 1
-    # It lives with the Carry fields it is a reading of, not in a group
-    # of its own.
-    assert page.locator(
-        '.ladder .ls-group:has(.ls-pair-type) .ls-algo-window').count() == 1
-    # Scoped to the CARRY group: the Trading group carries a note of
-    # its own now (what one spread means in lots).
+    assert page.locator('.ladder .ls-algo').count() == 1
+    assert page.locator('.ladder .ls-algo-window').count() == 0
+    options = page.eval_on_selector(
+        '.ladder .ls-algo', 'el => [...el.options].map(o => o.value)')
+    assert options == ['NONE', 'FAIR_SPREAD', 'ALGO']
+    # The group says out loud what the Algo is NOT.
     note = ' '.join(page.text_content(
-        '.ladder .ls-group:has(.ls-pair-type) .lsf-note').split())
-    assert 'it does not trade' in note
+        '.ladder .ls-group:has(.ls-algo) .lsf-note').split())
+    assert 'nothing is sent' in note and 'unaffected' in note
     page.click('.ladder .ls-close')
 
 
@@ -3467,15 +3491,15 @@ def test_ticking_the_setting_OPENS_the_fair_window(page):
 
     page.evaluate(SPY_ON_PAIR_SAVE)
     page.click('.ladder .ladder-cog')
-    page.wait_for_selector('.ladder .ls-algo-window', timeout=WAIT)
-    page.check('.ladder .ls-algo-window')
+    page.wait_for_selector('.ladder .ls-algo', timeout=WAIT)
+    page.select_option('.ladder .ls-algo', 'FAIR_SPREAD')
     page.click('.ladder .ls-save')
     page.wait_for_function("() => window.__sent !== null", timeout=WAIT)
 
     sent = page.evaluate('() => window.__sent')
     assert sent['algo_window'] is True
-    # The tick is the whole decision: `algo` is derived on the engine,
-    # so the form does not send one.
+    # The choice is the whole decision: `algo` is derived on the engine,
+    # so the form does not send one — and ALGO is never saved at all.
     assert 'algo' not in sent
     # ...and it is on the screen NOW, not a poll later and not only once
     # the engine has written the file back.
@@ -4977,8 +5001,14 @@ def test_a_partial_commission_total_says_how_many_fills_it_covers(page):
 
 
 def show_pnl_check(page, check):
-    """Put one pnl_check row on the monitor and hold it there."""
+    """Put one pnl_check row on the monitor and hold it there.
+
+    Two HELD polls first: a real /api/status already in flight when the
+    hold went on lands after it, replaces the snapshot, and takes the
+    row away with it.
+    """
     page.evaluate(HOLD_THE_SNAPSHOT)
+    page.wait_for_function("() => window.__held >= 2", timeout=WAIT)
     page.evaluate("""(check) => {
         const UI = window.MT5Trader;
         UI.state.snapshot.at = 1000.0;
@@ -5065,3 +5095,87 @@ def test_an_unreadable_account_leaves_the_row_UNMEASURED(page):
         assert '$0.00' not in text.split('nothing to reconcile')[0][-120:]
     finally:
         page.evaluate(RELEASE_THE_SNAPSHOT)
+
+
+def test_the_Algo_reads_in_the_fair_windows_own_slots(page):
+    """The Algo adds no window, tab or panel: with it on, the Fair
+    Spread window's two B/S rows carry z and the band, and its hint line
+    says what the Algo says. The control — the same window with the Algo
+    off — is the fair spread again, labels and all."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    publisher.show_fair_window = True
+    publisher.algo = 'ALGO'
+    publisher.algo_block = {
+        'algo': 'ALGO', 'on': True, 'state': 'SIGNAL', 'signal': 'SELL',
+        'ready': True, 'z_sell': 2.61, 'z_buy': 1.9, 'mean': 59.0,
+        'sigma': 0.04, 'upper': 59.10, 'lower': 58.90, 'count': 20,
+        'needed': 20, 'params': {'entry_z': 2.5, 'confirm_ticks': 3},
+        'timeframe_min': 15, 'length': 20, 'history': {'note': 'mt5'},
+        'positions': [], 'health': None, 'window': True}
+    try:
+        publisher.publish()
+        page.wait_for_function(
+            "() => (document.querySelector('.window.fairwin .fair-kind')"
+            " || {}).textContent.includes('SELL signal')", timeout=WAIT)
+        label = page.text_content('.window.fairwin .fair .rail-label')
+        assert label.strip().startswith('Algo')
+        assert page.text_content('.window.fairwin .fair-sell') == '+2.61'
+        assert page.text_content('.window.fairwin .gap-sell') == '59.10'
+        assert page.locator('.window.fairwin').count() == 1
+    finally:
+        # The control: Algo off, and the window is the fair spread again.
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+    page.wait_for_function(
+        "() => (document.querySelector('.window.fairwin .fair .rail-label')"
+        " || {}).textContent.trim().startsWith('Fair spread')", timeout=WAIT)
+    assert 'SELL' not in page.text_content('.window.fairwin .fair-kind')
+
+
+def test_in_a_position_the_Algo_names_the_entry_and_draws_the_bar(page):
+    """In a position the Algo says what it is in — side and the price it
+    went on at — and draws SL <- entry -> TP with the closing price on
+    it. The control: flat, there is no bar."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    publisher.show_fair_window = True
+    publisher.algo = 'ALGO'
+    base = {
+        'algo': 'ALGO', 'on': True, 'ready': True, 'z_sell': 0.4,
+        'z_buy': 0.6, 'mean': 59.0, 'sigma': 0.04, 'upper': 59.10,
+        'lower': 58.90, 'count': 20, 'needed': 20,
+        'params': {'entry_z': 2.5, 'progress_bar': True,
+                   'stop_loss_on': True, 'stop_loss_pct': 2.0},
+        'timeframe_min': 15, 'length': 20, 'history': {}, 'health': None,
+        'sl_buy': 58.80, 'sl_sell': 59.40, 'window': True}
+    publisher.algo_block = dict(base, state='IN_POSITION', positions=[{
+        'position_id': 'POS-7', 'side': 'BUY', 'entry_spread': 59.11,
+        'closing_spread': 59.21, 'tp': 59.31, 'sl': 58.91,
+        'progress': 0.5, 'exit': None}])
+    try:
+        publisher.publish()
+        page.wait_for_function(
+            "() => (document.querySelector('.window.fairwin .fair-kind')"
+            " || {}).textContent.includes('BUY @ 59.11')", timeout=WAIT)
+        kind = page.text_content('.window.fairwin .fair-kind')
+        assert 'TP 59.31' in kind and 'SL 58.91' in kind
+        assert page.is_visible('.window.fairwin .algo-progress')
+        assert '50% to TP' in page.text_content('.window.fairwin .ap-pct')
+        assert page.is_visible('.window.fairwin .algo-sl-row')
+
+        # The control: flat again, and the bar is gone.
+        publisher.algo_block = dict(base, state='WATCHING', positions=[])
+        publisher.publish()
+        page.wait_for_function(
+            "() => document.querySelector('.window.fairwin .algo-progress')"
+            ".hidden", timeout=WAIT)
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+    # ...and with the Algo off, neither the bar nor the SL row exists.
+    page.wait_for_function(
+        "() => document.querySelector('.window.fairwin .algo-sl-row')"
+        ".hidden", timeout=WAIT)
