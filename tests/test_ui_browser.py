@@ -1401,8 +1401,10 @@ def settle(page, selector):
 #: does in life, and can never overwrite what the test put there.
 HOLD_THE_SNAPSHOT = """() => {
     window.__realFetch = window.__realFetch || window.fetch;
+    window.__held = 0;
     window.fetch = function (url, options) {
         if (String(url).indexOf('/api/status') >= 0) {
+            window.__held += 1;
             return Promise.resolve(new Response(
               JSON.stringify(window.MT5Trader.state.snapshot || {}),
               {status: 200, headers: {'Content-Type': 'application/json'}}));
@@ -4986,8 +4988,14 @@ def test_a_partial_commission_total_says_how_many_fills_it_covers(page):
 
 
 def show_pnl_check(page, check):
-    """Put one pnl_check row on the monitor and hold it there."""
+    """Put one pnl_check row on the monitor and hold it there.
+
+    Two HELD polls first: a real /api/status already in flight when the
+    hold went on lands after it, replaces the snapshot, and takes the
+    row away with it.
+    """
     page.evaluate(HOLD_THE_SNAPSHOT)
+    page.wait_for_function("() => window.__held >= 2", timeout=WAIT)
     page.evaluate("""(check) => {
         const UI = window.MT5Trader;
         UI.state.snapshot.at = 1000.0;
