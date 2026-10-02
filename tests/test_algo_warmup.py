@@ -158,3 +158,64 @@ def test_the_market_carries_the_mid_by_the_name_the_algo_reads(config, pair,
     md = coordinator.market[pair.key]
     assert md['mid_spread'] == md['spread']
     assert md['short_spread'] <= md['mid_spread'] <= md['long_spread']
+
+
+# -- across a restart ----------------------------------------------------------
+
+
+def restart_engine(config, legs, store, clock):
+    """A fresh engine on the same journal: what a restart is."""
+    coordinator = Coordinator(config, legs, sleep=lambda s: None,
+                              clock=clock, store=store)
+    coordinator.start()
+    coordinator.poll_once()
+    answer = coordinator.set_algo(pair_of(config).key, 'ALGO', mode='LIVE',
+                                  confirmed=True)
+    assert answer['ok'], answer
+    coordinator.poll_once()
+    return coordinator
+
+
+def pair_of(config):
+    return next(iter(config.pairs.values()))
+
+
+def warmed(config, legs, tmp_path, minutes=2):
+    from mt5trader.database import Store
+    give_history(legs)
+    pair = pair_of(config)
+    pair.algo_params = dict(QUIET, warmup_min=minutes)
+    store = Store(str(tmp_path / 'trader.db'))
+    clock = Clock()
+    first = restart_engine(config, legs, store, clock)
+    tick(first, legs, clock, 70)
+    sec = first.snapshot()['pairs'][pair.key]['algo_block']['warmup']['sec']
+    assert sec >= 60
+    return store, clock, sec
+
+
+def test_a_quick_restart_carries_the_warm_up_on(config, pair, legs,
+                                                 tmp_path):
+    store, clock, sec = warmed(config, legs, tmp_path)
+    clock.now += 120                     # back two minutes later
+    second = restart_engine(config, legs, store, clock)
+    warmup = second.snapshot()['pairs'][pair.key]['algo_block']['warmup']
+    # Within one save interval of where it was — and the gap not counted.
+    assert sec - 10 <= warmup['sec'] <= sec + 5
+
+
+def test_the_CONTROL_a_long_gap_starts_it_again(config, pair, legs,
+                                                tmp_path):
+    store, clock, sec = warmed(config, legs, tmp_path)
+    clock.now += 600                     # ten minutes later
+    second = restart_engine(config, legs, store, clock)
+    warmup = second.snapshot()['pairs'][pair.key]['algo_block']['warmup']
+    assert warmup['sec'] < 10
+
+
+def test_switching_it_off_starts_it_again(config, pair, legs, tmp_path):
+    store, clock, sec = warmed(config, legs, tmp_path)
+    assert store.warmup(pair.key) is not None
+    second = restart_engine(config, legs, store, clock)
+    second.set_algo(pair.key, 'NONE')
+    assert store.warmup(pair.key) is None
