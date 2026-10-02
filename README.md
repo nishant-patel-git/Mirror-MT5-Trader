@@ -135,6 +135,22 @@ as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
   off starts it over. A restart does not: switched back on within 5 minutes of
   the last live price it watched (an update, a quick restart), it carries on
   where it was; after a longer gap it starts again. The window shows `Live ... warming up 23/90 min`.
+- **Staying out of a trend.** A mean-reversion Algo that sells every touch of
+  the upper band is run over by a spread climbing along it. Two protections,
+  on by default, each switchable per ladder:
+  - *Re-entry* — a side is ARMED when its stretch reaches Entry z and enters
+    only when the spread comes back inside by `Re-entry back by` (2.0 armed,
+    1.5 enters). A spread riding the band never comes back, so it gives no
+    entry; disarmed if the spread reaches the mean first.
+  - *Trend filter* — if the band's middle moved more than `Trend filter (σ)`
+    over `Trend lookback (min)` (1σ over 120 min), no entry against it: no
+    H to L while it rises, no L to H while it falls. The panel's Trend badge
+    shows ↑ / ↓ / –.
+- **Backtest.** *Run backtest* in the Algo window replays the last 3–10 days of
+  MT5's own 15-minute bars through this ladder's Algo — the same decision
+  code, filters, costs, break-even, target and stop — and lists what it would
+  have traded, beside the same run without re-entry and the trend filter. It
+  sends nothing. It sees one price per candle (its close) and today's bid-ask.
 - **Direction.** Both (default), H to L only, or L to H only — entries only;
   an open position is always managed to its exit.
 - **Entry.** SELL when the z of the bid-side spread is >= +2.5, BUY when the z
