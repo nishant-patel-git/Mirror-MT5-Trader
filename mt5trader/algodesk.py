@@ -44,6 +44,14 @@ from . import bands
 #: How often a ladder that is still short of candles asks MT5 again.
 BACKFILL_RETRY_SEC = 60.0
 
+#: Warm-up progress carries over a restart when the Algo is switched on
+#: again within this long of the last live price it watched — an update
+#: or a quick restart. Longer, and the feed it watched is not this one.
+WARMUP_CARRY_SEC = 300.0
+
+#: How often the warm-up progress is written down while it is counting.
+WARMUP_SAVE_SEC = 10.0
+
 #: A held-back signal is written to the journal when its reason CHANGES,
 #: and again at most this often while it stays the same — enough to
 #: answer "why did it not trade?" afterwards without a row per poll.
@@ -133,6 +141,8 @@ class _Run:
         self.live_at = None
         #: (side, reason without its numbers, when) last journalled.
         self.blocked_journal = None
+        #: When the warm-up progress was last written down.
+        self.warmup_saved_at = None
 
 
 class AlgoDesk:
@@ -186,6 +196,7 @@ class AlgoDesk:
         run = self._runs.get(pair.key)
         if run is None:
             run = self._runs[pair.key] = self._new_run(pair)
+            self._carry_warmup(pair, run)
         run.mode = mode
         run.mine.update(adopt or ())
         logging.info('[ALGO %s] ON (%s)%s', pair.key, mode,
@@ -197,6 +208,13 @@ class AlgoDesk:
         was = self._runs.pop(key, None)
         if was is not None:
             logging.info('[ALGO %s] OFF', key)
+        # Switched off by the trader: the warm-up starts again next time.
+        # (A restart does not come through here, which is why it carries.)
+        if self.store is not None:
+            try:
+                self.store.clear_warmup(key)
+            except Exception as e:
+                logging.error('could not clear the warm-up: %s', e)
         return {'ok': True, 'pair': key, 'on': False}
 
     def manual_order_refusal(self, key):
@@ -266,6 +284,7 @@ class AlgoDesk:
                 run.live_sec += max(0.0, min(now - run.live_at,
                                              WARMUP_GAP_SEC))
             run.live_at = now
+            self._save_warmup(pair, run, now)
         else:
             run.live_at = None
         need = float(params['warmup_min']) * 60.0
@@ -308,6 +327,42 @@ class AlgoDesk:
         body['halt'] = halt
         run.body = body
         return body
+
+    def _carry_warmup(self, pair, run):
+        """Pick up the warm-up where a restart left it — when the Algo is
+        back on within WARMUP_CARRY_SEC of the last live price it watched.
+        The gap itself is not counted."""
+        if self.store is None:
+            return
+        try:
+            saved = self.store.warmup(pair.key)
+        except Exception as e:
+            logging.error('could not read the warm-up: %s', e)
+            return
+        if saved is None:
+            return
+        live_sec, at = saved
+        gap = self.clock() - at
+        if 0 <= gap <= WARMUP_CARRY_SEC:
+            run.live_sec = float(live_sec)
+            logging.info('[ALGO %s] warm-up carried over: %.0f min watched, '
+                         'back on %.0fs after the last live price',
+                         pair.key, live_sec / 60.0, gap)
+        else:
+            logging.info('[ALGO %s] warm-up starts again: %.0f min since the '
+                         'last live price it watched', pair.key, gap / 60.0)
+
+    def _save_warmup(self, pair, run, now):
+        if self.store is None:
+            return
+        if run.warmup_saved_at is not None \
+                and now - run.warmup_saved_at < WARMUP_SAVE_SEC:
+            return
+        run.warmup_saved_at = now
+        try:
+            self.store.save_warmup(pair.key, run.live_sec, now)
+        except Exception as e:               # never let a record stop a poll
+            logging.error('could not save the warm-up: %s', e)
 
     def _journal_blocked(self, pair, run, now):
         """A signal that WOULD have entered, held back: into the journal,

@@ -132,6 +132,15 @@ CREATE INDEX IF NOT EXISTS events_at ON events (at);
 -- band from nothing. Keyed by the beta they were built with: a spread
 -- of B - 0.98 x A is a different series from B - 1.00 x A, and mixing
 -- the two draws a band around neither.
+-- The Algo's live warm-up, per ladder: seconds of live prices watched,
+-- and when the last one counted. Read back when the Algo is switched on
+-- again soon after a restart, so an update does not cost 90 minutes.
+CREATE TABLE IF NOT EXISTS algo_warmup (
+    pair_key        TEXT PRIMARY KEY,
+    live_sec        REAL NOT NULL,
+    at              REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS algo_candles (
     pair_key        TEXT NOT NULL,
     timeframe_sec   REAL NOT NULL,
@@ -465,6 +474,25 @@ class Store:
                 f'{verb} INTO algo_candles (pair_key, timeframe_sec, beta, '
                 f'bucket, close, source) VALUES (?,?,?,?,?,?)', rows)
         return len(rows)
+
+    def save_warmup(self, pair_key, live_sec, at):
+        with self._connect() as connection:
+            connection.execute(
+                'INSERT OR REPLACE INTO algo_warmup (pair_key, live_sec, at) '
+                'VALUES (?,?,?)', (pair_key, float(live_sec), float(at)))
+
+    def warmup(self, pair_key):
+        """(live_sec, at) last saved for this ladder, or None."""
+        with self._connect() as connection:
+            row = connection.execute(
+                'SELECT live_sec, at FROM algo_warmup WHERE pair_key = ?',
+                (pair_key,)).fetchone()
+        return None if row is None else (row['live_sec'], row['at'])
+
+    def clear_warmup(self, pair_key):
+        with self._connect() as connection:
+            connection.execute('DELETE FROM algo_warmup WHERE pair_key = ?',
+                               (pair_key,))
 
     def candles(self, pair_key, timeframe_sec, beta, limit=500):
         """The newest `limit` closed candles, oldest first."""

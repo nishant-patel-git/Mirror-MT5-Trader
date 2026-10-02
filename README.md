@@ -132,7 +132,9 @@ as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
   Algo has watched `Warm-up (min)` of LIVE prices since it was turned on — 90 by
   default, 0 = off. Time with no price does not count; dry-run time does, so a
   ladder can warm up in DRY and go LIVE without waiting again. Turning the Algo
-  off starts it over. The window shows `Live ... warming up 23/90 min`.
+  off starts it over. A restart does not: switched back on within 5 minutes of
+  the last live price it watched (an update, a quick restart), it carries on
+  where it was; after a longer gap it starts again. The window shows `Live ... warming up 23/90 min`.
 - **Direction.** Both (default), H to L only, or L to H only — entries only;
   an open position is always managed to its exit.
 - **Entry.** SELL when the z of the bid-side spread is >= +2.5, BUY when the z
