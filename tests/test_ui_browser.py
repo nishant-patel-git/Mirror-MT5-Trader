@@ -5242,6 +5242,12 @@ def test_a_LIVE_ladder_is_locked_and_says_so(page):
                                timeout=WAIT)
         assert 'manual orders are off' in page.text_content(
             '.ladder .algo-lock')
+        # A strip ABOVE the ladder, never in place of it: the prices are
+        # still the thing the trader is watching.
+        grid = page.locator('.ladder .grid').bounding_box()
+        assert grid['width'] > 200 and grid['height'] > 200, grid
+        lock = page.locator('.ladder .algo-lock').bounding_box()
+        assert lock['y'] + lock['height'] <= grid['y'] + 1
         assert page.is_disabled('.ladder .buy-touch')
         assert page.is_disabled('.ladder .sell-touch')
         assert page.is_disabled('.ladder .keypad .qty')

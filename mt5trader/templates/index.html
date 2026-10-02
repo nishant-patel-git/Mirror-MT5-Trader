@@ -273,6 +273,10 @@
       </div>
       <span class="ours" title="Where the two terminals publish session figures, H/L/O are the LEGS' own — B − β × A, the same convention as every other price here. Where they do not, they are our own mid series since this process started, and this badge says so.">ours</span>
     </div>
+    <!-- Algo or Manual, never both: while this ladder's Algo is LIVE
+         the order controls are off, and the ladder SAYS so rather
+         than letting a click fail afterwards. -->
+    <div class="algo-lock" hidden>ALGO LIVE — manual orders are off on this ladder. CLOSE ALL and Close @ LMT still close. Turn the Algo off in the title bar to trade by hand.</div>
     <div class="body">
       <div class="rail">
         <!-- Which two accounts this ladder is routed across, with their
@@ -361,10 +365,6 @@
           <button class="btn recentre" title="Put the window back around the market now">Centre</button>
         </div>
       </div>
-      <!-- Algo or Manual, never both: while this ladder's Algo is LIVE
-           the order controls are off, and the ladder SAYS so rather
-           than letting a click fail afterwards. -->
-      <div class="algo-lock" hidden>ALGO LIVE — manual orders are off on this ladder. CLOSE ALL and Close @ LMT still close. Turn the Algo off in the title bar to trade by hand.</div>
       <div class="grid">
         <table>
           <thead>
