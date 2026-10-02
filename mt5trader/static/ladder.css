@@ -1997,7 +1997,7 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
 .window.algowin .aw-tile.buy { color: var(--ask, #c0392b); }
 .window.algowin .aw-tile-head { font: 700 9px var(--font); color: var(--frame-text); }
 .window.algowin .aw-tile-price { font: 700 16px var(--mono); }
-.window.algowin .aw-tile-z { font: 700 13px var(--mono); }
+.window.algowin .aw-tile-z { font: 700 20px var(--mono); line-height: 1.15; }
 .window.algowin .aw-tile-entry { font-size: 9px; color: var(--frame-muted); }
 .window.algowin .aw-pos {
   align-self: center;
@@ -2095,3 +2095,23 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
 }
 .titlebar .algo-menu button:hover { background: #eef3fb; }
 .titlebar .algo-menu button.live { color: #c0392b; font-weight: 700; }
+
+/* Algo LIVE on this ladder: no manual way in. The order controls are
+   off and dimmed, the bid/ask columns say so on hover, and a banner
+   says why. CLOSE ALL and Close @ LMT are untouched — a close is never
+   withheld. */
+.algo-lock {
+  background: #c0392b; color: #fff;
+  font: 700 11px var(--font);
+  padding: 4px 8px; text-align: center;
+}
+.algo-lock[hidden] { display: none; }
+.window.ladder.algo-live .buy-touch,
+.window.ladder.algo-live .sell-touch,
+.window.ladder.algo-live .keypad,
+.window.ladder.algo-live .qty-row { opacity: .35; cursor: not-allowed; }
+.window.ladder.algo-live .grid td.bid,
+.window.ladder.algo-live .grid td.ask,
+.window.ladder.algo-live .grid td.work {
+  cursor: not-allowed; filter: grayscale(.8); opacity: .55;
+}

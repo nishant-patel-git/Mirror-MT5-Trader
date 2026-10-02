@@ -5205,6 +5205,84 @@ def test_the_switch_says_LIVE_when_the_Algo_trades(page):
         "() => (document.querySelector('.ladder .algo-btn') || {})"
         ".textContent === 'ALGO OFF'", timeout=WAIT)
 
+def _ladder_with_algo(page, mode):
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(mode=mode)
+    publisher.publish()
+    want = 'ALGO LIVE' if mode == 'LIVE' else 'ALGO DRY'
+    page.wait_for_function(
+        "(want) => (document.querySelector('.ladder .algo-btn') || {})"
+        ".textContent === want", arg=want, timeout=WAIT)
+
+
+def _algo_off(page):
+    publisher = page.paths['publisher']
+    publisher.algo = 'NONE'
+    publisher.algo_block = None
+    publisher.publish()
+    page.wait_for_function(
+        "() => (document.querySelector('.ladder .algo-btn') || {})"
+        ".textContent === 'ALGO OFF'", timeout=WAIT)
+
+
+def _click_a_bid(page):
+    page.evaluate("() => document.querySelector("
+                  "'.ladder .grid tbody td.bid').click()")
+
+
+def test_a_LIVE_ladder_is_locked_and_says_so(page):
+    """Algo or Manual, never both — on the SCREEN, not only in the
+    engine. While LIVE the ways in are off (and a click on the grid
+    sends nothing), the ladder says why, and the ways out stay."""
+    open_ladder(page)
+    try:
+        _ladder_with_algo(page, 'LIVE')
+        page.wait_for_selector('.ladder .algo-lock:not([hidden])',
+                               timeout=WAIT)
+        assert 'manual orders are off' in page.text_content(
+            '.ladder .algo-lock')
+        assert page.is_disabled('.ladder .buy-touch')
+        assert page.is_disabled('.ladder .sell-touch')
+        assert page.is_disabled('.ladder .keypad .qty')
+        # A close is never withheld.
+        assert page.is_enabled('.ladder .flatten')
+        assert page.is_enabled('.ladder .close-limit-go')
+
+        page.evaluate(SPY_ON_COMMANDS)
+        page.evaluate("() => { document.getElementById('toasts')"
+                      ".innerHTML = ''; }")
+        _click_a_bid(page)
+        page.wait_for_selector('.toast:has-text("manual orders are off")',
+                               timeout=WAIT)
+        assert not page.evaluate(
+            "() => window.__commands.some(c => c.kind === 'click')")
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch || '
+                      'window.fetch; }')
+        _algo_off(page)
+
+
+def test_the_CONTROL_a_dry_run_ladder_still_trades_by_hand(page):
+    open_ladder(page)
+    try:
+        _ladder_with_algo(page, 'DRY_RUN')
+        assert page.locator('.ladder .algo-lock[hidden]').count() == 1
+        assert page.is_enabled('.ladder .buy-touch')
+        assert page.is_enabled('.ladder .keypad .qty')
+        page.evaluate(SPY_ON_COMMANDS)
+        page.evaluate("() => { window.MT5Trader.state.snapshot"
+                      ".confirm_market_clicks = false; }")
+        _click_a_bid(page)
+        page.wait_for_function(
+            "() => window.__commands.some(c => c.kind === 'click')",
+            timeout=WAIT)
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch || '
+                      'window.fetch; }')
+        _algo_off(page)
+
+
 #: Capture every engine command the page sends, answering each as the
 #: engine would — so a test can read exactly what was asked for.
 SPY_ON_COMMANDS = """(answer) => {

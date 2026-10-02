@@ -1380,9 +1380,9 @@ class Coordinator:
         pair = self.config.pairs.get(pair_key)
         if pair is None:
             return {'ok': False, 'reason': f'no pair {pair_key}'}
-        # Algo or Manual, never both — once the Algo can trade. Today it
-        # only signals and this is always None, so every click goes
-        # through exactly as it did before there was an Algo.
+        # Algo or Manual, never both: while this ladder's Algo is LIVE a
+        # NEW manual order is refused here, in words. Dry run and off
+        # refuse nothing. Closes do not come through this path.
         refusal = self.algos.manual_order_refusal(pair_key)
         if refusal:
             return self._refuse(pair_key, side, level, refusal)

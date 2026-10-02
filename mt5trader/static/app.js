@@ -1075,8 +1075,22 @@
       ' (' + legs + ')';
   }
 
+  function algoTrades(row) {
+    /* This ladder's Algo is LIVE: it, and only it, places orders here. */
+    return !!(row && row.algo_on && row.algo_mode === 'LIVE');
+  }
+
   function clickLevel(key, side, level) {
     var pair = state.snapshot.pairs[key] || {};
+    // Every manual order on the screen comes through here — the grid,
+    // BUY/SELL, the B and S keys and the Market Grid. The ENGINE refuses
+    // it too; this only saves sending what will be refused.
+    if (algoTrades(pair)) {
+      toast((pair.name || key) + ': the Algo is trading this ladder ' +
+            '(LIVE) — manual orders are off. CLOSE ALL still closes; ' +
+            'turn the Algo off in the title bar to trade by hand.');
+      return;
+    }
     var armed = armedFor(key, side);
     var quantity = armed || pair.default_quantity;
     var payload = {pair: key, side: side, level: level};
@@ -1857,6 +1871,15 @@
     }
     node.classList.toggle('mode-market', row.order_type === 'MARKET');
     node.classList.toggle('inactive', state.active !== panelId('ladder', key));
+    // Algo LIVE: the ways IN are off and say why; the ways OUT stay.
+    var algoLive = algoTrades(row);
+    node.classList.toggle('algo-live', algoLive);
+    var lockNote = node.querySelector('.algo-lock');
+    if (lockNote) { lockNote.hidden = !algoLive; }
+    node.querySelectorAll('.buy-touch, .sell-touch, .keypad button, ' +
+                          '.qty-box').forEach(function (control) {
+      control.disabled = algoLive;
+    });
     node.querySelector('.title').textContent = row.name || key;
     node.querySelector('.route').textContent =
       (row.account_a || '?') + ' → ' + (row.account_b || '?');
@@ -1966,7 +1989,7 @@
     node.querySelectorAll('.keypad .qty').forEach(function (button) {
       var size = Number(button.dataset.qty);
       var beyond = cap !== null && button.dataset.qty && size > cap;
-      button.disabled = !!beyond;
+      button.disabled = !!beyond || algoTrades(row);
       button.title = beyond
         ? 'Qty ' + size + ' is over what this pair can trade — it tops '
           + 'out at ' + cap
@@ -2319,7 +2342,8 @@
         (off ? ' <small>(entries off)</small>' : '') +
         '</div><div class="aw-tile-price">' +
         fmt(sell ? market.short_spread : market.long_spread, digits) +
-        '</div><div class="aw-tile-z">z ' + signed(z) + '</div>' +
+        '</div><div class="aw-tile-z" title="How stretched the spread is: ' +
+        'entry at \u00b1' + (entryZ || '?') + '">' + signed(z) + '</div>' +
         '<div class="aw-tile-entry">' + (sell ? 'short' : 'long') + ' at ' +
         (sell ? '\u2265 +' : '\u2264 \u2212') + (entryZ || '?') + ' (' +
         fmt(sell ? block.upper : block.lower, digits) + ')</div></div>';
@@ -2515,7 +2539,7 @@
     node.querySelectorAll('.keypad .qty').forEach(function (button) {
       var size = Number(button.dataset.qty);
       var beyond = cap !== null && button.dataset.qty && size > cap;
-      button.disabled = !!beyond;
+      button.disabled = !!beyond || algoTrades(row);
       button.title = beyond
         ? 'Qty ' + size + ' is over what this pair can trade — it tops '
           + 'out at ' + cap
