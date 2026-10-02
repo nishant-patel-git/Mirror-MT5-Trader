@@ -34,6 +34,7 @@ Rules this module keeps:
 """
 
 import logging
+import re
 from collections import deque
 
 from . import algo as algo_module
@@ -42,6 +43,11 @@ from . import bands
 
 #: How often a ladder that is still short of candles asks MT5 again.
 BACKFILL_RETRY_SEC = 60.0
+
+#: A held-back signal is written to the journal when its reason CHANGES,
+#: and again at most this often while it stays the same — enough to
+#: answer "why did it not trade?" afterwards without a row per poll.
+BLOCKED_JOURNAL_SEC = 300.0
 
 #: The longest gap between two live prices that still counts toward the
 #: warm-up. Longer than this is a feed that stopped, not one watched.
@@ -125,6 +131,8 @@ class _Run:
         #: when the last one counted came in — the warm-up.
         self.live_sec = 0.0
         self.live_at = None
+        #: (side, reason without its numbers, when) last journalled.
+        self.blocked_journal = None
 
 
 class AlgoDesk:
@@ -230,6 +238,7 @@ class AlgoDesk:
             # the positions it had to close. The live tape it has
             # watched has still been watched: the warm-up carries too.
             for name in ('mode', 'mine', 'day', 'retry', 'entry_z',
+                         'blocked_journal',
                          'recent', 'last_blocked', 'live_sec', 'live_at',
                          'signal'):
                 setattr(run, name, getattr(was, name))
@@ -285,6 +294,7 @@ class AlgoDesk:
             run.last_blocked = {'side': body['blocked_side'],
                                 'z': body.get('blocked_z'), 'at': now,
                                 'reason': body.get('blocked')}
+            self._journal_blocked(pair, run, now)
         for intent in body['intents']:
             recorded = self.sink.handle(pair.key, intent, run.mode)
             if run.mode == algo_module.LIVE:
@@ -298,6 +308,28 @@ class AlgoDesk:
         body['halt'] = halt
         run.body = body
         return body
+
+    def _journal_blocked(self, pair, run, now):
+        """A signal that WOULD have entered, held back: into the journal,
+        so "why did it not trade?" has an answer after the fact. Keyed on
+        the reason without its numbers — "warming up: 12 of 90" and "13
+        of 90" are one reason, not two rows."""
+        last = run.last_blocked
+        kind = re.sub(r'[-+]?\d[\d.,:]*', '#', last['reason'] or '')
+        seen = run.blocked_journal
+        if seen and seen[0] == last['side'] and seen[1] == kind \
+                and now - seen[2] < BLOCKED_JOURNAL_SEC:
+            return
+        run.blocked_journal = (last['side'], kind, now)
+        logging.info('[ALGO %s] %s signal at z %s held back: %s', pair.key,
+                     last['side'], last['z'], last['reason'])
+        if self.store is not None:
+            try:
+                self.store.event('algo_blocked', pair.key, side=last['side'],
+                                 z=last['z'], reason=last['reason'],
+                                 mode=run.mode)
+            except Exception as e:           # never let a record stop a poll
+                logging.error('could not record a held-back signal: %s', e)
 
     def _filters(self, run, md, stats, cost_in):
         """The filters' readings for the panel, and the entry check.
