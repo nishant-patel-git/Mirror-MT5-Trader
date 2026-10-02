@@ -483,9 +483,11 @@ class AlgoSignal:
                     f"/{body.get('needed')}")
         warmup = gates.get('warmup')
         if warmup and not warmup.get('done'):
-            return (f"warming up: {warmup['sec'] / 60.0:.0f} of "
-                    f"{warmup['need_sec'] / 60.0:.0f} min of live prices "
-                    f"watched")
+            # Whole minutes DONE, as the panel's bar counts them: a
+            # half-minute is not "1 of 90" here and "0/90" beside it.
+            return (f"warming up: {int(warmup['sec'] // 60)} of "
+                    f"{round(warmup['need_sec'] / 60.0)} min of live "
+                    f"prices watched")
         if body.get('cooldown_sec'):
             return f"cooldown {_mmss(body['cooldown_sec'])}"
         buffer_min = p['cutoff_buffer_min']
