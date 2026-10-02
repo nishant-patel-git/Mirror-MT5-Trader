@@ -1027,8 +1027,11 @@ def test_every_setting_shows_the_value_ACTUALLY_IN_FORCE(page):
     try:
         page.click('.ladder .ladder-cog')
         page.wait_for_function(
-            "() => document.querySelector('.ladder .ls-comm-a').value !== ''",
-            timeout=WAIT)
+            # The pair's OWN cost, which only the stubbed fetch carries:
+            # the form has been filled from it. "Not blank" was met by a
+            # value left in the box from before the fetch landed.
+            "() => document.querySelector('.ladder .ls-comm-b').value "
+            "=== '3.5'", timeout=WAIT)
 
         # What the ladder is RUNNING, from the snapshot — never blank.
         assert page.input_value('.ladder .ls-order-type') == 'LIMIT'
@@ -2152,44 +2155,52 @@ def test_the_sounds_are_generated_here_and_can_be_silenced(page):
 def test_a_pair_added_while_the_screen_is_open_gets_its_own_ladder(page):
     """A pair configured on the Exchanges page and then nowhere to be
     seen is the whole setup looking broken. It appears beside the
-    others, and a ladder the trader CLOSED stays closed."""
-    page.evaluate("""() => {
-        const state = window.MT5Trader.state;
-        state.closed = {};
-        const pairs = state.snapshot.pairs;
-        const copy = JSON.parse(JSON.stringify(pairs['XAUUSD_|GC1226']));
-        copy.key = 'EURUSD|GBPUSD';
-        copy.name = 'EURUSD - GBPUSD';
-        copy.symbol_a = 'EURUSD';
-        copy.symbol_b = 'GBPUSD';
-        pairs['EURUSD|GBPUSD'] = copy;
-        window.MT5Trader.render();
-    }""")
-    # The snapshot the publisher writes does not have it, so drive one
-    # poll's worth of the same logic the poller runs.
-    page.evaluate("""() => {
-        const state = window.MT5Trader.state;
-        Object.keys(state.snapshot.pairs).forEach(function (key) {
-            const id = window.MT5Trader.panelId('ladder', key);
-            if (state.open.indexOf(id) < 0 && !state.closed[id]) {
-                state.open.unshift(id);
-            }
-        });
-        window.MT5Trader.render();
-    }""")
+    others, and a ladder the trader CLOSED stays closed.
 
-    assert page.locator('.window.ladder').count() == 2
-    assert 'EURUSD - GBPUSD' in page.text_content('#tabs')
-
-    # Closed stays closed.
-    page.evaluate("""() => window.MT5Trader.closePanel(
-        window.MT5Trader.panelId('ladder', 'EURUSD|GBPUSD'))""")
-    page.wait_for_timeout(700)
-    assert page.locator('.window.ladder').count() == 1
+    The SERVER gains the pair: every /api/status from here on carries
+    it, and the real poller opens its ladder. Pushing it into the page's
+    snapshot by hand raced that poller — a poll landing between two
+    steps replaced the snapshot and took the added pair away with it.
+    """
     page.evaluate("""() => {
-        delete window.MT5Trader.state.snapshot.pairs['EURUSD|GBPUSD'];
-        window.MT5Trader.render();
+        window.MT5Trader.state.closed = {};
+        window.__realFetch = window.__realFetch || window.fetch;
+        window.fetch = function (url, options) {
+            const answer = window.__realFetch(url, options);
+            if (String(url).indexOf('/api/status') < 0) { return answer; }
+            return answer.then(function (r) { return r.json(); })
+              .then(function (snapshot) {
+                const pairs = snapshot.pairs || {};
+                const copy = JSON.parse(JSON.stringify(
+                    pairs['XAUUSD_|GC1226']));
+                copy.key = 'EURUSD|GBPUSD';
+                copy.name = 'EURUSD - GBPUSD';
+                copy.symbol_a = 'EURUSD';
+                copy.symbol_b = 'GBPUSD';
+                pairs['EURUSD|GBPUSD'] = copy;
+                return new Response(JSON.stringify(snapshot), {status: 200,
+                    headers: {'Content-Type': 'application/json'}});
+              });
+        };
     }""")
+    try:
+        page.wait_for_function(
+            "() => document.querySelectorAll('.window.ladder').length === 2",
+            timeout=WAIT)
+        assert 'EURUSD - GBPUSD' in page.text_content('#tabs')
+
+        # Closed stays closed — across polls that still carry the pair.
+        page.evaluate("""() => window.MT5Trader.closePanel(
+            window.MT5Trader.panelId('ladder', 'EURUSD|GBPUSD'))""")
+        page.wait_for_timeout(1200)
+        assert page.locator('.window.ladder').count() == 1
+    finally:
+        page.evaluate("""() => {
+            window.fetch = window.__realFetch || window.fetch;
+        }""")
+        page.wait_for_function(
+            "() => !('EURUSD|GBPUSD' in "
+            "(window.MT5Trader.state.snapshot.pairs || {}))", timeout=WAIT)
 
 
 def test_a_window_opened_at_the_end_of_the_row_is_scrolled_into_view(page):
