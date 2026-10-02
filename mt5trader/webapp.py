@@ -21,6 +21,7 @@ Two rules from the spec shape the endpoints here:
 import logging
 import os
 import re
+import secrets
 import time
 from datetime import date
 
@@ -89,6 +90,14 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         anyway - so a browser that was closed without unlocking still
         finds the machine locked when it comes back.
         """
+        bot_secret = app.config.get('BOT_SECRET')
+        if bot_secret and secrets.compare_digest(
+                request.headers.get('X-MT5Trader-Bot', ''), bot_secret):
+            # The Telegram bot, from INSIDE this process (telegram.py).
+            # The lock guards the desk PC; the bot has its own guard,
+            # the allow-list of Telegram users, and this secret is made
+            # fresh at start-up and never leaves the process.
+            return None
         if request.method == 'GET':
             # Reading is not trading. The ladder goes on ticking behind
             # the overlay, exactly as it does behind TT's.
@@ -1203,6 +1212,13 @@ def main():
     logsetup.quiet_polling()
     app = create_app(args.status, args.commands, args.results, args.config,
                      args.db)
+    # Telegram, if .env carries a bot token. The token is read from the
+    # environment only — never from config.json, never logged.
+    if cfg.load_dotenv is not None:
+        cfg.load_dotenv(os.path.join(
+            os.path.dirname(os.path.abspath(args.config)) or '.', '.env'))
+    from . import telegram
+    telegram.start(app)
     app.run(host=args.host, port=args.port, threaded=True)
 
 

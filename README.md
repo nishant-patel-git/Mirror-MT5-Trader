@@ -202,6 +202,50 @@ as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
   trades (10), losses in a row (3), and a daily loss limit (off until set). A
   refused entry waits out the cooldown; a failed exit is retried every 5s.
 
+## Telegram — the desk from a phone
+
+Optional. With a bot token in `.env` the web process also runs a Telegram
+bot with a button menu:
+
+- **Status**: the engine, each account's equity and margin level, broker
+  time and the cutoff, each pair's H to L / L to H prices and any price
+  problem.
+- **Positions**: every open position (side, size, entry, now, net P&L,
+  MANUAL/ALGO) with **Close all** per ladder.
+- **Algo**: each ladder's panel (prices and stretch, entry levels, state
+  and why it is held, warm-up, Edge/Regime/Ready, today's count, last
+  blocked signal) with **Off / Dry run / LIVE**.
+- **Settings**: entry z, direction, Algo qty, warm-up, cutoff, cooldown,
+  max entry z, stop loss, Edge, Regime, the day's limits, TP % of margin,
+  commission per lot (per side), overnight.
+- **KILL ALL**, and **Alerts on/off** (`/alerts`).
+
+Every action asks Confirm / Cancel first; LIVE asks twice. Buttons expire
+after ten minutes. It goes through the web app's own routes, so every
+check and refusal is the one the screen gets — and it can switch, save
+and CLOSE, never open a position. Alerts: the Algo's entries and exits
+(dry run and LIVE, with the broker's words on a failure), problems (the
+engine stalling, an account dropping out, a stale or jumping price that
+lasts 20 s, a day's limit, a refusal), blocked signals (the same one
+again within 15 minutes is not repeated) and a daily summary at the
+session cutoff.
+
+Setting it up:
+
+1. In Telegram, talk to **@BotFather**, send `/newbot`, and copy the
+   token it gives you.
+2. Get your numeric user id from **@userinfobot**.
+3. In `.env` (never in `config.json`):
+   ```
+   TELEGRAM_BOT_TOKEN="123456:ABC..."
+   TELEGRAM_ALLOWED_USERS="111111111, 222222222"
+   ```
+4. Restart `start.py`, open your bot in Telegram and send `/start`.
+
+Only the listed ids get an answer; anyone else is ignored and their id
+is written to the log once, so a colleague can be added by reading it.
+The bot connects OUT to Telegram — no port is opened on the machine.
+
 ## One click is one order
 
 That is the product, so it is the default and it is fast:
