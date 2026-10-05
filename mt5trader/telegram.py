@@ -135,6 +135,24 @@ SECTIONS = {
 SECTION_OF = {field: section for section, (_, fields) in SECTIONS.items()
               for field in fields}
 
+#: The settings table's labels, where the button's own is longer than
+#: the label column.
+SHORT_LABELS = {
+    'reentry_on': 'Re-entry', 'reentry_back': 'Re-entry back',
+    'warmup_min': 'Warm-up min', 'cooldown_min': 'Cooldown min',
+    'cutoff_buffer_min': 'Cutoff min', 'algo_qty': 'Algo qty',
+    'edge_multiple': 'Edge required', 'trend_sigma': 'Trend limit',
+    'trend_lookback_min': 'Trend lookback', 'edge_on': 'Edge',
+    'regime_on': 'Regime', 'trend_on': 'Trend',
+    'tp_target_pct_of_margin': 'Take profit %', 'stop_loss_on': 'Stop loss',
+    'stop_loss_pct': 'Stop loss %', 'reversion_on': 'Back to mean',
+    'stop_z_on': 'Z-stop', 'stop_z': 'Z-stop at |z|',
+    'time_stop_on': 'Time stop', 'time_stop_candles': 'Time stop bars',
+    'max_trades_day': 'Trades a day', 'max_losses_row': 'Losses in row',
+    'daily_loss_limit': 'Loss limit', 'commission_per_lot_a': 'Comm A /lot',
+    'commission_per_lot_b': 'Comm B /lot', 'max_entry_z': 'Max entry z',
+}
+
 #: How a ladder's Algo mode is written.
 MODE_WORDS = {'OFF': 'Off', 'DRY': 'Dry run', 'LIVE': 'LIVE'}
 
@@ -175,6 +193,45 @@ def effective_params(row):
 
 def side_words(side):
     return {'SELL': 'H to L', 'BUY': 'L to H'}.get(side, side or '?')
+
+
+#: The aligned blocks: a label column this wide, then the value, wrapped
+#: under itself. 15 + 23 = 38 characters, which a phone shows upright;
+#: the longest label is 14, so a value never touches its label.
+LABEL_WIDTH = 15
+VALUE_WIDTH = 23
+
+
+def table(rows):
+    """Rows of (label, value) as one monospace block: every label in one
+    column, every value left-aligned in the next. A long value wraps
+    under its own column. `None` is a blank line. Values are raw text,
+    escaped here once."""
+    import textwrap
+    lines = []
+    for row in rows:
+        if row is None:
+            lines.append('')
+            continue
+        label, value = row
+        text = '—' if value is None or value == '' else str(value)
+        chunks = textwrap.wrap(text, VALUE_WIDTH,
+                               break_long_words=True) or ['']
+        for i, chunk in enumerate(chunks):
+            lines.append((str(label) if i == 0 else '')
+                         .ljust(LABEL_WIDTH) + chunk)
+    return '<pre>' + esc('\n'.join(lines)) + '</pre>'
+
+
+def plain(value, digits=2, signed=False):
+    """`num`, unescaped: values go into a `table`, which escapes once."""
+    if value is None:
+        return '—'
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f'{value:+.{digits}f}' if signed else f'{value:.{digits}f}'
 
 
 class TelegramError(Exception):
@@ -431,14 +488,6 @@ class Bot:
         snapshot = self.desk.status() or {}
         return snapshot, snapshot.get('pairs') or {}
 
-    @staticmethod
-    def _engine_word(snapshot):
-        state = snapshot.get('engine') or 'down'
-        if state == 'up':
-            return 'Running'
-        note = snapshot.get('engine_note')
-        return state.upper() + (f' ({esc(note)})' if note else '')
-
     def _pair_name(self, pairs, key):
         return esc((pairs.get(key) or {}).get('name') or key)
 
@@ -453,19 +502,18 @@ class Bot:
 
     def on_main(self, chat, message_id):
         snapshot, pairs = self._snapshot()
-        lines = ['<b>NEXUS SPREAD DESK</b>',
-                 f'Engine: {self._engine_word(snapshot)}', '']
+        rows = [('Engine', self._engine_plain(snapshot))]
         for key, row in sorted(pairs.items()):
-            pnl = row.get('open_pnl')
-            lines.append(f'{self._pair_name(pairs, key)}')
-            lines.append(f'  Algo {MODE_WORDS[mode_word(row)]} | net '
-                         f'{num(row.get("net_position"), 2, True)}'
-                         + (f' | open P&amp;L {money(pnl)}'
-                            if pnl is not None else ''))
+            rows.append(None)
+            rows.append(('Ladder', row.get('name') or key))
+            rows.append(('Algo', MODE_WORDS[mode_word(row)]))
+            rows.append(('Net', plain(row.get('net_position'), 2, True)))
+            if row.get('open_pnl') is not None:
+                rows.append(('Open P&L', money(row.get('open_pnl'))))
+        text = '<b>NEXUS SPREAD DESK</b>\n' + table(rows)
         if not pairs:
-            lines.append('No ladders are configured.')
-        self.show(chat, message_id, '\n'.join(lines),
-                  self._main_buttons(chat))
+            text += '\nNo ladders are configured.'
+        self.show(chat, message_id, text, self._main_buttons(chat))
 
     def on_toggle_alerts(self, chat, message_id):
         if chat in self.alerts_off:
@@ -476,134 +524,141 @@ class Bot:
 
     # -- the dashboard: everything there is to watch, on one screen ---------------
 
+    @staticmethod
+    def _engine_plain(snapshot):
+        state = snapshot.get('engine') or 'down'
+        if state == 'up':
+            return 'Running'
+        note = snapshot.get('engine_note')
+        return state.upper() + (f' - {note}' if note else '')
+
     def on_dashboard(self, chat, message_id):
         snapshot, pairs = self._snapshot()
-        lines = ['<b>DASHBOARD</b>', '', '<b>SYSTEM</b>',
-                 f'Engine: {self._engine_word(snapshot)}']
+        rows = [('Engine', self._engine_plain(snapshot))]
         clock = snapshot.get('broker_clock') or {}
         if clock.get('broker_time'):
-            lines.append(f'Broker time: {esc(clock["broker_time"])} | '
-                         f'cutoff {esc(clock.get("cutoff"))}')
+            rows.append(('Broker time', clock['broker_time']))
+            rows.append(('Cutoff', clock.get('cutoff')))
         for name, info in sorted((snapshot.get('accounts') or {}).items()):
             if not info:
-                lines.append(f'Account {esc(name)}: NOT ANSWERING')
+                rows.append((name, 'NOT ANSWERING'))
                 continue
-            level = info.get('margin_level')
             equity = info.get('equity')
-            lines.append(f'Account {esc(name)}: equity '
-                         + ('—' if equity is None else f'{float(equity):,.2f}')
-                         + ' '
-                         f'{esc(info.get("currency") or "")} | margin level '
-                         + (f'{float(level):,.0f}%' if level else '—'))
+            level = info.get('margin_level')
+            rows.append((name, ('—' if equity is None else
+                                f'{float(equity):,.2f}') + ' '
+                         + (info.get('currency') or '')))
+            rows.append(('  Margin lvl', f'{float(level):,.0f}%'
+                         if level else '—'))
         for name in snapshot.get('dark_accounts') or []:
-            lines.append(f'Account {esc(name)}: leg runner NOT ANSWERING')
+            rows.append((name, 'leg runner NOT ANSWERING'))
+        parts = ['<b>DASHBOARD</b>', '<b>System</b>', table(rows)]
         buttons = []
         for key, row in sorted(pairs.items()):
-            lines.append('')
-            lines.extend(self._ladder_lines(pairs, key, row))
+            parts.append(f'<b>{self._pair_name(pairs, key)}</b>')
+            parts.append(table(self._ladder_rows(row)))
             if row.get('positions'):
                 buttons.append([(f'Close all: {row.get("name") or key}',
                                  'flatten_ask', (key,))])
         if not pairs:
-            lines.append('')
-            lines.append('No ladders are configured.')
+            parts.append('No ladders are configured.')
         check = snapshot.get('pnl_check') or {}
         if check.get('ours') is not None:
-            lines.append('')
-            lines.append('<b>TOTAL</b>')
-            lines.append(f'Open P&amp;L (gross): {money(check.get("ours"))} | '
-                         f'MT5: {money(check.get("theirs"))}')
+            parts.append('<b>Total</b>')
+            parts.append(table([('Open P&L', money(check.get('ours'))),
+                                ('MT5 says', money(check.get('theirs')))]))
         buttons.append([('Refresh', 'dashboard', ()),
                         ('Main menu', 'main', ())])
-        self.show(chat, message_id, '\n'.join(lines), buttons)
+        self.show(chat, message_id, '\n'.join(parts), buttons)
 
-    def _ladder_lines(self, pairs, key, row):
+    def _ladder_rows(self, row):
         block = row.get('algo_block') or {}
         params = effective_params(row)
-        mode = mode_word(row)
-        lines = [f'<b>{self._pair_name(pairs, key)}</b>']
         problem = self._price_problem(row)
-        lines.append('Feed: ' + (f'PROBLEM - {esc(problem)}' if problem
-                                 else 'OK'))
-        lines.append(f'Prices: H to L {num(row.get("short_spread"), 3)} | '
-                     f'L to H {num(row.get("long_spread"), 3)}')
-        lines.append(f'Algo: {MODE_WORDS[mode]}')
-        if row.get('algo_on'):
-            state = (block.get('state') or 'WATCHING').lower() \
-                .replace('_', ' ')
-            lines.append(f'State: {esc(state)}'
-                         + (f' - {esc(block.get("blocked"))}'
-                            if block.get('blocked') else ''))
+        rows = [('Feed', f'PROBLEM: {problem}' if problem else 'OK'),
+                ('Algo', MODE_WORDS[mode_word(row)])]
+        on = row.get('algo_on')
+        if on:
+            rows.append(('State', (block.get('state') or 'WATCHING')
+                         .lower().replace('_', ' ')))
             warmup = block.get('warmup') or {}
+            # The warm-up has its own row; saying it twice is noise.
+            if block.get('blocked') and not str(block['blocked']) \
+                    .startswith('warming up'):
+                rows.append(('Held because', block['blocked']))
             if warmup.get('need_sec'):
-                lines.append('Warm-up: complete' if warmup.get('done') else
-                             f'Warm-up: {int((warmup.get("sec") or 0) // 60)}'
-                             f' of {round(warmup["need_sec"] / 60)} min')
-            lines.append(f'Stretch (z): H to L '
-                         f'{num(block.get("z_sell"), 2, True)} | L to H '
-                         f'{num(block.get("z_buy"), 2, True)}')
+                rows.append(('Warm-up', 'complete' if warmup.get('done') else
+                             f'{int((warmup.get("sec") or 0) // 60)} of '
+                             f'{round(warmup["need_sec"] / 60)} min'))
+        rows.append(None)
+        rows.append(('H to L', plain(row.get('short_spread'), 3)
+                     + (f'   z {plain(block.get("z_sell"), 2, True)}'
+                        if on else '')))
+        rows.append(('L to H', plain(row.get('long_spread'), 3)
+                     + (f'   z {plain(block.get("z_buy"), 2, True)}'
+                        if on else '')))
+        if on:
             entry = params.get('entry_z')
-            armed = block.get('armed') or {}
             if params.get('reentry_on'):
                 back = max(0.0, (entry or 0) - (params.get('reentry_back')
                                                 or 0))
-                lines.append(f'Entry: armed at +/-{num(entry, 2)}, enters '
-                             f'back inside at +/-{num(back, 2)}'
-                             + (' | ARMED: ' + ', '.join(
-                                 side_words(s) for s in ('SELL', 'BUY')
-                                 if armed.get(s))
-                                if any(armed.values()) else ''))
+                rows.append(('Arms at', f'z +/-{plain(entry)}'))
+                rows.append(('Enters at', f'z +/-{plain(back)} (way back)'))
+                armed = block.get('armed') or {}
+                rows.append(('Armed', ', '.join(
+                    side_words(s) for s in ('SELL', 'BUY') if armed.get(s))
+                    or 'no'))
             else:
-                lines.append(f'Entry: at +/-{num(entry, 2)} | band '
-                             f'{num(block.get("lower"), 3)} to '
-                             f'{num(block.get("upper"), 3)}')
+                rows.append(('Enters at', f'z +/-{plain(entry)}'))
+                rows.append(('Band', f'{plain(block.get("lower"), 3)} to '
+                                     f'{plain(block.get("upper"), 3)}'))
             filters = block.get('filters') or {}
             edge = filters.get('edge') or {}
             regime = filters.get('regime') or {}
             trend = filters.get('trend') or {}
-            lines.append(
-                'Filters: Edge ' + ('off' if not edge.get('on') else
-                                    ('pass' if edge.get('ok') else 'FAIL')
-                                    + f' {num(edge.get("ratio"))}x of '
-                                      f'{num(edge.get("required"), 1)}x')
-                + ' | Regime ' + ('off' if not regime.get('on') else
-                                  esc((regime.get('state') or '—').lower()
-                                      .replace('_', ' ')))
-                + ' | Trend ' + ('off' if not trend.get('on') else
-                                 esc((trend.get('state') or 'waiting')
-                                     .lower()))
-                + ' | Ready ' + ('yes' if filters.get('ready') else 'no'))
+            rows.append(None)
+            rows.append(('Edge', 'off' if not edge.get('on') else
+                         ('pass' if edge.get('ok') else 'FAIL')
+                         + f' {plain(edge.get("ratio"))}x of '
+                           f'{plain(edge.get("required"), 1)}x'))
+            rows.append(('Regime', 'off' if not regime.get('on') else
+                         (regime.get('state') or '—').lower()
+                         .replace('_', ' ')))
+            rows.append(('Trend', 'off' if not trend.get('on') else
+                         (trend.get('state') or 'waiting').lower()))
+            rows.append(('Ready', 'yes' if filters.get('ready') else 'no'))
         levels = {p.get('position_id'): p
                   for p in (block.get('positions') or [])}
         positions = row.get('positions') or []
-        if positions:
-            for position in positions:
-                level = levels.get(position.get('position_id')) or {}
-                lines.append(
-                    f'Position: {side_words(position.get("side"))} '
-                    f'{num(position.get("quantity"), 2)} '
-                    f'({esc(position.get("source") or "MANUAL").lower()}) '
-                    f'@ {num(position.get("entry_spread"), 3)} | now '
-                    f'{num(position.get("closing_spread"), 3)} | P&amp;L '
-                    f'{money(position.get("net_pnl"))}')
-                if level:
-                    lines.append(f'Levels: TP {num(level.get("tp"), 3)} | '
-                                 f'SL {num(level.get("sl"), 3)} | BE '
-                                 f'{num(level.get("break_even"), 3)}')
-        else:
-            lines.append('Position: flat')
-        if row.get('algo_on'):
+        rows.append(None)
+        if not positions:
+            rows.append(('Position', 'flat'))
+        for position in positions:
+            level = levels.get(position.get('position_id')) or {}
+            rows.append(('Position', f'{side_words(position.get("side"))} '
+                         f'{plain(position.get("quantity"))} '
+                         f'({(position.get("source") or "MANUAL").lower()})'))
+            rows.append(('Entry', plain(position.get('entry_spread'), 3)))
+            rows.append(('Now', plain(position.get('closing_spread'), 3)))
+            rows.append(('P&L', money(position.get('net_pnl'))))
+            if level:
+                rows.append(('Take profit', plain(level.get('tp'), 3)))
+                rows.append(('Stop loss', plain(level.get('sl'), 3)))
+                rows.append(('Break-even', plain(level.get('break_even'),
+                                                 3)))
+        if on:
             day = block.get('day') or {}
-            lines.append(f'Today: {day.get("trades") or 0} of '
-                         f'{params.get("max_trades_day") or "unlimited"} '
-                         f'trades | {day.get("losses_row") or 0} losses in a '
-                         f'row | P&amp;L {money(day.get("pnl"))}')
+            rows.append(None)
+            rows.append(('Trades today', f'{day.get("trades") or 0} of '
+                         f'{params.get("max_trades_day") or "unlimited"}'))
+            rows.append(('Losses in row', day.get('losses_row') or 0))
+            rows.append(('P&L today', money(day.get('pnl'))))
             last = block.get('last_blocked')
             if last:
-                lines.append(f'Last blocked: {side_words(last.get("side"))} '
-                             f'at z {num(last.get("z"), 2, True)} - '
-                             f'{esc(last.get("reason"))}')
-        return lines
+                rows.append(('Last blocked', f'{side_words(last.get("side"))}'
+                             f' at z {plain(last.get("z"), 2, True)}: '
+                             f'{last.get("reason")}'))
+        return rows
 
     # kept for the shortcuts that used to open their own screens
     def on_status(self, chat, message_id):
@@ -621,14 +676,14 @@ class Bot:
             return self.show(chat, message_id, f'No ladder {esc(key)}.',
                              [[('Main menu', 'main', ())]])
         current = mode_word(row)
-        lines = [f'<b>SETTINGS - {self._pair_name(pairs, key)}</b>',
-                 '<b>Algo mode</b>', '',
-                 f'Current: <b>{MODE_WORDS[current]}</b>', '',
-                 'Off: nothing is watched or sent.',
-                 'Dry run: collects data, warms up and signals; sends '
-                 'nothing.',
-                 'LIVE: trades both accounts on this ladder. Manual orders '
-                 'on it are off while it runs.']
+        text = (f'<b>SETTINGS: {self._pair_name(pairs, key)}</b>\n'
+                f'<b>Algo mode</b>\n'
+                + table([('Current', MODE_WORDS[current]), None,
+                         ('Off', 'nothing is watched or sent'),
+                         ('Dry run', 'collects data, warms up and '
+                                     'signals; sends nothing'),
+                         ('LIVE', 'trades both accounts on this '
+                                  'ladder; manual orders on it are off')]))
 
         def label(mode, word):
             return word + (' (current)' if current == mode else '')
@@ -637,7 +692,7 @@ class Bot:
                     (label('LIVE', 'LIVE'), 'algo_ask', (key, 'ALGO_LIVE'))],
                    [('Back', 'settings_pair', (key,)),
                     ('Main menu', 'main', ())]]
-        self.show(chat, message_id, '\n'.join(lines), buttons)
+        self.show(chat, message_id, text, buttons)
 
     def on_algo_list(self, chat, message_id):
         self.on_dashboard(chat, message_id)
@@ -760,7 +815,7 @@ class Bot:
         buttons.append([('Back', 'settings_list', ()),
                         ('Main menu', 'main', ())])
         self.show(chat, message_id,
-                  f'<b>SETTINGS - {self._pair_name(pairs, key)}</b>\n'
+                  f'<b>SETTINGS: {self._pair_name(pairs, key)}</b>\n'
                   f'Select a section.', buttons)
 
     def on_settings_section(self, chat, message_id, key, section):
@@ -768,19 +823,18 @@ class Bot:
         row = pairs.get(key) or {}
         saved = self.desk.config_pair(key)
         title, fields = SECTIONS[section]
-        lines = [f'<b>SETTINGS - {self._pair_name(pairs, key)}</b>',
-                 f'<b>{title}</b>', '']
-        buttons = []
+        rows, buttons = [], []
         for field in fields:
             label = FIELD[field][1]
             value = self._shown(field, self._current(row, saved, field))
-            lines.append(f'{esc(label)}: <b>{esc(value)}</b>')
+            rows.append((SHORT_LABELS.get(field, label), value))
             buttons.append([(f'{label}: {value}', 'edit', (key, field))])
-        lines.append('')
-        lines.append('Select a setting to change it.')
         buttons.append([('Back', 'settings_pair', (key,)),
                         ('Main menu', 'main', ())])
-        self.show(chat, message_id, '\n'.join(lines), buttons)
+        self.show(chat, message_id,
+                  f'<b>SETTINGS: {self._pair_name(pairs, key)}</b>\n'
+                  f'<b>{title}</b>\n' + table(rows)
+                  + '\nSelect a setting to change it.', buttons)
 
     def _back_to(self, key, field):
         return ('settings_section', (key, SECTION_OF[field]))
@@ -1052,16 +1106,18 @@ class AlertWatch:
 
     @staticmethod
     def _summary(snapshot):
-        lines = ['<b>DAILY SUMMARY</b> (session cutoff)']
+        parts = ['<b>DAILY SUMMARY</b> (session cutoff)']
         for key, row in sorted((snapshot.get('pairs') or {}).items()):
             block = row.get('algo_block') or {}
             day = block.get('day') or {}
-            lines.append(f'<b>{esc(row.get("name") or key)}</b> · Algo '
-                         f'{mode_word(row)} · {day.get("trades") or 0} '
-                         f'trade(s) · {money(day.get("pnl"))} · net '
-                         f'{num(row.get("net_position"), 2, True)} · open '
-                         f'P&amp;L {money(row.get("open_pnl"))}')
-        return '\n'.join(lines)
+            parts.append(f'<b>{esc(row.get("name") or key)}</b>')
+            parts.append(table([
+                ('Algo', MODE_WORDS[mode_word(row)]),
+                ('Trades today', day.get('trades') or 0),
+                ('P&L today', money(day.get('pnl'))),
+                ('Net', plain(row.get('net_position'), 2, True)),
+                ('Open P&L', money(row.get('open_pnl')))]))
+        return '\n'.join(parts)
 
 
 def start(app, env=None, api=None):

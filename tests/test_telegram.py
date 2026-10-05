@@ -143,6 +143,18 @@ def test_the_CONTROL_an_allowed_user_gets_the_menu(bot):
         set(bot.api.buttons())
 
 
+def test_every_label_leaves_a_gap_before_its_value():
+    """Aligned columns: a label as long as the column would run into
+    its value."""
+    labels = set(tg.SHORT_LABELS.values()) | {
+        'Trades today', 'Losses in row', 'Last blocked', 'Held because',
+        'Take profit', 'Break-even', 'Broker time', '  Margin lvl'}
+    assert max(len(label) for label in labels) < tg.LABEL_WIDTH
+    block = tg.table([('Time stop bars', 20), ('Last blocked', 'x ' * 30)])
+    for line in block[5:-6].splitlines():
+        assert line[tg.LABEL_WIDTH - 1] == ' '
+
+
 def test_nothing_the_bot_says_carries_an_emoji(bot):
     """A desk tool, not a chat toy: plain words on every screen."""
     source = open(tg.__file__, encoding='utf-8').read()
