@@ -204,10 +204,21 @@ def test_a_quick_restart_carries_the_warm_up_on(config, pair, legs,
     assert sec - 10 <= warmup['sec'] <= sec + 5
 
 
+def test_an_update_with_its_tests_still_carries_it(config, pair, legs,
+                                                   tmp_path):
+    """git pull, the test suite and a restart take longer than five
+    minutes on the desk PC; fourteen still carries."""
+    store, clock, sec = warmed(config, legs, tmp_path)
+    clock.now += 14 * 60
+    second = restart_engine(config, legs, store, clock)
+    warmup = second.snapshot()['pairs'][pair.key]['algo_block']['warmup']
+    assert sec - 10 <= warmup['sec'] <= sec + 5
+
+
 def test_the_CONTROL_a_long_gap_starts_it_again(config, pair, legs,
                                                 tmp_path):
     store, clock, sec = warmed(config, legs, tmp_path)
-    clock.now += 600                     # ten minutes later
+    clock.now += 20 * 60                 # twenty minutes later
     second = restart_engine(config, legs, store, clock)
     warmup = second.snapshot()['pairs'][pair.key]['algo_block']['warmup']
     assert warmup['sec'] < 10
