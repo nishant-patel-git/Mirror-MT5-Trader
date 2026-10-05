@@ -47,7 +47,7 @@ BACKFILL_RETRY_SEC = 60.0
 #: Warm-up progress carries over a restart when the Algo is switched on
 #: again within this long of the last live price it watched — an update
 #: or a quick restart. Longer, and the feed it watched is not this one.
-WARMUP_CARRY_SEC = 300.0
+WARMUP_CARRY_SEC = 900.0
 
 #: How often the warm-up progress is written down while it is counting.
 WARMUP_SAVE_SEC = 10.0
