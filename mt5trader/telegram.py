@@ -234,8 +234,8 @@ def title(text, now=None):
             f'{time.strftime("%H:%M:%S", time.gmtime(now))} UTC</b>')
 
 
-#: The commands, in the menu - one aligned list, the way Stat_Arb_W3
-#: shows its own.
+#: The commands, in the menu. Ordinary text, so Telegram makes each one
+#: tappable - and no monospace block anywhere in the bot.
 COMMANDS = [('/dashboard', 'everything, one screen'),
             ('/positions', 'open positions'),
             ('/balance', 'account balances'),
@@ -247,8 +247,7 @@ COMMANDS = [('/dashboard', 'everything, one screen'),
 
 
 def command_list():
-    return '<pre>' + esc('\n'.join(f'{name:<13}{what}'
-                                    for name, what in COMMANDS)) + '</pre>'
+    return '\n'.join(f'{name}  -  {esc(what)}' for name, what in COMMANDS)
 
 
 def plain(value, digits=2, signed=False):
@@ -815,7 +814,7 @@ class Bot:
                          f'{plain(row.get("net_position"), 2, True)}'
                          + (f'  |  {money(pnl)}' if pnl is not None else '')))
         text = (title('NEXUS SPREAD DESK', self.clock()) + '\n'
-                + table(rows) + '\n' + command_list())
+                + table(rows) + '\n\n<b>COMMANDS</b>\n' + command_list())
         if not pairs:
             text += '\nNo ladders are configured.'
         self.show(chat, message_id, text, self._main_buttons(chat))

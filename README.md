@@ -219,8 +219,8 @@ as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
 Optional. With a bot token in `.env` the web process also runs a Telegram
 bot, written the way Stat_Arb_W3 writes its own: a heading with the time
 (`OPEN POSITIONS  ·  14:02:11 UTC`), then a bold label and its value in a box
-for every figure, plain words, no icons. `/start` is the menu, with buttons
-and the command list:
+for every figure, plain words, no icons and no monospace blocks. `/start` is
+the menu, with buttons and the commands (tap one to run it):
 
 - `/dashboard`: everything to watch on one screen - the system (engine,
   broker time, cutoff, each account), then per ladder its feed, prices, Algo

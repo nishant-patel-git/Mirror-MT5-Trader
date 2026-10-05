@@ -155,6 +155,19 @@ def test_rows_are_a_bold_label_and_a_value_in_code_type():
     assert tg.table([('Peak', None)]) == '<b>Peak</b>  <code>—</code>'
 
 
+def test_no_monospace_block_anywhere():
+    """Bold labels and boxed values only: a <pre> block was asked
+    against."""
+    source = open(tg.__file__, encoding='utf-8').read()
+    assert '<pre>' not in source
+
+
+def test_the_menu_lists_the_commands_as_tappable_text(bot):
+    say(bot, '/start')
+    text = bot.api.texts()[-1]
+    assert '/positions  -  open positions' in text and '<pre>' not in text
+
+
 def test_nothing_the_bot_says_carries_an_emoji(bot):
     """A desk tool, not a chat toy: plain words on every screen."""
     source = open(tg.__file__, encoding='utf-8').read()
