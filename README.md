@@ -228,8 +228,9 @@ bot with a button menu:
   and why it is held, warm-up, Edge/Regime/Ready, today's count, last
   blocked signal) with **Off / Dry run / LIVE**.
 - **Settings**: entry z, direction, Algo qty, warm-up, cutoff, cooldown,
-  max entry z, stop loss, Edge, Regime, the day's limits, TP % of margin,
-  commission per lot (per side), overnight.
+  max entry z, re-entry, the trend filter, stop loss, the optional exits
+  (back to mean, z-stop, time stop), Edge, Regime, the day's limits, TP %
+  of margin, commission per lot (per side), overnight.
 - **KILL ALL**, and **Alerts on/off** (`/alerts`).
 
 Every action asks Confirm / Cancel first; LIVE asks twice. Buttons expire

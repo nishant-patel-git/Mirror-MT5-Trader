@@ -304,6 +304,27 @@ def test_a_choice_setting_offers_its_choices(bot):
         'entry_z': 2.0, 'direction': 'H_TO_L'}})]
 
 
+def test_every_exit_switch_is_in_the_settings_menu(bot):
+    """The exits that can close a trade early are switchable from a
+    phone — "Back to mean" scratched a trade at break-even once, and the
+    trader has to be able to turn it off away from the desk."""
+    open_settings(bot)
+    labels = set(bot.api.buttons())
+    for label in ('Back to mean (exit): OFF', 'Z-stop (exit): OFF',
+                  'Z-stop at |z|: 4.0', 'Time stop (exit): OFF',
+                  'Time stop (candles): 20', 'Stop loss: ON'):
+        assert label in labels, label
+
+
+def test_back_to_mean_is_switched_and_saved(bot):
+    open_settings(bot)
+    press(bot, 'Back to mean (exit): OFF')
+    press(bot, 'ON')
+    press(bot, '✅ Confirm')
+    assert bot.desk.saves == [(KEY, {'algo_params': {
+        'entry_z': 2.0, 'reversion_on': True}})]
+
+
 def test_a_pair_setting_is_saved_on_the_pair(bot):
     open_settings(bot)
     press(bot, 'Comm/lot A (per side): default')
