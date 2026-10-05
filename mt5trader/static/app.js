@@ -2475,7 +2475,7 @@
     var first = held[0] || null;
     var position = first
       ? (first.side === 'BUY' ? 'LONG' : 'SHORT') + ' ' +
-        fmt(first.quantity || 1, 2) : 'FLAT';
+        fmt(first.quantity, 2) : 'FLAT';
     var html = '<div class="aw-head">Signal &amp; Position</div>' +
       '<div class="aw-tiles">' + tile('SELL') + tile('BUY') +
       '<div class="aw-pos ' + (first ? (first.side === 'BUY' ? 'long' : 'short')
@@ -2518,7 +2518,7 @@
         kv('Age', first.age_sec === null || first.age_sec === undefined ? DASH
           : Math.floor(first.age_sec / 60) + 'm ' +
             Math.floor(first.age_sec % 60) + 's') +
-        kv('Size', fmt(first.quantity || 1, 2) + ' spread(s)') +
+        kv('Size', fmt(first.quantity, 2) + ' spread(s)') +
         '</div>' +
         kv('Levels', 'BE ' + fmt(first.break_even, digits) + ' · TP ' +
            fmt(first.tp, digits) + ' · SL ' +
