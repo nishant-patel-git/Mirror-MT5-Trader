@@ -76,6 +76,10 @@ class FakeDesk:
         self.saves = []
         self.answer = {'ok': True, 'data': {'ok': True}}
         self.event_rows = []
+        self.records = {}
+
+    def position(self, position_id):
+        return self.records.get(position_id) or {'ok': False}
 
     def status(self):
         return json.loads(json.dumps(self.snapshot))
@@ -143,16 +147,12 @@ def test_the_CONTROL_an_allowed_user_gets_the_menu(bot):
         set(bot.api.buttons())
 
 
-def test_every_label_leaves_a_gap_before_its_value():
-    """Aligned columns: a label as long as the column would run into
-    its value."""
-    labels = set(tg.SHORT_LABELS.values()) | {
-        'Trades today', 'Losses in row', 'Last blocked', 'Held because',
-        'Take profit', 'Break-even', 'Broker time', '  Margin lvl'}
-    assert max(len(label) for label in labels) < tg.LABEL_WIDTH
-    block = tg.table([('Time stop bars', 20), ('Last blocked', 'x ' * 30)])
-    for line in block[5:-6].splitlines():
-        assert line[tg.LABEL_WIDTH - 1] == ' '
+def test_rows_are_a_bold_label_and_a_value_in_code_type():
+    """Stat_Arb_W3's layout: every number in its own box."""
+    assert tg.table([('Net P&L', '+$5.27'), None, ('Hold', '23m')]) == (
+        '<b>Net P&amp;L</b>  <code>+$5.27</code>\n\n'
+        '<b>Hold</b>  <code>23m</code>')
+    assert tg.table([('Peak', None)]) == '<b>Peak</b>  <code>—</code>'
 
 
 def test_nothing_the_bot_says_carries_an_emoji(bot):
@@ -185,7 +185,8 @@ def test_no_token_means_no_bot_and_it_says_so(caplog):
 
 
 def open_algo(bot, mode='Dry run'):
-    say(bot, '/settings')
+    say(bot, '/start')
+    press(bot, 'Settings')
     press(bot, 'Oil')
     press(bot, 'Algo mode: ' + mode)
 
@@ -409,7 +410,7 @@ def test_history_already_in_the_journal_is_not_replayed(bot):
                                               'mode': 'LIVE'}})
     told = watch(bot)
     assert len(told) == 1 and 'ENTER H to L' in told[0]
-    assert '[ALGO LIVE]' in told[0]
+    assert 'SIGNAL  ·  ENTER H to L  ·  LIVE' in told[0]
 
 
 def test_an_algo_order_that_failed_says_why(bot):
@@ -427,7 +428,8 @@ def test_alerts_go_to_allowed_users_unless_they_turned_them_off(bot):
     watch(bot)
     bot.desk.snapshot['engine'] = 'stalled'
     watch(bot)
-    assert any('Engine stalled' in t for t in bot.api.texts())
+    assert any('SYSTEM ERROR' in t and 'STALLED' in t
+               for t in bot.api.texts())
     # The control: with /alerts off, the same news is not sent.
     say(bot, '/alerts')
     before = len(bot.api.texts())
@@ -470,7 +472,7 @@ def test_the_daily_summary_is_sent_once_at_the_cutoff(bot):
     assert watch(bot) == []
     bot.desk.snapshot['broker_clock']['broker_time'] = '16:55:03'
     told = watch(bot)
-    assert 'DAILY SUMMARY' in told[0]
+    assert 'END OF DAY' in told[0]
     bot.desk.snapshot['broker_clock']['broker_time'] = '17:30:00'
     assert watch(bot) == []
 
@@ -527,3 +529,132 @@ def test_a_command_with_the_engine_down_is_refused_not_queued(web):
     desk = tg.WebDesk(app, 's', sleep=lambda s: None)
     answer = desk.command('set_algo', {'pair': KEY, 'algo': 'NONE'})
     assert answer['ok'] is False and 'not running' in answer['reason']
+
+
+# -- the trade messages and the W3 screens -------------------------------------------
+
+
+POSITION = {
+    'position_id': 'P7', 'pair_key': KEY, 'side': 'SELL', 'quantity': 0.5,
+    'entry_spread': 13.196, 'closing_spread': 13.365, 'net_pnl': -8.45,
+    'spread_units': 50.0, 'source': 'ALGO', 'opened_at': 1_799_999_000.0,
+    'entry_margin': 191.5, 'entry_slippage': 0.002, 'click_to_on_ms': 180,
+    'leg_a': {'side': 'BUY', 'volume': 0.05, 'symbol': 'USOILZ6.c',
+              'price': 89.08, 'contract_size': 1000},
+    'leg_b': {'side': 'SELL', 'volume': 0.05, 'symbol': 'UKOILZ26.p',
+              'price': 102.276, 'contract_size': 1000}}
+LEVELS = {'position_id': 'P7', 'tp': 13.119, 'sl': 13.388,
+          'break_even': 13.196, 'entry_z': 1.49}
+
+
+def holding(bot):
+    pair = bot.desk.snapshot['pairs'][KEY]
+    pair['positions'] = [dict(POSITION)]
+    pair['algo_block']['positions'] = [dict(LEVELS)]
+    pair['market'] = {'leg_a_bid': 89.171, 'leg_a_ask': 89.223,
+                      'leg_b_bid': 102.503, 'leg_b_ask': 102.536}
+
+
+def test_a_position_that_opens_is_a_trade_entry(bot):
+    watch(bot)                                   # bearings: flat
+    holding(bot)
+    [told] = watch(bot)
+    assert 'TRADE ENTRY  ·  H to L  ·  Oil' in told
+    assert '<b>Entry Spread</b>  <code>13.1960  (Z: +1.49)</code>' in told
+    assert 'Take Profit' in told and '+$3.85' in told    # 0.077 x 50
+    assert 'Margin Req' in told and '(' in told          # leverage shown
+
+
+def test_a_position_that_closes_is_a_trade_exit_with_its_analysis(bot):
+    holding(bot)
+    watch(bot)                                   # bearings: it is open
+    closed = dict(POSITION, closed_at=POSITION['opened_at'] + 1359,
+                  exit_spread=13.119, realized_pnl=3.85,
+                  close_reason='Algo: profit target (after costs)',
+                  peak_pnl=4.10, peak_min=20.0, trough_pnl=-9.0,
+                  trough_min=6.0, exit_slippage=0.001)
+    bot.desk.records['P7'] = {'ok': True, 'position': closed,
+                              'exit_prices': {'leg_a': 89.2, 'leg_b': 102.3},
+                              'entry_z': 1.49, 'exit_z': -0.4}
+    bot.desk.snapshot['pairs'][KEY]['positions'] = []
+    [told] = watch(bot)
+    assert 'TRADE EXIT  ·  H to L  ·  Oil  ·  PROFIT' in told
+    for part in ('Duration</b>  <code>22m 39s', 'Leg A Exit',
+                 'Spread Chg</b>  <code>+0.0770  (with)',
+                 'ANALYSIS', 'TARGET HIT', 'Peak/Trough',
+                 'Capture</b>  <code>+$3.85 of +$4.10 best (+94%)',
+                 'Z path</b>  <code>+1.49 -&gt; -0.40'):
+        assert part in told, part
+
+
+def test_the_CONTROL_positions_open_at_start_are_not_news(bot):
+    holding(bot)
+    assert watch(bot) == []
+
+
+def test_open_positions_shows_the_whole_position_now(bot):
+    holding(bot)
+    say(bot, '/positions')
+    text = bot.api.texts()[-1]
+    for part in ('OPEN POSITIONS', 'Leg A Now', '(+0.10%)',
+                 'Δ Spread</b>  <code>+0.1690  (against)',
+                 'BE 13.196 · TP 13.119 · SL 13.388',
+                 'Target/Stop</b>  <code>+$3.85  /  -$9.60'):
+        assert part in text, part
+    assert 'Close all: Oil' in bot.api.buttons()
+
+
+def test_the_settings_list_carries_every_key_set_takes(bot):
+    say(bot, '/settings')
+    listing = bot.api.texts()[-2]
+    for key in ('mode', 'entry_z', 'reversion_on', 'stop_loss_pct',
+                'commission_per_lot_a'):
+        assert f'  {key}' in listing, key
+    assert '/set &lt;key&gt; &lt;value&gt;' in bot.api.texts()[-1]
+
+
+def test_set_is_confirmed_before_it_saves(bot):
+    say(bot, '/set entry_z 2.5')
+    assert bot.desk.saves == []
+    press(bot, 'Confirm')
+    assert bot.desk.saves == [(KEY, {'algo_params': {'entry_z': 2.5}})]
+
+
+def test_set_a_switch_and_a_choice_by_their_words(bot):
+    say(bot, '/set reversion_on off')
+    press(bot, 'Confirm')
+    say(bot, '/set direction h_to_l')
+    press(bot, 'Confirm')
+    assert [s[1]['algo_params'] for s in bot.desk.saves] == [
+        {'entry_z': 2.0, 'reversion_on': False},
+        {'entry_z': 2.0, 'direction': 'H_TO_L'}]
+
+
+def test_set_mode_live_still_asks_twice(bot):
+    say(bot, '/set mode live')
+    assert bot.desk.commands == [] and 'Continue' in bot.api.buttons()
+    press(bot, 'Continue')
+    assert bot.desk.commands == []
+    press(bot, 'Confirm LIVE')
+    assert bot.desk.commands[-1][1]['mode'] == 'LIVE'
+
+
+def test_set_with_a_bad_key_or_value_changes_nothing(bot):
+    say(bot, '/set no_such_key 1')
+    assert 'No setting' in bot.api.texts()[-1]
+    say(bot, '/set entry_z 0')
+    assert 'entry z must be above 0' in bot.api.texts()[-1]
+    assert bot.desk.saves == [] and bot.desk.commands == []
+
+
+def test_balance_and_ping(bot):
+    bot.desk.snapshot['accounts'] = {'AC-10006': {
+        'balance': 16000.0, 'equity': 16031.2, 'margin': 45.0,
+        'margin_free': 15986.2, 'margin_level': 35625, 'profit': 31.2,
+        'currency': 'USD'}}
+    say(bot, '/balance')
+    text = bot.api.texts()[-1]
+    assert 'ACCOUNT BALANCE' in text and '16,031.20 USD' in text
+    assert 'Margin used</b>  <code>45.00 USD' in text
+    say(bot, '/ping')
+    assert bot.api.texts()[-1].startswith('pong  ·  ')

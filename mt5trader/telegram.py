@@ -153,6 +153,18 @@ SHORT_LABELS = {
     'commission_per_lot_b': 'Comm B /lot', 'max_entry_z': 'Max entry z',
 }
 
+#: What each setting is counted in, for the settings list.
+UNITS = {
+    'algo_qty': ' spreads', 'reentry_back': ' sigma', 'warmup_min': ' min',
+    'cooldown_min': ' min', 'cutoff_buffer_min': ' min',
+    'edge_multiple': ' x', 'trend_sigma': ' sigma',
+    'trend_lookback_min': ' min', 'tp_target_pct_of_margin': ' %',
+    'stop_loss_pct': ' %', 'stop_z': ' sigma', 'time_stop_candles': ' bars',
+    'max_trades_day': ' trades', 'max_losses_row': ' losses',
+    'daily_loss_limit': ' USD', 'commission_per_lot_a': ' USD/lot',
+    'commission_per_lot_b': ' USD/lot',
+}
+
 #: How a ladder's Algo mode is written.
 MODE_WORDS = {'OFF': 'Off', 'DRY': 'Dry run', 'LIVE': 'LIVE'}
 
@@ -175,7 +187,7 @@ def num(value, digits=2, signed=False):
 def money(value):
     if value is None:
         return '—'
-    return f'{float(value):+,.2f}'
+    return f'${float(value):+,.2f}'
 
 
 def mode_word(row):
@@ -195,19 +207,12 @@ def side_words(side):
     return {'SELL': 'H to L', 'BUY': 'L to H'}.get(side, side or '?')
 
 
-#: The aligned blocks: a label column this wide, then the value, wrapped
-#: under itself. 15 + 23 = 38 characters, which a phone shows upright;
-#: the longest label is 14, so a value never touches its label.
-LABEL_WIDTH = 15
-VALUE_WIDTH = 23
-
-
 def table(rows):
-    """Rows of (label, value) as one monospace block: every label in one
-    column, every value left-aligned in the next. A long value wraps
-    under its own column. `None` is a blank line. Values are raw text,
+    """Rows of (label, value) the way Stat_Arb_W3 writes them: a bold
+    label, two spaces, the value in code type - which Telegram draws
+    larger and clearer than a monospace block, each number in its own
+    box. `None` is a blank line between groups. Values are raw text,
     escaped here once."""
-    import textwrap
     lines = []
     for row in rows:
         if row is None:
@@ -215,12 +220,35 @@ def table(rows):
             continue
         label, value = row
         text = '—' if value is None or value == '' else str(value)
-        chunks = textwrap.wrap(text, VALUE_WIDTH,
-                               break_long_words=True) or ['']
-        for i, chunk in enumerate(chunks):
-            lines.append((str(label) if i == 0 else '')
-                         .ljust(LABEL_WIDTH) + chunk)
-    return '<pre>' + esc('\n'.join(lines)) + '</pre>'
+        lines.append(f'<b>{esc(str(label).strip())}</b>  '
+                     f'<code>{esc(text)}</code>')
+    return '\n'.join(lines)
+
+
+def title(text, now=None):
+    """A message's heading: what it is, and - for a screen - when (UTC).
+    A trade message carries its own times in its rows instead."""
+    if now is None:
+        return f'<b>{esc(text)}</b>'
+    return (f'<b>{esc(text)}  ·  '
+            f'{time.strftime("%H:%M:%S", time.gmtime(now))} UTC</b>')
+
+
+#: The commands, in the menu - one aligned list, the way Stat_Arb_W3
+#: shows its own.
+COMMANDS = [('/dashboard', 'everything, one screen'),
+            ('/positions', 'open positions'),
+            ('/balance', 'account balances'),
+            ('/settings', 'every setting, with its key'),
+            ('/set', 'change one: /set <key> <value>'),
+            ('/alerts', 'alerts on / off'),
+            ('/ping', 'alive check'),
+            ('/start', 'this menu')]
+
+
+def command_list():
+    return '<pre>' + esc('\n'.join(f'{name:<13}{what}'
+                                    for name, what in COMMANDS)) + '</pre>'
 
 
 def plain(value, digits=2, signed=False):
@@ -232,6 +260,264 @@ def plain(value, digits=2, signed=False):
     except (TypeError, ValueError):
         return str(value)
     return f'{value:+.{digits}f}' if signed else f'{value:.{digits}f}'
+
+
+# -- the trade messages ----------------------------------------------------------
+
+
+def utc(at, date=True):
+    if not at:
+        return '—'
+    return time.strftime('%Y-%m-%d %H:%M:%S UTC' if date else '%H:%M:%S UTC',
+                         time.gmtime(float(at)))
+
+
+def duration(seconds):
+    if seconds is None:
+        return '—'
+    s = max(0, int(seconds))
+    if s < 3600:
+        return f'{s // 60}m {s % 60}s'
+    if s < 86400:
+        return f'{s // 3600}h {(s % 3600) // 60}m'
+    return f'{s // 86400}d {(s % 86400) // 3600}h'
+
+
+def usd(value, signed=True, digits=2):
+    if value is None:
+        return '—'
+    value = float(value)
+    if signed:
+        return f'{"+" if value >= 0 else "-"}${abs(value):,.{digits}f}'
+    return f'${value:,.{digits}f}'
+
+
+def _z(value):
+    return '' if value is None else f'  (Z: {plain(value, 2, True)})'
+
+
+def _legs(position):
+    out = []
+    for leg in ('leg_a', 'leg_b'):
+        fill = position.get(leg) or {}
+        out.append((leg[-1].upper(), fill))
+    return out
+
+
+def notional(position):
+    """Both legs' face value at entry, or None if any part is unknown."""
+    total = 0.0
+    for _, fill in _legs(position):
+        try:
+            total += (float(fill['volume']) * float(fill['contract_size'])
+                      * float(fill['price']))
+        except (KeyError, TypeError, ValueError):
+            return None
+    return total
+
+
+def margin_text(position):
+    margin = position.get('entry_margin')
+    if not margin:
+        return '—'
+    margin = float(margin) * float(position.get('quantity') or 1.0)
+    face = notional(position)
+    if face and margin:
+        return f'{usd(margin, False)}  ({face / margin:.0f}x)'
+    return usd(margin, False)
+
+
+def _sign(side):
+    return 1.0 if side == 'BUY' else -1.0
+
+
+def level_money(position, level):
+    """Gross money at a spread level, for the whole position."""
+    entry = position.get('entry_spread')
+    units = position.get('spread_units')
+    if level is None or entry is None or not units:
+        return None
+    return (float(level) - float(entry)) * _sign(position.get('side')) \
+        * float(units)
+
+
+def leg_now(position, market, leg):
+    """The price this leg would CLOSE at now: a bought leg on the bid,
+    a sold one at the offer."""
+    fill = position.get('leg_' + leg) or {}
+    side = fill.get('side')
+    return (market or {}).get(f'leg_{leg}_bid' if side == 'BUY'
+                              else f'leg_{leg}_ask')
+
+
+def _pct(now, then):
+    try:
+        return f'  ({(float(now) / float(then) - 1.0) * 100:+.2f}%)'
+    except (TypeError, ValueError, ZeroDivisionError):
+        return ''
+
+
+def trade_entry_text(position, ladder, levels=None):
+    """TRADE ENTRY: what went on, at what, and where it comes off."""
+    levels = levels or {}
+    rows = [('ID', position.get('position_id')),
+            ('Source', (position.get('source') or 'MANUAL').title()),
+            ('Entry Time', utc(position.get('opened_at'))), None,
+            ('Size', f'{plain(position.get("quantity"))} spread(s)')]
+    for name, fill in _legs(position):
+        rows.append((f'Leg {name}', f'{fill.get("side") or ""} '
+                                    f'{plain(fill.get("volume"))} '
+                                    f'{fill.get("symbol") or ""}'))
+    face = notional(position)
+    rows += [('Notional', usd(face, False) if face else '—'),
+             ('Margin Req', margin_text(position)), None]
+    for name, fill in _legs(position):
+        rows.append((f'Leg {name} Entry', plain(fill.get('price'), 4)))
+    rows.append(('Entry Spread', plain(position.get('entry_spread'), 4)
+                 + _z(levels.get('entry_z'))))
+    if levels:
+        rows.append(None)
+        for label, key in (('Break-even', 'break_even'),
+                           ('Take Profit', 'tp'), ('Stop Loss', 'sl')):
+            value = levels.get(key)
+            money_at = level_money(position, value)
+            rows.append((label, plain(value, 4) + (
+                f'  ({usd(money_at)})' if money_at is not None
+                and key != 'break_even' else '')))
+    rows += [None,
+             ('Slippage', plain(position.get('entry_slippage'), 4)
+              + ' spread'),
+             ('Click to fill', '—' if position.get('click_to_on_ms') is None
+              else f'{position["click_to_on_ms"]:.0f} ms')]
+    return (title(f'TRADE ENTRY  ·  {side_words(position.get("side"))}  ·  '
+                  f'{ladder}') + '\n' + table(rows))
+
+
+def trade_exit_text(record, ladder):
+    """TRADE EXIT: the round trip both ways, then what it says."""
+    position = record.get('position') or {}
+    exits = record.get('exit_prices') or {}
+    pnl = position.get('realized_pnl')
+    result = '—' if pnl is None else ('PROFIT' if pnl >= 0 else 'LOSS')
+    opened, closed = position.get('opened_at'), position.get('closed_at')
+    held = None if not opened or not closed else closed - opened
+    entry, exit_ = position.get('entry_spread'), position.get('exit_spread')
+    change = None if entry is None or exit_ is None else \
+        (exit_ - entry) * _sign(position.get('side'))
+    gross = level_money(position, exit_) if exit_ is not None else None
+    fees = None if gross is None or pnl is None else gross - pnl
+    face = notional(position)
+    rows = [('Reason', position.get('close_reason')),
+            ('Duration', duration(held)),
+            ('Exit Time', utc(closed)), None]
+    for name, fill in _legs(position):
+        rows.append((f'Leg {name} Entry', plain(fill.get('price'), 4)))
+        rows.append((f'Leg {name} Exit',
+                     plain(exits.get('leg_' + name.lower()), 4)))
+    rows += [None,
+             ('Entry Spread', plain(entry, 4) + _z(record.get('entry_z'))),
+             ('Exit Spread', plain(exit_, 4) + _z(record.get('exit_z'))),
+             ('Spread Chg', plain(change, 4, True)
+              + ('' if change is None else
+                 ('  (with)' if change >= 0 else '  (against)'))), None,
+             ('Gross P&L', usd(gross)),
+             ('Commission', f'-{usd(fees, False)}' if fees is not None
+              else '—'),
+             ('Net P&L', usd(pnl) + (f'  ({pnl / face * 100:+.4f}%)'
+                                     if pnl is not None and face else '')),
+             ('Slippage', f'in {plain(position.get("entry_slippage"), 4)}'
+                          f' / out {plain(position.get("exit_slippage"), 4)}')]
+    peak, trough = position.get('peak_pnl'), position.get('trough_pnl')
+    analysis_rows = [('Outcome', _outcome(position.get('close_reason'),
+                                          pnl))]
+    if peak is not None or trough is not None:
+        analysis_rows.append((
+            'Peak/Trough',
+            f'{usd(peak)} ({plain(position.get("peak_min"), 0)}m) / '
+            f'{usd(trough)} ({plain(position.get("trough_min"), 0)}m)'))
+        if peak and peak > 0 and pnl is not None:
+            analysis_rows.append(('Capture', f'{usd(pnl)} of {usd(peak)} '
+                                             f'best ({pnl / peak * 100:+.0f}%)'))
+    analysis_rows.append(('Hold', duration(held)))
+    if record.get('entry_z') is not None or record.get('exit_z') is not None:
+        analysis_rows.append(('Z path',
+                              f'{plain(record.get("entry_z"), 2, True)} -> '
+                              f'{plain(record.get("exit_z"), 2, True)}'))
+    return (title(f'TRADE EXIT  ·  {side_words(position.get("side"))}  ·  '
+                  f'{ladder}  ·  {result}') + '\n' + table(rows)
+            + '\n\n' + title('ANALYSIS') + '\n' + table(analysis_rows))
+
+
+def _outcome(reason, pnl):
+    reason = str(reason or '').lower()
+    if 'profit target' in reason:
+        return 'TARGET HIT - banked at the take-profit'
+    if 'stop loss' in reason:
+        return 'STOPPED - the stop loss took it off'
+    if 'back to the mean' in reason:
+        return 'BACK TO THE MEAN - taken at the mean, in profit'
+    if 'overnight' in reason or 'cutoff' in reason:
+        return 'SESSION CUTOFF - closed by the overnight rule'
+    if 'kill' in reason:
+        return 'KILL ALL'
+    if pnl is None:
+        return 'CLOSED - P&L not measured'
+    return 'CLOSED BY HAND - ' + ('in profit' if pnl >= 0 else 'at a loss')
+
+
+def position_rows(position, row, levels=None, now=None):
+    """OPEN POSITIONS, one position: everything about it, now."""
+    levels = levels or {}
+    market = row.get('market') or {}
+    rows = [('Position', f'{side_words(position.get("side"))}  ·  '
+                         f'{(position.get("source") or "MANUAL").lower()}'),
+            None,
+            ('Size', f'{plain(position.get("quantity"))} spread(s)')]
+    for name, fill in _legs(position):
+        rows.append((f'Leg {name} Lots', f'{fill.get("side") or ""} '
+                                         f'{plain(fill.get("volume"))} '
+                                         f'{fill.get("symbol") or ""}'))
+    face = notional(position)
+    rows += [('Notional', usd(face, False) if face else '—'),
+             ('Margin Req', margin_text(position)),
+             ('Entry Time', utc(position.get('opened_at'))), None]
+    for name, fill in _legs(position):
+        rows.append((f'Leg {name} Entry', plain(fill.get('price'), 4)))
+    rows.append(('Entry Spread', plain(position.get('entry_spread'), 4)
+                 + _z(levels.get('entry_z'))))
+    rows.append(None)
+    for name, fill in _legs(position):
+        now_price = leg_now(position, market, name.lower())
+        rows.append((f'Leg {name} Now', plain(now_price, 4)
+                     + _pct(now_price, fill.get('price'))))
+    closing = position.get('closing_spread')
+    entry = position.get('entry_spread')
+    delta = None if closing is None or entry is None else closing - entry
+    good = None if delta is None else delta * _sign(position.get('side'))
+    rows += [('Spread Now', plain(closing, 4) + _z(levels.get('z_close'))),
+             ('Δ Spread', plain(delta, 4, True) + (
+                 '' if good is None else
+                 ('  (with)' if good >= 0 else '  (against)'))),
+             ('Net P&L', usd(position.get('net_pnl')))]
+    if levels:
+        be, tp, sl = levels.get('break_even'), levels.get('tp'), \
+            levels.get('sl')
+        rows += [None,
+                 ('Levels', f'BE {plain(be, 3)} · TP {plain(tp, 3)} · '
+                            f'SL {plain(sl, 3)}'),
+                 ('Level P&L', f'TP {usd(level_money(position, tp))} · '
+                               f'SL {usd(level_money(position, sl))} gross'),
+                 ('Target/Stop', f'{usd(level_money(position, tp))}  /  '
+                                 f'{usd(level_money(position, sl))}')]
+    opened = position.get('opened_at')
+    if opened and now:
+        rows.append(('Age', duration(now - opened)))
+    rows += [None,
+             ('Slippage', plain(position.get('entry_slippage'), 4)
+              + ' spread'),
+             ('Click to fill', '—' if position.get('click_to_on_ms') is None
+              else f'{position["click_to_on_ms"]:.0f} ms')]
+    return rows
 
 
 class TelegramError(Exception):
@@ -307,6 +593,11 @@ class WebDesk:
     def config_pair(self, key):
         return ((self._get('/api/config').get('pairs') or {}).get(key)
                 or {})
+
+    def position(self, position_id):
+        """One position as recorded, with its closing prices and z."""
+        return self._get('/api/position/'
+                         + urllib.parse.quote(str(position_id), safe=''))
 
     def events(self, limit=50):
         return self._get(f'/api/events?limit={int(limit)}').get('events') \
@@ -466,10 +757,20 @@ class Bot:
             self.alerts_off.add(chat)
             return self.send(chat, 'Alerts are <b>off</b> for this chat. '
                                    'Send /alerts to turn them back on.')
-        if command in ('/dashboard', '/status', '/positions', '/algo'):
+        if command == '/ping':
+            return self.send(chat, f'pong  ·  '
+                             f'{time.strftime("%H:%M:%S", time.gmtime(self.clock()))}'
+                             f' UTC')
+        if command == '/positions':
+            return self.on_positions(chat, None)
+        if command == '/balance':
+            return self.on_balance(chat, None)
+        if command in ('/dashboard', '/status', '/algo'):
             return self.on_dashboard(chat, None)
         if command == '/settings':
-            return self.on_settings_list(chat, None)
+            return self.on_settings_all(chat)
+        if command == '/set':
+            return self._set_command(chat, text.split()[1:])
         return self.on_main(chat, None)
 
     def _may(self, user):
@@ -494,6 +795,8 @@ class Bot:
     def _main_buttons(self, chat):
         alerts = 'OFF' if chat in self.alerts_off else 'ON'
         return [[('Dashboard', 'dashboard', ()),
+                 ('Positions', 'positions', ())],
+                [('Balance', 'balance', ()),
                  ('Settings', 'settings_list', ())],
                 [(f'Alerts: {alerts}', 'toggle_alerts', ()),
                  ('KILL ALL', 'kill_ask', ())]]
@@ -502,15 +805,17 @@ class Bot:
 
     def on_main(self, chat, message_id):
         snapshot, pairs = self._snapshot()
-        rows = [('Engine', self._engine_plain(snapshot))]
+        rows = [('Engine', self._engine_plain(snapshot)),
+                ('Alerts', 'OFF' if chat in self.alerts_off else 'ON')]
         for key, row in sorted(pairs.items()):
+            pnl = row.get('open_pnl')
             rows.append(None)
-            rows.append(('Ladder', row.get('name') or key))
-            rows.append(('Algo', MODE_WORDS[mode_word(row)]))
-            rows.append(('Net', plain(row.get('net_position'), 2, True)))
-            if row.get('open_pnl') is not None:
-                rows.append(('Open P&L', money(row.get('open_pnl'))))
-        text = '<b>NEXUS SPREAD DESK</b>\n' + table(rows)
+            rows.append((row.get('name') or key,
+                         f'{MODE_WORDS[mode_word(row)]}  |  net '
+                         f'{plain(row.get("net_position"), 2, True)}'
+                         + (f'  |  {money(pnl)}' if pnl is not None else '')))
+        text = (title('NEXUS SPREAD DESK', self.clock()) + '\n'
+                + table(rows) + '\n' + command_list())
         if not pairs:
             text += '\nNo ladders are configured.'
         self.show(chat, message_id, text, self._main_buttons(chat))
@@ -548,15 +853,15 @@ class Bot:
             rows.append((name, ('—' if equity is None else
                                 f'{float(equity):,.2f}') + ' '
                          + (info.get('currency') or '')))
-            rows.append(('  Margin lvl', f'{float(level):,.0f}%'
+            rows.append(('Margin level', f'{float(level):,.0f}%'
                          if level else '—'))
         for name in snapshot.get('dark_accounts') or []:
             rows.append((name, 'leg runner NOT ANSWERING'))
-        parts = ['<b>DASHBOARD</b>', '<b>System</b>', table(rows)]
+        parts = [title('DASHBOARD', self.clock()) + '\n' + table(rows)]
         buttons = []
         for key, row in sorted(pairs.items()):
-            parts.append(f'<b>{self._pair_name(pairs, key)}</b>')
-            parts.append(table(self._ladder_rows(row)))
+            parts.append(f'<b>{self._pair_name(pairs, key)}</b>\n'
+                         + table(self._ladder_rows(row)))
             if row.get('positions'):
                 buttons.append([(f'Close all: {row.get("name") or key}',
                                  'flatten_ask', (key,))])
@@ -564,12 +869,12 @@ class Bot:
             parts.append('No ladders are configured.')
         check = snapshot.get('pnl_check') or {}
         if check.get('ours') is not None:
-            parts.append('<b>Total</b>')
-            parts.append(table([('Open P&L', money(check.get('ours'))),
-                                ('MT5 says', money(check.get('theirs')))]))
+            parts.append('<b>Total</b>\n'
+                         + table([('Open P&L', money(check.get('ours'))),
+                                  ('MT5 says', money(check.get('theirs')))]))
         buttons.append([('Refresh', 'dashboard', ()),
                         ('Main menu', 'main', ())])
-        self.show(chat, message_id, '\n'.join(parts), buttons)
+        self.show(chat, message_id, '\n\n'.join(parts), buttons)
 
     def _ladder_rows(self, row):
         block = row.get('algo_block') or {}
@@ -660,12 +965,63 @@ class Bot:
                              f'{last.get("reason")}'))
         return rows
 
-    # kept for the shortcuts that used to open their own screens
     def on_status(self, chat, message_id):
         self.on_dashboard(chat, message_id)
 
     def on_positions(self, chat, message_id):
-        self.on_dashboard(chat, message_id)
+        snapshot, pairs = self._snapshot()
+        now = self.clock()
+        parts = [title('OPEN POSITIONS', now)]
+        buttons = []
+        for key, row in sorted(pairs.items()):
+            positions = row.get('positions') or []
+            if not positions:
+                continue
+            block = row.get('algo_block') or {}
+            levels = {p.get('position_id'): p
+                      for p in (block.get('positions') or [])}
+            for position in positions:
+                level = dict(levels.get(position.get('position_id')) or {})
+                if not level and position.get('exit'):
+                    level = {'break_even': position['exit'].get(
+                        'break_even'), 'tp': position['exit'].get('tp')}
+                parts.append(f'<b>{self._pair_name(pairs, key)}</b>\n'
+                             + table(position_rows(position, row, level,
+                                                   now)))
+            buttons.append([(f'Close all: {row.get("name") or key}',
+                             'flatten_ask', (key,))])
+        if len(parts) == 1:
+            parts.append('No open positions.')
+        buttons.append([('Refresh', 'positions', ()),
+                        ('Main menu', 'main', ())])
+        self.show(chat, message_id, '\n\n'.join(parts), buttons)
+
+    def on_balance(self, chat, message_id):
+        snapshot, _ = self._snapshot()
+        parts = [title('ACCOUNT BALANCE', self.clock())]
+        for name, info in sorted((snapshot.get('accounts') or {}).items()):
+            if not info:
+                parts.append(f'<b>{esc(name)}</b>\n'
+                             + table([('Status', 'NOT ANSWERING')]))
+                continue
+            currency = info.get('currency') or ''
+
+            def amount(field):
+                value = info.get(field)
+                return '—' if value is None else \
+                    f'{float(value):,.2f} {currency}'.strip()
+            level = info.get('margin_level')
+            parts.append(f'<b>{esc(name)}</b>\n' + table([
+                ('Balance', amount('balance')),
+                ('Equity', amount('equity')),
+                ('Margin used', amount('margin')),
+                ('Free margin', amount('margin_free')),
+                ('Margin level', f'{float(level):,.0f}%' if level else '—'),
+                ('Floating P&L', money(info.get('profit')))]))
+        if len(parts) == 1:
+            parts.append('No accounts are reporting.')
+        self.show(chat, message_id, '\n\n'.join(parts),
+                  [[('Refresh', 'balance', ()), ('Main menu', 'main', ())]])
 
     # -- the Algo mode (in Settings) -------------------------------------------------
 
@@ -676,8 +1032,8 @@ class Bot:
             return self.show(chat, message_id, f'No ladder {esc(key)}.',
                              [[('Main menu', 'main', ())]])
         current = mode_word(row)
-        text = (f'<b>SETTINGS: {self._pair_name(pairs, key)}</b>\n'
-                f'<b>Algo mode</b>\n'
+        text = (title('SETTINGS  ·  ALGO MODE', self.clock()) + '\n'
+                f'<b>{self._pair_name(pairs, key)}</b>\n'
                 + table([('Current', MODE_WORDS[current]), None,
                          ('Off', 'nothing is watched or sent'),
                          ('Dry run', 'collects data, warms up and '
@@ -797,12 +1153,114 @@ class Bot:
 
     # -- settings: a ladder, then a section, then a setting ---------------------------
 
+    def _ladders(self, pairs):
+        return sorted(pairs.items())
+
+    def on_settings_all(self, chat):
+        """Every setting of every ladder, with the key `/set` takes - one
+        message per ladder, the way Stat_Arb_W3 lists its own."""
+        _, pairs = self._snapshot()
+        ladders = self._ladders(pairs)
+        if not ladders:
+            return self.send(chat, 'No ladders are configured.')
+        for number, (key, row) in enumerate(ladders, 1):
+            saved = self.desk.config_pair(key)
+            lines = [title(f'SETTINGS  ·  {number}. '
+                           f'{row.get("name") or key}', self.clock()),
+                     f'<b>Algo mode</b>  <code>'
+                     f'{MODE_WORDS[mode_word(row)]}</code>  mode']
+            for heading, fields in SECTIONS.values():
+                lines.append('')
+                lines.append(f'<b>{esc(heading.upper())}</b>')
+                for field in fields:
+                    value = self._shown(field, self._current(row, saved,
+                                                              field))
+                    unit = UNITS.get(field, '') \
+                        if isinstance(value, (int, float)) else ''
+                    # The unit follows the value, so the label drops its
+                    # own "(min)", "(spreads)" and the like.
+                    label = FIELD[field][1].split(' (')[0]
+                    lines.append(f'<b>{esc(label)}</b>  '
+                                 f'<code>{esc(value)}{esc(unit)}</code>  '
+                                 f'{esc(field)}')
+            self.send(chat, '\n'.join(lines),
+                      [[(f'Change: {row.get("name") or key}',
+                         'settings_pair', (key,))]])
+        if len(ladders) == 1:
+            how = ('To change: /set &lt;key&gt; &lt;value&gt;\n'
+                   'Example: /set entry_z 2.5\n'
+                   'Algo mode: /set mode off | dry | live')
+        else:
+            how = ('To change: /set &lt;ladder&gt; &lt;key&gt; &lt;value&gt;'
+                   '\nExample: /set 1 entry_z 2.5\n'
+                   'Algo mode: /set 1 mode off | dry | live\n'
+                   + '\n'.join(f'Ladder {n}: {esc(r.get("name") or k)}'
+                                for n, (k, r) in enumerate(ladders, 1)))
+        self.send(chat, how + '\nEvery change asks you to confirm first.',
+                  [[('Main menu', 'main', ())]])
+
+    def _set_command(self, chat, words):
+        """`/set [ladder] <key> <value>` - parsed, checked, and then put
+        to the same Confirm / Cancel a button would."""
+        _, pairs = self._snapshot()
+        ladders = self._ladders(pairs)
+        usage = ('Use: /set ' + ('' if len(ladders) == 1 else '<ladder> ')
+                 + '&lt;key&gt; &lt;value&gt; - send /settings for the keys.')
+        if len(words) == 2 and len(ladders) == 1:
+            key = ladders[0][0]
+            field, raw = words
+        elif len(words) == 3:
+            pick, field, raw = words
+            key = None
+            if pick.isdigit() and 1 <= int(pick) <= len(ladders):
+                key = ladders[int(pick) - 1][0]
+            else:
+                for k, r in ladders:
+                    if pick.lower() in (k.lower(),
+                                        str(r.get('name') or '').lower()):
+                        key = k
+            if key is None:
+                return self.send(chat, f'<b>Not changed.</b> No ladder '
+                                       f'{esc(pick)}. {usage}')
+        else:
+            return self.send(chat, f'<b>Not changed.</b> {usage}')
+        field = field.lower()
+        if field == 'mode':
+            choice = {'off': 'NONE', 'dry': 'ALGO', 'dryrun': 'ALGO',
+                      'dry_run': 'ALGO', 'live': 'ALGO_LIVE'} \
+                .get(raw.lower())
+            if choice is None:
+                return self.send(chat, '<b>Not changed.</b> mode is off, '
+                                       'dry or live.')
+            return self.on_algo_ask(chat, None, key, choice)
+        if field not in FIELD:
+            return self.send(chat, f'<b>Not changed.</b> No setting '
+                                   f'{esc(field)}. {usage}')
+        kind = FIELD[field][3]
+        if kind == 'bool':
+            value = {'on': True, 'true': True, 'yes': True, '1': True,
+                     'off': False, 'false': False, 'no': False,
+                     '0': False}.get(raw.lower())
+            if value is None:
+                return self.send(chat, f'<b>Not changed.</b> '
+                                       f'{esc(field)} is on or off.')
+            return self.on_set_ask(chat, None, key, field, value)
+        if isinstance(kind, list):
+            for code, word in kind:
+                if raw.lower() in (code.lower(), word.lower()):
+                    return self.on_set_ask(chat, None, key, field, code)
+            return self.send(chat, f'<b>Not changed.</b> {esc(field)} is '
+                                   + ' | '.join(code for code, _ in kind)
+                                   + '.')
+        return self._typed_value(chat, key, field, raw)
+
     def on_settings_list(self, chat, message_id):
         _, pairs = self._snapshot()
         buttons = [[(row.get('name') or key, 'settings_pair', (key,))]
                    for key, row in sorted(pairs.items())]
         buttons.append([('Main menu', 'main', ())])
-        self.show(chat, message_id, '<b>SETTINGS</b>\nSelect a ladder.',
+        self.show(chat, message_id, title('SETTINGS', self.clock())
+                  + '\nSelect a ladder.',
                   buttons)
 
     def on_settings_pair(self, chat, message_id, key):
@@ -810,19 +1268,20 @@ class Bot:
         row = pairs.get(key) or {}
         buttons = [[(f'Algo mode: {MODE_WORDS[mode_word(row)]}',
                      'algo_pair', (key,))]]
-        for section, (title, _) in SECTIONS.items():
-            buttons.append([(title, 'settings_section', (key, section))])
+        for section, (heading, _) in SECTIONS.items():
+            buttons.append([(heading, 'settings_section', (key, section))])
         buttons.append([('Back', 'settings_list', ()),
                         ('Main menu', 'main', ())])
         self.show(chat, message_id,
-                  f'<b>SETTINGS: {self._pair_name(pairs, key)}</b>\n'
+                  title('SETTINGS', self.clock()) + '\n'
+                  f'<b>{self._pair_name(pairs, key)}</b>\n'
                   f'Select a section.', buttons)
 
     def on_settings_section(self, chat, message_id, key, section):
         _, pairs = self._snapshot()
         row = pairs.get(key) or {}
         saved = self.desk.config_pair(key)
-        title, fields = SECTIONS[section]
+        heading, fields = SECTIONS[section]
         rows, buttons = [], []
         for field in fields:
             label = FIELD[field][1]
@@ -832,8 +1291,8 @@ class Bot:
         buttons.append([('Back', 'settings_pair', (key,)),
                         ('Main menu', 'main', ())])
         self.show(chat, message_id,
-                  f'<b>SETTINGS: {self._pair_name(pairs, key)}</b>\n'
-                  f'<b>{title}</b>\n' + table(rows)
+                  title(f'SETTINGS  ·  {heading.upper()}', self.clock())
+                  + f'\n<b>{self._pair_name(pairs, key)}</b>\n' + table(rows)
                   + '\nSelect a setting to change it.', buttons)
 
     def _back_to(self, key, field):
@@ -946,7 +1405,8 @@ class Bot:
         """Look once, and push what is new to every allowed user."""
         snapshot = self.desk.status() or {}
         events = self.desk.events(limit=50)
-        messages = self.watch.check(snapshot, events, self._price_problem)
+        messages = self.watch.check(snapshot, events, self._price_problem,
+                                    getattr(self.desk, 'position', None))
         for text in messages:
             for user in sorted(self.allowed):
                 if user in self.alerts_off:
@@ -963,8 +1423,8 @@ class AlertWatch:
     """What has changed since the last look, as messages.
 
     The first look only takes its bearings: history already in the
-    journal and problems already on screen when the bot starts are not
-    news.
+    journal, positions already open and problems already on screen when
+    the bot starts are not news.
     """
 
     def __init__(self, clock=time.time):
@@ -977,9 +1437,10 @@ class AlertWatch:
         self.errors = {}
         self.halts = {}
         self.blocked = {}           # pair -> (at, (side, reason), told_at)
+        self.positions = {}         # id -> pair key
         self.summary_day = None
 
-    def check(self, snapshot, events, price_problem):
+    def check(self, snapshot, events, price_problem, lookup=None):
         out = []
         now = self.clock()
         pairs = snapshot.get('pairs') or {}
@@ -991,23 +1452,66 @@ class AlertWatch:
         first = not self.started
         self.started = True
 
+        def name_of(key):
+            return (pairs.get(key) or {}).get('name') or key or ''
+
         # The engine itself.
         engine = snapshot.get('engine') or 'down'
         if not first and engine != self.engine:
-            out.append('[RESOLVED] Engine running again.' if engine == 'up' else
-                       f'[ALERT] Engine {esc(engine)}: '
-                       f'{esc(snapshot.get("engine_note"))}')
+            if engine == 'up':
+                out.append(title('SYSTEM', now) + '\n'
+                           + table([('Engine', 'Running again')]))
+            else:
+                out.append(title('SYSTEM ERROR', now) + '\n' + table([
+                    ('Engine', engine.upper()),
+                    ('Detail', snapshot.get('engine_note'))]))
         self.engine = engine
         dark = set(snapshot.get('dark_accounts') or ())
         if not first:
             for name in sorted(dark - self.dark):
-                out.append(f'[ALERT] Account {esc(name)} is not answering.')
+                out.append(title('SYSTEM ERROR', now) + '\n' + table([
+                    ('Account', name), ('Status', 'NOT ANSWERING')]))
             for name in sorted(self.dark - dark):
-                out.append(f'[RESOLVED] Account {esc(name)} is answering again.')
+                out.append(title('SYSTEM', now) + '\n' + table([
+                    ('Account', name), ('Status', 'answering again')]))
         self.dark = dark
 
+        # Positions that opened, and positions that closed.
+        current = {}
         for key, row in pairs.items():
-            name = esc(row.get('name') or key)
+            block = row.get('algo_block') or {}
+            levels = {p.get('position_id'): p
+                      for p in (block.get('positions') or [])}
+            for position in row.get('positions') or []:
+                pid = position.get('position_id')
+                if not pid:
+                    continue
+                current[pid] = key
+                if not first and pid not in self.positions:
+                    out.append(trade_entry_text(position, name_of(key),
+                                                levels.get(pid)))
+        if not first:
+            for pid, key in self.positions.items():
+                if pid in current:
+                    continue
+                record = {}
+                if lookup is not None:
+                    try:
+                        record = lookup(pid) or {}
+                    except Exception as e:
+                        logging.warning('[telegram] position %s: %s', pid, e)
+                if record.get('ok') and (record.get('position') or {}) \
+                        .get('closed_at'):
+                    out.append(trade_exit_text(record, name_of(key)))
+                else:
+                    out.append(title('TRADE EXIT', now) + '\n' + table([
+                        ('ID', pid), ('Ladder', name_of(key)),
+                        ('Detail', 'closed; the record is not readable '
+                                   'yet - see the desk')]))
+        self.positions = current
+
+        for key, row in pairs.items():
+            name = name_of(key)
             # A price problem, once it has lasted.
             problem = price_problem(row)
             was = self.problems.get(key)
@@ -1015,24 +1519,30 @@ class AlertWatch:
                 if was is None or was[0] != problem:
                     self.problems[key] = (problem, now, first)
                 elif not was[2] and now - was[1] >= PROBLEM_SETTLE_SEC:
-                    out.append(f'[WARNING] {name}: {esc(problem)}')
+                    out.append(title('FEED WARNING', now) + '\n' + table([
+                        ('Ladder', name), ('Problem', problem)]))
                     self.problems[key] = (problem, was[1], True)
             elif was is not None:
                 if was[2] and not first:
-                    out.append(f'[RESOLVED] {name}: prices are back to normal.')
+                    out.append(title('FEED RESTORED', now) + '\n' + table([
+                        ('Ladder', name), ('Prices', 'back to normal')]))
                 del self.problems[key]
             # Engine errors on the pair.
             errors = set(row.get('errors') or ())
             if not first:
                 for error in sorted(errors - self.errors.get(key, set())):
-                    out.append(f'[ALERT] {name}: {esc(error)}')
+                    out.append(title('ERROR', now) + '\n' + table([
+                        ('Ladder', name), ('Error', error)]))
             self.errors[key] = errors
             block = row.get('algo_block') or {}
             # A day's limit reached.
             halt = block.get('halt')
             if halt and halt != self.halts.get(key) and not first:
-                out.append(f'[LIMIT] {name}: no more Algo entries today - '
-                           f'{esc(halt)}')
+                out.append(title('DAILY LIMIT', now) + '\n' + table([
+                    ('Ladder', name),
+                    ('Entries', 'stopped for the rest of the day'),
+                    ('Reason', halt),
+                    ('Exits', 'still managed')]))
             self.halts[key] = halt
             # A signal held back.
             last = block.get('last_blocked')
@@ -1045,15 +1555,18 @@ class AlertWatch:
                               and told is not None
                               and now - told < BLOCKED_REPEAT_SEC)
                     if not first and not repeat:
-                        out.append(
-                            f'[BLOCKED] {name}: {side_words(last.get("side"))} '
-                            f'signal at z {num(last.get("z"), 2, True)} held '
-                            f'back — {esc(last.get("reason"))}')
+                        out.append(title('SIGNAL BLOCKED', now) + '\n'
+                                   + table([
+                                       ('Ladder', name),
+                                       ('Side', side_words(last.get('side'))),
+                                       ('Z-score', plain(last.get('z'), 2,
+                                                         True)),
+                                       ('Reason', last.get('reason'))]))
                         told = now
                     self.blocked[key] = (last['at'], what, told)
 
         for event in new_events if not first else ():
-            text = self._event(event, pairs)
+            text = self._event(event, pairs, now)
             if text:
                 out.append(text)
 
@@ -1064,60 +1577,77 @@ class AlertWatch:
         if broker_time and cutoff and broker_time[:5] >= cutoff \
                 and self.summary_day != today:
             if not first:
-                out.append(self._summary(snapshot))
+                out.append(self._summary(snapshot, now))
             self.summary_day = today
         return out
 
     @staticmethod
-    def _event(event, pairs):
+    def _event(event, pairs, now):
         kind = event.get('kind')
         detail = event.get('detail') or {}
         key = event.get('pair_key')
-        name = esc((pairs.get(key) or {}).get('name') or key or '')
+        name = (pairs.get(key) or {}).get('name') or key or ''
         if kind == 'algo_signal':
-            mode = 'LIVE' if detail.get('mode') == 'LIVE' else 'DRY'
-            action = detail.get('action')
-            if action == 'ENTER':
-                return (f'[ALGO {mode}] {name}: ENTER '
-                        f'{side_words(detail.get("side"))} at '
-                        f'{num(detail.get("spread"), 3)} (z '
-                        f'{num(detail.get("z"), 2, True)})')
-            return (f'[ALGO {mode}] {name}: EXIT '
-                    f'{side_words(detail.get("side"))} — '
-                    f'{esc(detail.get("reason") or "")}'
-                    + (f' · P&amp;L {money(detail.get("net_pnl"))}'
-                       if detail.get('net_pnl') is not None else ''))
+            mode = 'LIVE' if detail.get('mode') == 'LIVE' else 'DRY RUN'
+            side = side_words(detail.get('side'))
+            if detail.get('action') == 'ENTER':
+                return (title(f'SIGNAL  ·  ENTER {side}  ·  {mode}', now)
+                        + '\n' + table([
+                            ('Ladder', name),
+                            ('Spread', plain(detail.get('spread'), 4)),
+                            ('Z-score', plain(detail.get('z'), 2, True)),
+                            ('Action', 'order sent to both accounts'
+                             if mode == 'LIVE' else 'nothing sent')]))
+            return (title(f'SIGNAL  ·  EXIT {side}  ·  {mode}', now)
+                    + '\n' + table([
+                        ('Ladder', name),
+                        ('Reason', detail.get('reason')),
+                        ('Spread', plain(detail.get('spread'), 4)),
+                        ('Z-score', plain(detail.get('z'), 2, True)),
+                        ('Net P&L', usd(detail.get('net_pnl'))),
+                        ('Action', 'closing by ticket' if mode == 'LIVE'
+                         else 'nothing sent')]))
         if kind == 'algo_order':
             if detail.get('ok'):
-                return (f'[ORDER DONE] {name}: {esc(detail.get("action"))} '
-                        f'{side_words(detail.get("side"))} done')
-            return (f'[ORDER FAILED] {name}: {esc(detail.get("action"))} '
-                    f'{side_words(detail.get("side"))} - '
-                    f'{esc(detail.get("reason"))}')
+                return None          # the TRADE ENTRY / EXIT says it
+            return (title(f'ORDER FAILED  ·  '
+                          f'{detail.get("action") or ""}', now)
+                    + '\n' + table([
+                        ('Ladder', name),
+                        ('Side', side_words(detail.get('side'))),
+                        ('Reason', detail.get('reason'))]))
         if kind == 'algo_switch':
-            return (f'[ALGO MODE] {name}: {esc(detail.get("algo"))} '
-                    f'{esc(detail.get("mode") or "")}').strip()
+            return title('ALGO MODE', now) + '\n' + table([
+                ('Ladder', name),
+                ('Mode', MODE_WORDS.get(
+                    'OFF' if detail.get('algo') != 'ALGO' else
+                    ('LIVE' if detail.get('mode') == 'LIVE' else 'DRY'),
+                    detail.get('algo')))])
         if kind == 'refused':
-            return f'[REFUSED] {name}: {esc(detail.get("reason"))}'
+            return title('ORDER REFUSED', now) + '\n' + table([
+                ('Ladder', name), ('Reason', detail.get('reason'))])
         if kind in ('reconcile', 'unclaimed_closed', 'recovery', 'adopted'):
             summary = ', '.join(f'{k}={v}' for k, v in list(detail.items())[:4])
-            return f'[INFO] {esc(kind)} {name}: {esc(summary)}'
+            return title('RECONCILER', now) + '\n' + table([
+                ('Event', kind), ('Ladder', name or '—'),
+                ('Detail', summary)])
         return None
 
     @staticmethod
-    def _summary(snapshot):
-        parts = ['<b>DAILY SUMMARY</b> (session cutoff)']
+    def _summary(snapshot, now=None):
+        parts = [title('END OF DAY', now)]
         for key, row in sorted((snapshot.get('pairs') or {}).items()):
             block = row.get('algo_block') or {}
             day = block.get('day') or {}
-            parts.append(f'<b>{esc(row.get("name") or key)}</b>')
-            parts.append(table([
+            parts.append(f'<b>{esc(row.get("name") or key)}</b>\n' + table([
                 ('Algo', MODE_WORDS[mode_word(row)]),
-                ('Trades today', day.get('trades') or 0),
-                ('P&L today', money(day.get('pnl'))),
-                ('Net', plain(row.get('net_position'), 2, True)),
-                ('Open P&L', money(row.get('open_pnl')))]))
-        return '\n'.join(parts)
+                ('Trades', day.get('trades') or 0),
+                ('P&L', usd(day.get('pnl'))),
+                ('Losses in row', day.get('losses_row') or 0),
+                None,
+                ('Net position', plain(row.get('net_position'), 2, True)),
+                ('Open P&L', usd(row.get('open_pnl')))]))
+        return '\n\n'.join(parts)
 
 
 def start(app, env=None, api=None):

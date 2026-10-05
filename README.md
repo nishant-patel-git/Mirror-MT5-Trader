@@ -217,23 +217,37 @@ as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
 ## Telegram — the desk from a phone
 
 Optional. With a bot token in `.env` the web process also runs a Telegram
-bot. Plain text, no icons, three places:
+bot, written the way Stat_Arb_W3 writes its own: a heading with the time
+(`OPEN POSITIONS  ·  14:02:11 UTC`), then a bold label and its value in a box
+for every figure, plain words, no icons. `/start` is the menu, with buttons
+and the command list:
 
-- **Dashboard** (`/dashboard`): everything to watch on one screen. System
-  (engine, broker time and cutoff, each account's equity and margin level),
-  then per ladder: feed, prices, Algo mode and state, warm-up, stretch,
-  entry levels and what is armed, Edge / Regime / Trend / Ready, the open
-  position with its TP / SL / BE, today's trades and P&L, and the last
-  blocked signal. **Close all** per ladder holding a position.
-- **Settings** (`/settings`): pick a ladder, then a section:
-  - *Algo mode*: Off / Dry run (data collection, sends nothing) / LIVE;
-  - *Entry*: entry z, direction, Algo qty, re-entry, max entry z, warm-up,
-    cooldown, no entries before the cutoff;
-  - *Filters*: Edge, Regime, Trend;
-  - *Exits*: take profit, stop loss, back to mean, z-stop, time stop;
-  - *Daily limits*: trades, losses in a row, loss limit;
-  - *Costs and session*: commission per lot (A and B), overnight.
-- **Alerts on/off** (`/alerts`) and **KILL ALL**.
+- `/dashboard`: everything to watch on one screen - the system (engine,
+  broker time, cutoff, each account), then per ladder its feed, prices, Algo
+  mode and state, warm-up, stretch, entry and what is armed, filters, the
+  open position with TP / SL / BE, today, and the last blocked signal.
+- `/positions`: each open position in full - size and lots per leg,
+  notional, margin and leverage, entry and now per leg (with % change),
+  entry and current spread with z, the move with or against, net P&L, the
+  BE / TP / SL levels and what each is worth, age, slippage. **Close all**
+  per ladder.
+- `/balance`: each account's balance, equity, margin used and free, margin
+  level, floating P&L.
+- `/settings`: every setting of every ladder with the key `/set` takes;
+  `/set <key> <value>` (or `/set <ladder> <key> <value>` with more than one
+  ladder) changes one, `/set mode off | dry | live` switches the Algo. The
+  **Settings** button does the same by sections: Algo mode, Entry, Filters,
+  Exits, Daily limits, Costs and session.
+- `/alerts` on / off, `/ping`, and **KILL ALL**.
+
+Alerts, to every allowed user: **TRADE ENTRY** when a position opens (legs,
+notional, margin, entry spread and z, TP / SL / BE and what each is worth),
+**TRADE EXIT** when it closes (each leg in and out, the spread both ways,
+gross, commission, net, slippage, then an ANALYSIS: outcome, peak and trough
+with when, how much of the best it kept, hold time, z path), **SIGNAL** for
+the Algo's entries and exits, **SIGNAL BLOCKED**, **ORDER FAILED** with the
+broker's words, **FEED WARNING / RESTORED**, **SYSTEM ERROR**, **DAILY LIMIT**
+and **END OF DAY** at the session cutoff.
 
 Every action asks Confirm / Cancel first; LIVE asks twice. Buttons expire
 after ten minutes. It goes through the web app's own routes, so every

@@ -482,6 +482,37 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         return jsonify(dict(body, ok=True, days=days, pair=pair_key,
                             names=names))
 
+    @app.get('/api/position/<position_id>')
+    def api_position(position_id):
+        """One position as recorded, with what its message needs that the
+        record alone does not hold: each leg's CLOSING price from the
+        broker's own closing deals, and the Algo's z at both ends."""
+        db = store()
+        if db is None:
+            return jsonify({'ok': False,
+                            'error': 'the database could not be opened'}), 503
+        row = db.position(position_id)
+        if row is None:
+            return jsonify({'ok': False, 'error': 'no such position'}), 404
+        exits = {}
+        for leg in ('leg_a', 'leg_b'):
+            fill = row.get(leg) or {}
+            try:
+                exits[leg] = db.closing_price(fill.get('account'),
+                                              fill.get('position_tickets'))
+            except Exception as e:                # a journal mid-write
+                logging.error('closing price of %s: %s', position_id, e)
+                exits[leg] = None
+        opened = row.get('opened_at') or 0
+        events = [e for e in db.events_between(
+            ('algo_signal', 'algo_order'), opened - 120.0,
+            (row.get('closed_at') or time.time()) + 60.0)
+            if e.get('pair_key') == row.get('pair_key')]
+        entry_z, exit_z = analysis.algo_z(events)
+        return jsonify({'ok': True, 'position': row, 'exit_prices': exits,
+                        'entry_z': entry_z.get(position_id),
+                        'exit_z': exit_z.get(position_id)})
+
     @app.get('/api/slippage')
     def api_slippage():
         body, error = slippage_report()
