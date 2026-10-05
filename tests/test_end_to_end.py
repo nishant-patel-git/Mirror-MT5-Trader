@@ -573,6 +573,53 @@ def test_the_slippage_report_is_on_the_screen(desk, browser_page, round_turn):
     assert page.errors == []
 
 
+def test_the_analysis_covers_the_round_turn_just_traded(desk, round_turn):
+    """The Analysis tab's report, over the trade this module made: in
+    the summary, in the journal with both legs, and nothing invented
+    for what was not measured."""
+    app = create_app(desk.paths['status'], desk.paths['commands'],
+                     desk.paths['results'], desk.paths['config'],
+                     desk.paths['db'])
+    app.config.update(TESTING=True)
+
+    body = app.test_client().get('/api/analysis?days=1').get_json()
+
+    assert body['ok']
+    assert body['summary']['closed'] == 1
+    assert body['summary']['net_pnl'] is not None
+    [trip] = body['journal']
+    assert trip['pair_key'] == 'XAUUSD_|GC1226'
+    assert trip['entry_spread'] is not None and trip['exit_spread'] is not None
+    assert trip['leg_a']['entry'] is not None
+    assert trip['cum_pnl'] == pytest.approx(trip['pnl'])
+    # A manual trade has no Algo z at either end — a dash, not 0.
+    assert trip['entry_z'] is None
+    assert body['drawdown']['trades'] == 1
+
+
+def test_the_analysis_tab_is_on_the_screen(desk, browser_page, round_turn):
+    page = browser_page
+    page.evaluate("""() => {
+        window.MT5Trader.state.open = ['monitor:'];
+        window.MT5Trader.state.monitorTab = 'analysis';
+        window.MT5Trader.state.analysis = null;
+        window.MT5Trader.state.analysisDays = 1;
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_function(
+        "() => document.querySelector('.monitor .pane').textContent"
+        ".includes('Trade journal')", timeout=8000)
+    text = page.text_content('.monitor .pane')
+    for heading in ('Summary', 'Drawdown', 'Take / hold calibration',
+                    'What if held?', 'Backtest', 'Z-score excursions',
+                    'Trade journal'):
+        assert heading in text, heading
+    assert '1 closed' in text
+    # The tab button is there for the trader to find.
+    assert page.locator('.monitor .tabs button[data-tab="analysis"]').count() == 1
+    assert page.errors == []
+
+
 def test_a_session_with_nothing_traded_is_not_a_slippage_of_zero(desk,
                                                                   tmp_path):
     """The report opens on an account that has done nothing, and says

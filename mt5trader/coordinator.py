@@ -20,7 +20,7 @@ import threading
 import time
 from datetime import datetime
 
-from . import algo as algo_module, atomicfile, carry, \
+from . import algo as algo_module, analysis, atomicfile, carry, costs, \
     config as config_module, depth as depth_book, fairvalue, hedgeratio, \
     sizing, takeprofit
 from . import book as book_module
@@ -84,6 +84,16 @@ class Coordinator:
         #: journal. None means run without one — the tests that do not
         #: care, and nothing else.
         self.store = store
+        #: The Analysis tab's live trackers (see `_track`): when each open
+        #: position's extremes were last saved, the open ids per ladder
+        #: last pass (a missing one has closed), the running what-if
+        #: shadows, and the z-score excursion counters.
+        self._extremes_saved = {}
+        self._open_ids = {}
+        self._shadows = None
+        self._shadow_saved = {}
+        self._excursions = {}
+        self._excursions_saved = {}
         #: What recovery found at startup, and what it could not claim.
         self.recovery = {'recovered': 0, 'unclaimed': [], 'complete': False}
         self._last_journal = None
@@ -564,7 +574,8 @@ class Coordinator:
             md['feed_badge'] = _badge(md, stale, jumped)
             self._observe_session(key, md, pair)
             self.market[key] = md
-            self._work_algo(pair, md)
+            body = self._work_algo(pair, md)
+            self._track(pair, md, body)
             # LIMIT-mode orders are worked on the SAME pass that priced
             # them: a peg re-priced off a snapshot older than the one on
             # screen is a peg holding a level nobody is showing.
@@ -978,6 +989,142 @@ class Coordinator:
         self.broker_offset()           # measures each account when due
         cached = self._offsets.get(account)
         return cached[1] if cached else None
+
+    # -- the Analysis tab's trackers ------------------------------------------
+
+    #: How often a moving extreme, shadow or counter is written. Each is
+    #: also written at once on anything that matters: a close, a
+    #: milestone, a touch.
+    ANALYSIS_SAVE_SEC = 10.0
+
+    def _track(self, pair, md, body):
+        """Feed the Analysis tab. Observes only — it never decides or
+        sends anything, and a failure here never stops the poll."""
+        try:
+            now = self.clock()
+            settings = pair.exit_settings(self.config.settings)
+            self._track_positions(pair, md, settings, now)
+            self._track_shadows(pair, md, now)
+            self._track_excursions(pair, md, body, now)
+        except Exception as e:
+            logging.exception('[ANALYSIS %s] skipped this pass: %s',
+                              pair.key, e)
+
+    def _track_positions(self, pair, md, settings, now):
+        open_ids = set()
+        for position in self.book.positions(pair.key):
+            open_ids.add(position.position_id)
+            _gross, net, _closing = mark_position(position, md, settings)
+            if analysis.observe_extremes(position, net, now):
+                last = self._extremes_saved.get(position.position_id)
+                if last is None or now - last >= self.ANALYSIS_SAVE_SEC:
+                    self._extremes_saved[position.position_id] = now
+                    self.remember(position)
+        before = self._open_ids.get(pair.key)
+        self._open_ids[pair.key] = open_ids
+        for position_id in (before or set()) - open_ids:
+            self._extremes_saved.pop(position_id, None)
+            position = self.book.position(position_id)
+            if position is None or position.is_open:
+                continue
+            self.remember(position)          # its final extremes
+            self._arm_shadow(pair, position, settings, now)
+
+    def _arm_shadow(self, pair, position, settings, now):
+        fees = costs.mark_fees(
+            position.leg_a.volume if position.leg_a else 0.0,
+            position.leg_b.volume if position.leg_b else 0.0, settings)
+        pct = settings.get('TP_TARGET_PCT_OF_MARGIN')
+        target = None
+        if pct and position.entry_margin:
+            target = (float(pct) / 100.0 * float(position.entry_margin)
+                      * float(position.quantity or 1.0))
+        watch = analysis.arm_shadow(position, fees, target, now)
+        if watch is None:
+            return
+        self._shadow_list().append(watch)
+        self._save_shadow(watch, now)
+
+    def _shadow_list(self):
+        if self._shadows is None:
+            self._shadows = []
+            if self.store is not None:
+                try:
+                    self._shadows = self.store.shadows(active_only=True)
+                except Exception as e:
+                    logging.error('could not read the shadows: %s', e)
+        return self._shadows
+
+    def _save_shadow(self, watch, now):
+        self._shadow_saved[watch['position_id']] = now
+        if self.store is not None:
+            try:
+                self.store.save_shadow(watch)
+            except Exception as e:
+                logging.error('could not save a shadow: %s', e)
+
+    def _track_shadows(self, pair, md, now):
+        watches = self._shadow_list()
+        for watch in list(watches):
+            if watch.get('pair_key') != pair.key:
+                continue
+            milestones = (watch['reverted_be'], watch['reverted_target'])
+            closing = executable_spread(md, SpreadSide(watch['side']),
+                                        closing=True) if md else None
+            if not analysis.update_shadow(watch, closing, now):
+                continue
+            last = self._shadow_saved.get(watch['position_id'])
+            if watch['done'] or milestones != (watch['reverted_be'],
+                                               watch['reverted_target']) \
+                    or last is None or now - last >= self.ANALYSIS_SAVE_SEC:
+                self._save_shadow(watch, now)
+            if watch['done']:
+                watches.remove(watch)
+                self._shadow_saved.pop(watch['position_id'], None)
+
+    def _excursion(self, key, now):
+        tracker = self._excursions.get(key)
+        if tracker is None:
+            saved = None
+            if self.store is not None:
+                try:
+                    saved = self.store.excursions().get(key)
+                except Exception as e:
+                    logging.error('could not read the excursions: %s', e)
+            tracker = self._excursions[key] = analysis.ZExcursions(saved, now)
+        return tracker
+
+    def _track_excursions(self, pair, md, body, now):
+        """z on the Algo's OWN band — so only while its Algo is on."""
+        if not body or not md or md.get('mid_spread') is None \
+                or md.get('jump_reason'):
+            return
+        mean, sigma = body.get('mean'), body.get('sigma')
+        if mean is None or not sigma:
+            return
+        tracker = self._excursion(pair.key, now)
+        what = tracker.tally((md['mid_spread'] - mean) / sigma, now)
+        last = self._excursions_saved.get(pair.key)
+        if what == 'event' or (what and (
+                last is None or now - last >= self.ANALYSIS_SAVE_SEC)):
+            self._save_excursions(pair.key, tracker, now)
+
+    def _save_excursions(self, key, tracker, now):
+        self._excursions_saved[key] = now
+        if self.store is not None:
+            try:
+                self.store.save_excursions(key, tracker.to_dict())
+            except Exception as e:
+                logging.error('could not save the excursions: %s', e)
+
+    def reset_excursions(self, pair_key=None):
+        """Zero the z-score excursion counters (one ladder, or all)."""
+        now = self.clock()
+        keys = [pair_key] if pair_key else list(self.config.pairs)
+        for key in keys:
+            tracker = self._excursions[key] = analysis.ZExcursions(None, now)
+            self._save_excursions(key, tracker, now)
+        return {'ok': True, 'reset': keys}
 
     def _work_algo(self, pair, md):
         """Feed this pass's market to the ladder's Algo, if it is on.

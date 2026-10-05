@@ -141,6 +141,25 @@ CREATE TABLE IF NOT EXISTS algo_warmup (
     at              REAL NOT NULL
 );
 
+-- The Analysis tab's what-if-held shadows: a closed position marked on
+-- its own entry for an hour more. One JSON row per watch, so a restart
+-- picks up the ones still running.
+CREATE TABLE IF NOT EXISTS shadow_watches (
+    position_id     TEXT PRIMARY KEY,
+    pair_key        TEXT,
+    armed_at        REAL NOT NULL,
+    done            INTEGER NOT NULL DEFAULT 0,
+    data            TEXT NOT NULL
+);
+
+-- The Analysis tab's z-score excursion counters, per ladder, since the
+-- last reset.
+CREATE TABLE IF NOT EXISTS z_excursions (
+    pair_key        TEXT PRIMARY KEY,
+    at              REAL NOT NULL,
+    data            TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS algo_candles (
     pair_key        TEXT NOT NULL,
     timeframe_sec   REAL NOT NULL,
@@ -198,6 +217,12 @@ class Store:
         # The margin per spread frozen when the position was first
         # priced; NULL on older rows, which freeze on their next read.
         ('positions', 'entry_margin', 'REAL'),
+        # The trade's best and worst net P&L while open (MFE / MAE),
+        # and the minute each was reached. NULL before they were kept.
+        ('positions', 'peak_pnl', 'REAL'),
+        ('positions', 'peak_min', 'REAL'),
+        ('positions', 'trough_pnl', 'REAL'),
+        ('positions', 'trough_min', 'REAL'),
     )
 
     def _add_missing_columns(self, connection):
@@ -226,8 +251,9 @@ class Store:
                     exit_spread, spread_units, order_type, opened_at,
                     closed_at, close_reason, realized_pnl, entry_slippage,
                     exit_slippage, click_to_on_ms, naked_ms, leg_a, leg_b,
-                    source, entry_margin)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    source, entry_margin, peak_pnl, peak_min, trough_pnl,
+                    trough_min)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (row['position_id'], row['pair_key'], row['side'],
                  row['quantity'], row['entry_spread'], row['exit_spread'],
                  row['spread_units'], row['order_type'], row['opened_at'],
@@ -235,7 +261,9 @@ class Store:
                  row['entry_slippage'], row['exit_slippage'],
                  row['click_to_on_ms'], row.get('naked_ms'),
                  json.dumps(row['leg_a']), json.dumps(row['leg_b']),
-                 row.get('source'), row.get('entry_margin')))
+                 row.get('source'), row.get('entry_margin'),
+                 row.get('peak_pnl'), row.get('peak_min'),
+                 row.get('trough_pnl'), row.get('trough_min')))
         return position
 
     def remember_tickets(self, rows):
@@ -506,6 +534,65 @@ class Store:
                 'LIMIT ?', (pair_key, float(timeframe_sec), float(beta),
                             int(limit))).fetchall()
         return [(row['bucket'], row['close']) for row in reversed(rows)]
+
+    # -- the Analysis tab ------------------------------------------------------
+
+    def save_shadow(self, watch):
+        with self._connect() as connection:
+            connection.execute(
+                'INSERT OR REPLACE INTO shadow_watches '
+                '(position_id, pair_key, armed_at, done, data) '
+                'VALUES (?,?,?,?,?)',
+                (watch['position_id'], watch.get('pair_key'),
+                 watch['armed_at'], 1 if watch.get('done') else 0,
+                 json.dumps(watch, default=str)))
+
+    def shadows(self, active_only=False, since=None, pair_key=None,
+                limit=500):
+        where, params = [], []
+        if active_only:
+            where.append('done = 0')
+        if since is not None:
+            where.append('armed_at >= ?')
+            params.append(since)
+        if pair_key:
+            where.append('pair_key = ?')
+            params.append(pair_key)
+        clause = ('WHERE ' + ' AND '.join(where)) if where else ''
+        with self._connect() as connection:
+            rows = connection.execute(
+                f'SELECT data FROM shadow_watches {clause} '
+                'ORDER BY armed_at DESC LIMIT ?', params + [limit]).fetchall()
+        return [json.loads(row['data']) for row in rows]
+
+    def save_excursions(self, pair_key, data):
+        with self._connect() as connection:
+            connection.execute(
+                'INSERT OR REPLACE INTO z_excursions (pair_key, at, data) '
+                'VALUES (?,?,?)', (pair_key, self.clock(), json.dumps(data)))
+
+    def excursions(self):
+        with self._connect() as connection:
+            rows = connection.execute(
+                'SELECT pair_key, data FROM z_excursions').fetchall()
+        return {row['pair_key']: json.loads(row['data']) for row in rows}
+
+    def events_between(self, kinds, start=None, end=None):
+        """Audit-trail rows of these kinds, oldest first."""
+        where = ['kind IN (%s)' % ','.join('?' * len(kinds))]
+        params = list(kinds)
+        if start is not None:
+            where.append('at >= ?')
+            params.append(start)
+        if end is not None:
+            where.append('at <= ?')
+            params.append(end)
+        with self._connect() as connection:
+            rows = connection.execute(
+                'SELECT * FROM events WHERE ' + ' AND '.join(where) +
+                ' ORDER BY at', params).fetchall()
+        return [dict(row, detail=json.loads(row['detail'] or '{}'))
+                for row in rows]
 
     def events(self, kind=None, limit=200):
         clause = 'WHERE kind = ?' if kind else ''

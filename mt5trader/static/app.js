@@ -39,6 +39,11 @@
     centringAgain: {},   // pair key -> a centring is waiting on layout
     filtered: {},        // pair key -> hide rows with nothing on them
     monitorTab: 'positions',
+    // The Analysis tab: the last report, when it was read, and what it
+    // is filtered to. The backtest's answer is kept here too, because
+    // the pane is redrawn on every snapshot.
+    analysis: null, analysisAt: 0, analysisDays: 7, analysisPair: '',
+    analysisBt: null, analysisBtDays: 5,
     // What the Reconciler tab's adopt form has selected. IN STATE, not
     // in the DOM: that pane is re-rendered from innerHTML on every
     // snapshot, so a half-filled form left in the markup would be
@@ -3500,7 +3505,8 @@
         '<button data-tab="fills">Fills</button>' +
         '<button data-tab="slippage">Slippage</button>' +
         '<button data-tab="accounts">Accounts</button>' +
-        '<button data-tab="reconcile">Reconciler</button></div>' +
+        '<button data-tab="reconcile">Reconciler</button>' +
+        '<button data-tab="analysis">Analysis</button></div>' +
         // `monitor-note`, not `note`: the panes have notes of their own,
         // and a bare `.note` selector reaches into them and overwrites
         // the first one it finds.
@@ -3523,6 +3529,17 @@
         if (e.target.classList.contains('all-sessions')) {
           state.slippageAll = e.target.checked;
           loadSlippage(true);
+        }
+        if (e.target.classList.contains('an-days')) {
+          state.analysisDays = Number(e.target.value);
+          loadAnalysis(true);
+        }
+        if (e.target.classList.contains('an-pair')) {
+          state.analysisPair = e.target.value;
+          loadAnalysis(true);
+        }
+        if (e.target.classList.contains('an-bt-days')) {
+          state.analysisBtDays = Number(e.target.value);
         }
         // Changing the PAIR clears the two tickets: they belong to that
         // pair's accounts, and carrying them over would leave a choice
@@ -3585,9 +3602,18 @@
     else if (state.monitorTab === 'accounts') {
       pane.innerHTML = accountsTable();
     }
+    else if (state.monitorTab === 'analysis') {
+      loadAnalysis();
+      pane.innerHTML = analysisPane();
+    }
     else { pane.innerHTML = reconcileTable(); }
     node.querySelector('.monitor-note').textContent =
-      state.monitorTab === 'slippage'
+      state.monitorTab === 'analysis'
+      ? 'Built from what is recorded: closed positions, the Algo\u2019s ' +
+        'own audit trail and the trackers. Nothing here sends an order. ' +
+        'A figure nobody measured is a dash, never 0 \u2014 trades closed ' +
+        'before this tab existed have no best or worst point.'
+      : state.monitorTab === 'slippage'
       ? 'Every figure here was MEASURED against the price that was ' +
         'clicked. Positive is a cost, at both ends. A position whose ' +
         'fill could not be priced is counted as unmeasured, never as ' +
@@ -4122,6 +4148,333 @@
       });
   }
 
+  // -- the Analysis tab ----------------------------------------------------
+
+  function loadAnalysis(force) {
+    var now = Date.now();
+    if (!force && state.analysis !== null && now - state.analysisAt < 5000) {
+      return;
+    }
+    state.analysisAt = now;
+    fetch('/api/analysis?days=' + state.analysisDays +
+          (state.analysisPair ? '&pair=' +
+           encodeURIComponent(state.analysisPair) : ''))
+      .then(function (r) { return r.json(); })
+      .then(function (body) {
+        state.analysis = body.ok ? body : {error: body.error};
+        render();
+      })
+      .catch(function (error) {
+        state.analysis = {error: 'the analysis could not be read: ' +
+                                 error.message};
+      });
+  }
+
+  function runAnalysisBacktest() {
+    /* The Algo's own backtest, for the ladder picked above. Kept in
+     * state: the pane is redrawn on every snapshot. */
+    var key = state.analysisPair;
+    if (!key) {
+      state.analysisBt = {html: 'pick one ladder above \u2014 a backtest ' +
+                                'replays one ladder\u2019s Algo', cls: 'down'};
+      return render();
+    }
+    var days = state.analysisBtDays;
+    state.analysisBt = {html: 'running on the last ' + days +
+                              ' days\u2026', cls: 'hint', running: true};
+    render();
+    function done(html, cls) {
+      state.analysisBt = {html: html, cls: cls || ''};
+      render();
+    }
+    fetch('/api/command', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({kind: 'algo_backtest',
+                            payload: {pair: key, days: days}})
+    }).then(function (r) { return r.json(); }).then(function (sent) {
+      if (!sent.ok) { return done(escapeHtml(sent.error || 'refused'), 'down'); }
+      var tries = 0;
+      (function poll() {
+        fetch('/api/result/' + sent.id).then(function (r) { return r.json(); })
+          .then(function (result) {
+            if (result && result.pending) {
+              if (++tries > 120) {
+                return done('no answer from the engine yet \u2014 try again',
+                            'down');
+              }
+              return window.setTimeout(poll, 250);
+            }
+            var data = (result && result.data) || {};
+            if (!result || result.ok === false || data.ok === false) {
+              return done('could not run: ' + escapeHtml(
+                (result && result.error) || data.reason || 'unknown'), 'down');
+            }
+            done(backtestHtml(data));
+          });
+      })();
+    }).catch(function (error) { done(escapeHtml(error.message), 'down'); });
+  }
+
+  function anTile(label, value, cls, title) {
+    return '<div class="an-tile"' + (title ? ' title="' + escapeHtml(title) +
+      '"' : '') + '><div class="an-val ' + (cls || '') + '">' + value +
+      '</div><div class="an-lbl">' + label + '</div></div>';
+  }
+
+  function anSign(value) {
+    return value === null || value === undefined ? '' :
+      (value > 0 ? 'up' : (value < 0 ? 'down' : ''));
+  }
+
+  function anPct(value, digits) {
+    return value === null || value === undefined ? DASH :
+      Number(value).toFixed(digits === undefined ? 1 : digits) + '%';
+  }
+
+  function anMin(value) {
+    return value === null || value === undefined ? DASH :
+      Number(value).toFixed(1) + ' min';
+  }
+
+  function anHeld(seconds) {
+    if (seconds === null || seconds === undefined) { return DASH; }
+    var s = Math.max(0, Math.round(seconds));
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    return h ? h + 'h ' + m + 'm' : (m ? m + 'm ' + (s % 60) + 's' : s + 's');
+  }
+
+  function anClock(at) {
+    if (!at) { return DASH; }
+    var d = new Date(at * 1000);
+    return d.toLocaleDateString(undefined, {month: 'short', day: 'numeric'}) +
+      ' ' + d.toLocaleTimeString(undefined, {hour12: false});
+  }
+
+  function anSide(side) {
+    return side === 'SELL' ? 'H to L' : (side === 'BUY' ? 'L to H' : (side || DASH));
+  }
+
+  function analysisPane() {
+    var a = state.analysis;
+    var pairs = state.snapshot.pairs || {};
+    var html = '<div class="analysis">';
+    html += '<div class="an-bar">Trades opened in the ' +
+      '<select class="an-days">' +
+      [[1, 'last day'], [7, 'last 7 days'], [30, 'last 30 days'],
+       [0, 'whole record']].map(function (o) {
+        return '<option value="' + o[0] + '"' +
+          (state.analysisDays === o[0] ? ' selected' : '') + '>' + o[1] +
+          '</option>';
+      }).join('') + '</select> on <select class="an-pair">' +
+      '<option value="">every ladder</option>' +
+      Object.keys(pairs).map(function (key) {
+        return '<option value="' + escapeHtml(key) + '"' +
+          (state.analysisPair === key ? ' selected' : '') + '>' +
+          escapeHtml(pairs[key].name || key) + '</option>';
+      }).join('') + '</select></div>';
+    if (a === null) {
+      return html + '<p class="hint">reading the record\u2026</p></div>';
+    }
+    if (a.error) {
+      return html + '<p class="down">' + escapeHtml(a.error) + '</p></div>';
+    }
+    var names = a.names || {};
+    function name(key) { return escapeHtml(names[key] || key || DASH); }
+
+    // 1. The summary.
+    var s = a.summary || {};
+    html += '<h4>Summary</h4><div class="an-tiles">' +
+      anTile('Trades', s.count || 0) +
+      anTile('Closed', s.closed || 0) +
+      anTile('Net P&amp;L', money(s.net_pnl), anSign(s.net_pnl),
+           'realized, after the commission the settings charge') +
+      anTile('Win rate', anPct(s.win_rate), '',
+           (s.wins || 0) + ' won, ' + (s.losses || 0) + ' lost') +
+      '</div>';
+
+    // 2. Drawdown, and each trade's worst and best point.
+    var d = a.drawdown || {};
+    html += '<h4>Drawdown &amp; excursion <small>\u2014 how bad it got, ' +
+      'and how good</small></h4><div class="an-tiles">' +
+      anTile('Max drawdown', d.max === null || d.max === undefined ? DASH
+           : money(-d.max), d.max ? 'down' : '',
+           'the worst fall of the running P&L from a peak, closed trades in ' +
+           'the order they closed') +
+      anTile('Worst trade', money(d.worst_trade), anSign(d.worst_trade),
+             'best: ' + money(d.best_trade)) +
+      anTile('Below the peak now', d.current === null || d.current === undefined
+           ? DASH : money(-d.current), d.current ? 'down' : '') +
+      anTile('Peak equity', money(d.peak_equity), 'up') + '</div>';
+    var rows = a.excursion || [];
+    html += '<table class="an-table"><thead><tr><th>Closed</th><th class="l">Pair</th>' +
+      '<th class="l">Side</th><th class="l">Exit</th>' +
+      '<th title="Maximum adverse excursion: the worst net P&L while open">' +
+      'MAE (worst)</th>' +
+      '<th title="Maximum favourable excursion: the best net P&L while open">' +
+      'MFE (best)</th><th>Net P&amp;L</th>' +
+      '<th title="How much of its best a WINNING trade kept: net / MFE">Kept</th>' +
+      '<th title="Minutes from the open to the best point">Best at</th>' +
+      '</tr></thead><tbody>';
+    if (!rows.length) {
+      html += '<tr><td colspan="9" class="hint">no closed trade with its ' +
+        'best and worst point yet \u2014 they are kept from this version on' +
+        '</td></tr>';
+    }
+    rows.forEach(function (r) {
+      html += '<tr><td>' + anClock(r.closed_at) + '</td><td class="l">' +
+        name(r.pair_key) + '</td><td class="l">' + anSide(r.side) +
+        '</td><td class="l">' + escapeHtml(r.exit_reason || DASH) + '</td>' +
+        '<td class="down">' + (r.mae === null ? DASH : money(-r.mae)) + '</td>' +
+        '<td class="up">' + money(r.mfe) + '</td>' +
+        '<td class="' + anSign(r.pnl) + '">' + money(r.pnl) + '</td>' +
+        '<td>' + anPct(r.utilisation_pct, 0) + '</td>' +
+        '<td>' + anMin(r.peak_min) + '</td></tr>';
+    });
+    html += '</tbody></table>';
+
+    // 3. Take / hold calibration.
+    var c = a.calibration || {};
+    var pk = c.peak_pctile || {};
+    html += '<h4>Take / hold calibration <small>\u2014 set the take-profit ' +
+      'from where trades actually peaked</small></h4><div class="an-tiles">' +
+      anTile('Trades', c.n || 0) +
+      anTile('Peak p50', money(pk['50']), '', 'half the trades got at least this far') +
+      anTile('Peak p70', money(pk['70'])) +
+      anTile('Peak p90', money(pk['90'])) +
+      anTile('Suggested take', money(c.suggested_take), 'up',
+           'the 65th percentile of peaks: about two trades in three got ' +
+           'at least this far') +
+      anTile('Suggested max hold', anMin(c.suggested_max_hold_min), '',
+           'the median minute the WINNERS peaked') + '</div>' +
+      '<p class="hint">Compare the suggested take with what TP % of margin ' +
+      'asks for on a trade. A target far above p70 is one most trades never ' +
+      'reach.' + (c.n && c.n < 20 ? ' Only ' + c.n + ' trade(s) so far: read ' +
+      'it as a hint, not a setting.' : '') + '</p>';
+
+    // 4. What-if-held shadow.
+    var sh = a.shadow || {};
+    html += '<h4>What if held? <small>\u2014 after an exit that was not ' +
+      'its target, the trade is marked for an hour more</small></h4>' +
+      '<div class="an-tiles">' +
+      anTile('Watching', sh.active || 0) +
+      anTile('Finished', sh.completed || 0) +
+      anTile('Came back to break-even', anPct(sh.revert_be_rate, 0)) +
+      anTile('Came back to the target', anPct(sh.revert_target_rate, 0)) +
+      anTile('Avg time to break-even', anMin(sh.avg_revert_min)) + '</div>' +
+      '<p class="hint">Often back to the target \u21d2 the exits were early ' +
+      '(a stop too tight, a cut winner). Rarely \u21d2 the exits were right ' +
+      'and the move was real.</p>';
+    var watches = sh.watches || [];
+    if (watches.length) {
+      html += '<table class="an-table"><thead><tr><th>Exited</th><th class="l">Pair</th>' +
+        '<th class="l">Side</th><th class="l">Exit</th><th>At exit</th><th>Best after</th>' +
+        '<th>Break-even</th><th>Target</th><th></th></tr></thead><tbody>';
+      watches.slice(0, 20).forEach(function (w) {
+        html += '<tr><td>' + anClock(w.armed_at) + '</td><td class="l">' +
+          name(w.pair_key) + '</td><td class="l">' + anSide(w.side) +
+          '</td><td class="l">' + escapeHtml(w.exit_reason || DASH) +
+          '</td><td class="' +
+          anSign(w.exit_pnl) + '">' + money(w.exit_pnl) + '</td>' +
+          '<td class="' + anSign(w.peak_net) + '">' + money(w.peak_net) +
+          (w.peak_min === null || w.peak_min === undefined ? ''
+           : ' <small>@' + w.peak_min + 'm</small>') + '</td>' +
+          '<td>' + (w.reverted_be ? 'yes, ' + w.be_min + 'm' : 'no') + '</td>' +
+          '<td>' + (w.target_net ? (w.reverted_target ? 'yes, ' +
+            w.target_min + 'm' : 'no') : DASH) + '</td>' +
+          '<td class="hint">' + (w.done ? 'done' : 'watching') + '</td></tr>';
+      });
+      html += '</tbody></table>';
+    }
+
+    // 5. The backtest.
+    var bt = state.analysisBt;
+    html += '<h4>Backtest <small>\u2014 the Algo\u2019s own, on MT5\u2019s ' +
+      'history; nothing is sent</small></h4><div class="an-bar">' +
+      (state.analysisPair ? escapeHtml((pairs[state.analysisPair] || {}).name ||
+        state.analysisPair) : '<span class="hint">pick one ladder above</span>') +
+      ' \u00b7 last <select class="an-bt-days">' +
+      [3, 5, 10].map(function (n) {
+        return '<option value="' + n + '"' +
+          (state.analysisBtDays === n ? ' selected' : '') + '>' + n +
+          ' days</option>';
+      }).join('') + '</select> <button class="btn an-bt-run"' +
+      (bt && bt.running ? ' disabled' : '') + '>Run backtest</button></div>' +
+      '<div class="an-bt-out ' + (bt ? bt.cls || '' : 'hint') + '">' +
+      (bt ? bt.html : 'The ladder\u2019s Algo must be on (Dry run is fine).') +
+      '</div>';
+
+    // 6. Z-score excursions.
+    var ex = a.z_excursions || {};
+    var keys = Object.keys(ex);
+    html += '<h4>Z-score excursions <small>\u2014 on the Algo\u2019s own ' +
+      'band, while it is on</small> <button class="btn an-reset">Reset</button>' +
+      '</h4>';
+    if (!keys.length) {
+      html += '<p class="hint">nothing counted yet \u2014 counting starts ' +
+        'when a ladder\u2019s Algo is on</p>';
+    }
+    keys.forEach(function (key) {
+      var e = ex[key];
+      var peak = (e.max_z === null || e.min_z === null) ? null :
+        Math.max(Math.abs(e.max_z), Math.abs(e.min_z));
+      html += '<div class="an-sub">' + name(key) + ' <small class="hint">since ' +
+        anClock(e.since) + '</small></div><div class="an-tiles">' +
+        anTile('Touched \u00b12\u03c3', e.touch_2_total, '',
+             '\u2191 ' + e.touch_2_up + '  \u2193 ' + e.touch_2_down) +
+        anTile('Touched \u00b13\u03c3', e.touch_3_total, '',
+             '\u2191 ' + e.touch_3_up + '  \u2193 ' + e.touch_3_down) +
+        anTile('Back to the mean', e.reversions, 'up',
+             'a 2\u03c3 stretch that came all the way back through 0') +
+        anTile('Peak |z|', peak === null ? DASH : peak.toFixed(2), '',
+             'max ' + fmt(e.max_z, 2) + ' / min ' + fmt(e.min_z, 2)) +
+        '</div>';
+      var events = (e.events || []).slice(0, 15);
+      if (events.length) {
+        html += '<table class="an-table"><tbody>' + events.map(function (ev) {
+          var label = {touch_2_up: 'touched +2\u03c3', touch_2_down:
+            'touched \u22122\u03c3', touch_3_up: 'touched +3\u03c3',
+            touch_3_down: 'touched \u22123\u03c3',
+            reversions: 'back to the mean'}[ev.type] || ev.type;
+          return '<tr><td>' + anClock(ev.at) + '</td><td class="l">' + label +
+            '</td><td>' + fmt(ev.z, 2) + '</td></tr>';
+        }).join('') + '</tbody></table>';
+      }
+    });
+
+    // 7. The journal.
+    var trips = a.journal || [];
+    var total = trips.length ? trips[0].cum_pnl : null;
+    html += '<h4>Trade journal <small>\u2014 ' + trips.length +
+      ' closed, running total ' + money(total) + '</small></h4>' +
+      '<table class="an-table"><thead><tr><th>Closed</th><th class="l">Pair</th>' +
+      '<th class="l">Side</th><th class="l">Who</th><th>Size</th><th>z in \u2192 out</th>' +
+      '<th>Spread in \u2192 out</th><th>Leg A in</th><th>Leg B in</th>' +
+      '<th>Held</th><th class="l">Exit</th><th>Net P&amp;L</th><th>Running</th>' +
+      '</tr></thead><tbody>';
+    if (!trips.length) {
+      html += '<tr><td colspan="13" class="hint">no closed trade in this ' +
+        'window</td></tr>';
+    }
+    trips.forEach(function (t) {
+      html += '<tr><td>' + anClock(t.closed_at) + '</td><td class="l">' +
+        name(t.pair_key) + '</td><td class="l">' + anSide(t.side) +
+        '</td><td class="l">' +
+        (t.source === 'ALGO' ? '<b>Algo</b>' : 'Manual') + '</td><td>' +
+        qty(t.quantity) + '</td><td>' + fmt(t.entry_z, 2) + ' \u2192 ' +
+        fmt(t.exit_z, 2) + '</td><td>' + fmt(t.entry_spread, 4) + ' \u2192 ' +
+        fmt(t.exit_spread, 4) + '</td><td>' +
+        (t.leg_a.side || '') + ' ' + fmt(t.leg_a.entry, 3) + '</td><td>' +
+        (t.leg_b.side || '') + ' ' + fmt(t.leg_b.entry, 3) + '</td><td>' +
+        anHeld(t.held_sec) + '</td><td class="l">' +
+        escapeHtml(t.exit_reason || DASH) +
+        '</td><td class="' + anSign(t.pnl) + '">' + money(t.pnl) +
+        '</td><td class="' + anSign(t.cum_pnl) + '">' + money(t.cum_pnl) +
+        '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+    return html;
+  }
+
   function timingRow(label, values, note) {
     if (!values || !values.length) {
       // `hint`, not `note`: the note style is a full-width banner, and
@@ -4345,6 +4698,19 @@
   function onMonitorClick(e) {
     var button = e.target.closest('button');
     if (!button) { return; }
+    if (button.classList.contains('an-bt-run')) {
+      return runAnalysisBacktest();
+    }
+    if (button.classList.contains('an-reset')) {
+      return ask('Reset the excursion counters?',
+        'This zeroes the \u00b12\u03c3 / \u00b13\u03c3 touch and ' +
+        'reversion counts' + (state.analysisPair ? ' for this ladder' :
+        ' on every ladder') + '. Trades and the journal are not touched.',
+        'Reset', function () {
+          send('reset_excursions', {pair: state.analysisPair || null},
+               function () { loadAnalysis(true); });
+        });
+    }
     var row = button.closest('tr');
     if (button.classList.contains('close-unclaimed')) {
       return ask('Close ' + button.dataset.account + ':' +

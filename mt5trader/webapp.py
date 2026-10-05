@@ -26,7 +26,7 @@ from datetime import date
 
 from flask import Flask, jsonify, render_template, request
 
-from . import atomicfile, config as cfg, diagnostics, fairvalue, \
+from . import analysis, atomicfile, config as cfg, diagnostics, fairvalue, \
     hedgeratio, sizing, slippage
 from .commands import CommandLog
 from .legs import RemoteLeg
@@ -433,6 +433,45 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
             logging.error('the journal could not be counted: %s', e)
             body['journal'] = None
         return body, None
+
+    # -- the Analysis tab ------------------------------------------------------
+
+    @app.get('/api/analysis')
+    def api_analysis():
+        """The Analysis tab, built from what is recorded: the positions
+        table (with each trade's extremes), the Algo's audit trail for
+        its z at both ends, the what-if shadows and the excursion
+        counters. Computes no price of its own.
+
+        `days`: trades OPENED in the last N days (0 = every one kept).
+        `pair`: one ladder, or all.
+        """
+        db = store()
+        if db is None:
+            return jsonify({'ok': False,
+                            'error': 'the database could not be opened'}), 503
+        try:
+            days = float(request.args.get('days', 7))
+        except ValueError:
+            days = 7.0
+        pair_key = request.args.get('pair') or None
+        now = time.time()
+        start = None if days <= 0 else now - days * 86400.0
+        positions = db.positions_between(start, None, pair_key=pair_key)
+        events = db.events_between(('algo_signal', 'algo_order'), start)
+        if pair_key:
+            events = [e for e in events if e.get('pair_key') == pair_key]
+        shadows = db.shadows(since=start, pair_key=pair_key)
+        excursions = db.excursions()
+        if pair_key:
+            excursions = {k: v for k, v in excursions.items()
+                          if k == pair_key}
+        raw = cfg.load_raw(config_path)
+        names = {key: (pair or {}).get('name') or key
+                 for key, pair in (raw.get('pairs') or {}).items()}
+        body = analysis.report(positions, events, shadows, excursions, now)
+        return jsonify(dict(body, ok=True, days=days, pair=pair_key,
+                            names=names))
 
     @app.get('/api/slippage')
     def api_slippage():

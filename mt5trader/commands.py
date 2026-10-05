@@ -340,6 +340,10 @@ class CommandRunner:
         return self.coordinator.algo_backtest(payload['pair'],
                                               payload.get('days', 5))
 
+    def _do_reset_excursions(self, payload):
+        """Zero the Analysis tab's z-score excursion counters."""
+        return self.coordinator.reset_excursions(payload.get('pair') or None)
+
     def _do_set_algo(self, payload):
         """NONE / FAIR_SPREAD / ALGO for one ladder, and ALGO's mode.
 
