@@ -91,6 +91,17 @@ clock, measured from the terminal rather than configured, and the page
 shows the broker's time and its offset from the machine. Unmeasured is
 not zero: with no measurement the cutoff does not fire, and says so.
 
+**Each ladder keeps its own hours** (ladder Settings: *Session open*,
+*Session close*, *Break start*, *Break end*, all HH:MM broker time). The
+close is that ladder's cutoff - DAY orders cancelled, the Overnight rule,
+the Algo's last entry, the backtest and the END OF DAY message. Outside
+the session and in the break the Algo takes no new entry (exits are never
+held), and a silent feed is expected rather than warned about or
+re-subscribed. Blank close is the desk-wide `OVERNIGHT_CLOSE_HOUR:MINUTE`
+(16:55); blank open is any time before the close; an open after the close
+is a session over midnight; the break takes both ends or neither. A
+ladder with nothing set behaves exactly as before.
+
 **Accounts** is the fifth monitor tab: equity, balance, credit, open
 P&L, margin used and free, margin level against the broker's own call
 and stop-out levels, and this system's own lots and units on each

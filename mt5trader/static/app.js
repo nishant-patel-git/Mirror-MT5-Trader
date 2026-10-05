@@ -1253,7 +1253,13 @@
     ['.ls-swap-a-long', 'swap_a_long_per_lot', 'text'],
     ['.ls-swap-a-short', 'swap_a_short_per_lot', 'text'],
     ['.ls-swap-b-long', 'swap_b_long_per_lot', 'text'],
-    ['.ls-swap-b-short', 'swap_b_short_per_lot', 'text']
+    ['.ls-swap-b-short', 'swap_b_short_per_lot', 'text'],
+    // This ladder's hours, HH:MM broker time. Blank is a real state:
+    // the desk-wide cutoff, any time before it, no break.
+    ['.ls-session-open', 'session_open', 'text'],
+    ['.ls-session-close', 'session_close', 'text'],
+    ['.ls-break-start', 'break_start', 'text'],
+    ['.ls-break-end', 'break_end', 'text']
 
   ];
 
@@ -1495,6 +1501,10 @@
         }
         input.value = (own === null || own === undefined) ? '' : own;
       });
+      // A blank close is the desk-wide cutoff: say which time that is.
+      var closeBox = pane.querySelector('.ls-session-close');
+      var deskCutoff = (state.snapshot.broker_clock || {}).cutoff;
+      if (closeBox && deskCutoff) { closeBox.placeholder = 'desk ' + deskCutoff; }
       // ...and the expiry rows follow whatever the pair-type control
       // NOW says. Reading `saved` here would put the note and the
       // enabled/disabled rows back to the file's answer even though

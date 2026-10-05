@@ -1130,6 +1130,26 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
             if problems:
                 return jsonify({'ok': False,
                                 'error': 'Algo: ' + '; '.join(problems)}), 400
+        # This ladder's hours: a time that will not parse is REFUSED with
+        # what was wrong, and a break needs both its ends.
+        from . import session as session_module
+        hours = {'session_open': 'Session open',
+                 'session_close': 'Session close',
+                 'break_start': 'Break start', 'break_end': 'Break end'}
+        for field, label in hours.items():
+            if field in payload:
+                try:
+                    session_module.parse_hhmm(payload[field])
+                except ValueError as e:
+                    return jsonify({'ok': False,
+                                    'error': f'{label}: {e}'}), 400
+                payload[field] = session_module.clean_hhmm(payload[field])
+        ends = [payload.get(f, pair.get(f)) for f in ('break_start',
+                                                       'break_end')]
+        if sum(1 for v in ends if v not in (None, '')) == 1:
+            return jsonify({'ok': False, 'error': (
+                'Break: give both a start and an end, or leave both '
+                'blank')}), 400
         resizing = ('clip_lots_a' in payload
                     and _changed(payload['clip_lots_a'],
                                  pair.get('clip_lots_a')))
@@ -1159,7 +1179,9 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                       'slippage_allowance', 'break_even_nights',
                       'tp_target_pct_of_margin',
                       'carry_rate_pct',
-                      'show_fair_window', 'algo_window', 'algo_params'):
+                      'show_fair_window', 'algo_window', 'algo_params',
+                      'session_open', 'session_close',
+                      'break_start', 'break_end'):
             if field in payload:
                 pair[field] = payload[field]
         # A date that will not parse is REPORTED and the old value kept:

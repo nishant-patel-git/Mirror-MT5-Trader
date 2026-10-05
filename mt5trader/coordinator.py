@@ -33,7 +33,8 @@ from .models import (ALGO_SOURCE, MAGIC_NUMBER, MANUAL, LegFill, OrderType,
                      SpreadPosition, SpreadSide)
 from .quoter import Quoter, quoting_leg
 from .reconcile import Reconciler
-from .session import SessionClock, day_orders, overnight_action
+from .session import (PairSession, SessionClock, day_orders,
+                      overnight_action)
 from .spread import (LevelSigma, QuoteAgeTracker, SpreadJumpTracker,
                      compute_spread, executable_spread, stale_quote)
 
@@ -564,7 +565,12 @@ class Coordinator:
                 self.config.get('MAX_SPREAD_JUMP_SIGMA'),
                 self.config.get('JUMP_SETTLE_SEC'))
             md['stale_reason'] = stale
-            if stale:
+            # A feed that is silent BECAUSE this ladder's market is shut
+            # - its break, or outside the hours set for it - is not a
+            # fault: no warning and no re-subscribe loop. Orders are
+            # still withheld on a stale price.
+            if stale and not PairSession(pair, self.config).quiet(
+                    self.session_clock.broker_now()):
                 self._log_stale(key, pair, md)
                 self._auto_refresh(key, md)
             md['jump_reason'] = jumped
@@ -1256,8 +1262,7 @@ class Coordinator:
                   'target_points': target,
                   'stop_points': self._algo_stop_points(pair, qty, k,
                                                         margin)}
-        cutoff = (int(self.config.get('OVERNIGHT_CLOSE_HOUR', 16)),
-                  int(self.config.get('OVERNIGHT_CLOSE_MINUTE', 55)))
+        cutoff = PairSession(pair, self.config).cutoff
         offset = self._offset_of(pair.account_a)
         result = backtest.run(rows, params, width, cost_in, levels, offset,
                               cutoff)
@@ -1289,14 +1294,12 @@ class Coordinator:
     def _algo_gates(self, pair, md):
         """What can hold an Algo ENTRY back on this pass."""
         health = (md or {}).get('guard_reason')
-        cutoff_min = None
         now = self.session_clock.broker_now()
-        if now is not None:
-            cutoff = now.replace(
-                hour=int(self.config.get('OVERNIGHT_CLOSE_HOUR', 16)),
-                minute=int(self.config.get('OVERNIGHT_CLOSE_MINUTE', 55)),
-                second=0, microsecond=0)
-            cutoff_min = (cutoff - now).total_seconds() / 60.0
+        # THIS ladder's hours: the minutes to its own next close, and -
+        # outside its session or in its break - why it may not enter.
+        hours = PairSession(pair, self.config)
+        cutoff_min = hours.minutes_to_close(now)
+        session = hours.entry_block(now)
         # The day the Algo's limits are counted over: the broker's, as
         # the session is; this machine's while that is unmeasured.
         day = (now or datetime.now()).date().isoformat()
@@ -1309,7 +1312,8 @@ class Coordinator:
             qty = algo_module.clean_params(pair.algo_params)['algo_qty']
             size = (self.executor.size(pair, md, qty) or {}).get('reason')
         return {'health': health, 'cutoff_min': cutoff_min, 'day': day,
-                'cost': self._algo_cost(pair), 'size': size}
+                'cost': self._algo_cost(pair), 'size': size,
+                'session': session}
 
     def _algo_cost(self, pair):
         """What one Algo trade costs besides the crossing, and `k`.
@@ -2540,6 +2544,9 @@ class Coordinator:
                 'exit_type': pair.exit_type.value,
                 'time_in_force': pair.time_in_force.value,
                 'overnight': pair.overnight.value,
+                # This ladder's own hours, and where in them it is now.
+                'session': PairSession(pair, self.config).describe(
+                    self.session_clock.broker_now()),
                 # The selected algo, and what it says. NONE publishes
                 # only its own name — a ladder running nothing costs
                 # nothing on the wire either.
@@ -2786,7 +2793,8 @@ class Coordinator:
         """
         events = []
         for key, pair in self.config.pairs.items():
-            if not self.session_clock.due(key):
+            hours = PairSession(pair, self.config)
+            if not self.session_clock.due(key, hours.cutoff):
                 continue
             self.session_clock.mark(key)
             # COUNT WHAT WAS ACTUALLY CANCELLED, not what was asked.
@@ -2823,10 +2831,15 @@ class Coordinator:
                 # actually in profit.
                 _gross, net_pnl, _closing = mark_position(
                     position, md, pair.exit_settings(self.config.settings))
+                # On the BROKER's clock - the one the cutoff fired on.
+                # This read this machine's own, so on a box hours behind
+                # the broker the cutoff fired and the overnight rule then
+                # found it "not yet", every day: EXIT_ALWAYS closed
+                # nothing.
                 verdict = overnight_action(
-                    pair.overnight, net_pnl, self.session_clock.now(),
-                    self.config.get('OVERNIGHT_CLOSE_HOUR'),
-                    self.config.get('OVERNIGHT_CLOSE_MINUTE'))
+                    pair.overnight, net_pnl,
+                    self.session_clock.broker_now() or
+                    self.session_clock.now(), *hours.cutoff)
                 if verdict is None:
                     continue
                 # Urgent: market, by ticket, never resting. And no guard
