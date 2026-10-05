@@ -472,6 +472,22 @@
               <option value="EXIT_IF_PROFIT">Exit if in profit</option>
               <option value="EXIT_ALWAYS">Exit anyway</option>
             </select></label>
+          <!-- THIS LADDER'S HOURS, on the broker's clock. An oil future
+               and a gold CFD do not keep the same day: blank close is
+               the desk-wide cutoff, blank open is any time before it,
+               and the break takes both ends or neither. -->
+          <label class="lsf" title="When this ladder's session starts, HH:MM broker time. Before it, the Algo takes no new entry and a silent feed is not a fault. Blank: any time before the close. An open after the close is a session that runs over midnight.">
+            <span>Session open</span>
+            <input class="ls-session-open" type="text" inputmode="numeric" placeholder="any" maxlength="5"></label>
+          <label class="lsf" title="This ladder's session cutoff, HH:MM broker time: DAY orders are cancelled, the Overnight rule runs and the Algo's last entry is before it. Blank: the desk-wide cutoff.">
+            <span>Session close</span>
+            <input class="ls-session-close" type="text" inputmode="numeric" placeholder="desk cutoff" maxlength="5"></label>
+          <label class="lsf" title="A daily break (a futures maintenance pause), HH:MM broker time: no Algo entries, and a silent feed is expected rather than a fault. Exits are never held. Both ends or neither.">
+            <span>Break start</span>
+            <input class="ls-break-start" type="text" inputmode="numeric" placeholder="none" maxlength="5"></label>
+          <label class="lsf" title="When the daily break ends, HH:MM broker time.">
+            <span>Break end</span>
+            <input class="ls-break-end" type="text" inputmode="numeric" placeholder="none" maxlength="5"></label>
           <label class="lsf"><span>Comm/lot A</span>
             <input class="ls-comm-a" type="number" min="0" step="0.01" placeholder="default"></label>
           <label class="lsf"><span>Comm/lot B</span>

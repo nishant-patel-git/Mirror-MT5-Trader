@@ -390,7 +390,8 @@ class PairConfig:
                  break_even_nights=None, tp_target_pct_of_margin=None,
                  carry_rate_pct=None,
                  show_fair_window=False, algo=None, algo_window=None,
-                 algo_params=None):
+                 algo_params=None, session_open=None, session_close=None,
+                 break_start=None, break_end=None):
         self.key = key
         self.name = name or key
         self.leg_a = dict(leg_a or {})      # {'account': ..., 'symbol': ...}
@@ -518,6 +519,16 @@ class PairConfig:
         #: `algo.clean_params`. Whether the Algo is ON is not here: that
         #: is held by the running engine and is off after every restart.
         self.algo_params = _clean_algo_params(algo_params)
+        #: THIS ladder's trading hours, 'HH:MM' on the BROKER's clock
+        #: (see `session.PairSession`). Blank close is the desk-wide
+        #: OVERNIGHT_CLOSE; blank open is "any time before the close";
+        #: the break takes both ends or neither. An oil future and a
+        #: gold CFD do not keep the same day.
+        from .session import clean_hhmm
+        self.session_open = clean_hhmm(session_open)
+        self.session_close = clean_hhmm(session_close)
+        self.break_start = clean_hhmm(break_start)
+        self.break_end = clean_hhmm(break_end)
         #: Cached MT5 metadata per leg, refreshed by the coordinator.
         self.meta_a = {}
         self.meta_b = {}
@@ -664,7 +675,9 @@ class PairConfig:
                    'contract_size_a', 'contract_size_b',
                    'max_quote_age_sec',
                    'algo_window', 'show_fair_window', 'pair_type',
-                   'algo_params')
+                   'algo_params',
+                   'session_open', 'session_close',
+                   'break_start', 'break_end')
                   + tuple(EXIT_FIELDS))
 
     def apply_hot(self, raw):
@@ -688,6 +701,10 @@ class PairConfig:
                 value = pair_type_name(value)
             elif field == 'algo_params':
                 value = _clean_algo_params(value)
+            elif field in ('session_open', 'session_close', 'break_start',
+                           'break_end'):
+                from .session import clean_hhmm
+                value = clean_hhmm(value)
             elif field == 'order_type':
                 value = _choice(OrderType, value, self.order_type.value,
                                 self.key, field)
@@ -754,6 +771,9 @@ class PairConfig:
             'carry_rate_pct': self.carry_rate_pct,
             'algo': self.algo, 'algo_window': self.algo_window,
             'algo_params': dict(self.algo_params),
+            'session_open': self.session_open,
+            'session_close': self.session_close,
+            'break_start': self.break_start, 'break_end': self.break_end,
         }
 
     @classmethod

@@ -367,7 +367,8 @@ class AlgoSignal:
           'warmup': {sec, need_sec, done} — live time watched since the
           Algo was turned on; no entry until it is done;
           'cutoff_min': minutes to the session cutoff, negative past
-          it, None unmeasured; 'halt': a day's limit that has been hit,
+          it, None unmeasured; 'session': why this ladder's own hours
+          hold an entry (closed, or its daily break), or None; 'halt': a day's limit that has been hit,
           in words, or None; 'entry_check': f(side, z) -> why a
           stretch that HAS confirmed may still not be entered (the
           filters), or None}.
@@ -555,6 +556,8 @@ class AlgoSignal:
                     f"prices watched")
         if body.get('cooldown_sec'):
             return f"cooldown {_mmss(body['cooldown_sec'])}"
+        if gates.get('session'):
+            return gates['session']
         buffer_min = p['cutoff_buffer_min']
         cutoff = gates.get('cutoff_min')
         if buffer_min and cutoff is not None and cutoff <= buffer_min:
