@@ -151,6 +151,18 @@ as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
   code, filters, costs, break-even, target and stop — and lists what it would
   have traded, beside the same run without re-entry and the trend filter. It
   sends nothing. It sees one price per candle (its close) and today's bid-ask.
+- **Analysis tab** (Trading Monitor → *Analysis*), for trades opened in the
+  last day / 7 / 30 days or the whole record, one ladder or all:
+  summary (trades, net P&L, win rate); drawdown and each trade's MAE / MFE
+  (its worst and best net P&L while open, and when); take / hold calibration
+  (where trades peaked, a suggested take near the 65th percentile and a
+  max-hold at the median minute winners peaked); a *what-if-held* shadow that
+  keeps marking a position for an hour after any exit that was not its target
+  (did it come back to break-even? to the target?); the Algo's backtest for
+  the chosen ladder; z-score excursions on the Algo's band (touches of ±2σ and
+  ±3σ, and 2σ stretches that came back to the mean); and the trade journal
+  with the Algo's z at both ends. Built from what is recorded — it sends
+  nothing. Best/worst points and shadows are kept from this version on.
 - **Direction.** Both (default), H to L only, or L to H only — entries only;
   an open position is always managed to its exit.
 - **Entry.** SELL when the z of the bid-side spread is >= +2.5, BUY when the z

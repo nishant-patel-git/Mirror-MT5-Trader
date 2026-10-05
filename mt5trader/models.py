@@ -278,6 +278,13 @@ class SpreadPosition:
         #: % of it, so they stay where they were set instead of drifting
         #: as the oil price moves the terminals' margin. None until read.
         self.entry_margin = None
+        #: The best and worst net P&L while open, and the minute (from
+        #: the open) each was reached — the trade's MFE and MAE. None
+        #: until measured: a trade never marked has no extremes, not 0.
+        self.peak_pnl = None
+        self.peak_min = None
+        self.trough_pnl = None
+        self.trough_min = None
 
     @property
     def is_open(self):
@@ -387,6 +394,8 @@ class SpreadPosition:
             'confirmed': self.confirmed,
             'source': self.source,
             'entry_margin': self.entry_margin,
+            'peak_pnl': self.peak_pnl, 'peak_min': self.peak_min,
+            'trough_pnl': self.trough_pnl, 'trough_min': self.trough_min,
             'leg_a': self.leg_a.to_dict() if self.leg_a else None,
             'leg_b': self.leg_b.to_dict() if self.leg_b else None,
         }
@@ -418,6 +427,8 @@ class SpreadPosition:
         position.naked_ms = raw.get('naked_ms')
         position.source = raw.get('source') or MANUAL
         position.entry_margin = raw.get('entry_margin')
+        for name in ('peak_pnl', 'peak_min', 'trough_pnl', 'trough_min'):
+            setattr(position, name, raw.get(name))
         #: Recovered from disk rather than seen happen. The monitor says
         #: so until the reconciler has confirmed both legs at the broker.
         position.recovered = True

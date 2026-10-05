@@ -35,7 +35,7 @@ from.
   legs in, closes by TICKET. It never enters while it is collecting
   candles, or past a filter it has switched on (edge, regime,
   probability, half-life) — and a filter it cannot price BLOCKS. `algo.py`, `bands.py`, `algofilters.py`,
-  `algodesk.py` and `backtest.py` decide and must not reach an order; `algoexec.py` is the one module
+  `algodesk.py`, `backtest.py` and `analysis.py` decide and must not reach an order; `algoexec.py` is the one module
   that sends, and only via the coordinator — `tests/test_algo.py`
   fails the build otherwise. Nothing else places, modifies or cancels
   an order by itself.

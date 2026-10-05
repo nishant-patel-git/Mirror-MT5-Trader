@@ -1108,6 +1108,36 @@ table.legbook tr.spread .c-width { color: #7a4b00; }
   font: 10px var(--font);
 }
 .monitor .mismatch { background: var(--ask); color: #fff; font-weight: 700; }
+
+/* -- the Analysis tab ------------------------------------------------- */
+
+.monitor .analysis { padding: 4px 8px 8px; font: 11px var(--font); }
+.monitor .analysis h4 {
+  margin: 12px 0 4px;
+  font: 600 12px var(--font);
+  border-bottom: 1px solid var(--chrome-dark);
+  padding-bottom: 2px;
+}
+.monitor .analysis h4 small { font-weight: 400; color: var(--muted); }
+.monitor .analysis h4 .btn { float: right; font-size: 10px; padding: 0 6px; }
+.monitor .an-bar { display: flex; gap: 6px; align-items: center; margin: 2px 0 4px; }
+.monitor .an-bar select { font: 11px var(--font); }
+.monitor .an-tiles { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0; }
+.monitor .an-tile {
+  flex: 1 1 110px;
+  background: #fafafa;
+  border: 1px solid #d5d5d5;
+  padding: 4px 6px;
+  text-align: center;
+}
+.monitor .an-val { font: 600 16px var(--mono); }
+.monitor .an-lbl { font: 10px var(--font); color: var(--muted); }
+.monitor .an-table { width: 100%; min-width: 0; margin: 4px 0; }
+.monitor .an-table td.l, .monitor .an-table th.l { text-align: left; }
+.monitor .an-sub { margin: 8px 0 0; font-weight: 600; }
+.monitor .an-bt-out { margin: 4px 0; }
+.monitor .analysis .hint { color: var(--muted); }
+
 /* A fill that is not ours: the trader's own terminal click. Kept in the
  * journal, and never mistaken for ours. */
 .monitor tr.theirs td { background: #f4f4f4; font-style: italic; }
