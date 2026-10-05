@@ -273,6 +273,11 @@ class SpreadPosition:
         #: stored from now, so when execution arrives an algo re-adopts
         #: only what IT opened after a restart, and never a trader's.
         self.source = MANUAL
+        #: The margin ONE spread tied up, read once — the first time this
+        #: position is priced after its fill — and kept. TP and SL are a
+        #: % of it, so they stay where they were set instead of drifting
+        #: as the oil price moves the terminals' margin. None until read.
+        self.entry_margin = None
 
     @property
     def is_open(self):
@@ -381,6 +386,7 @@ class SpreadPosition:
             'recovered': self.recovered,
             'confirmed': self.confirmed,
             'source': self.source,
+            'entry_margin': self.entry_margin,
             'leg_a': self.leg_a.to_dict() if self.leg_a else None,
             'leg_b': self.leg_b.to_dict() if self.leg_b else None,
         }
@@ -411,6 +417,7 @@ class SpreadPosition:
         position.click_to_on_ms = raw.get('click_to_on_ms')
         position.naked_ms = raw.get('naked_ms')
         position.source = raw.get('source') or MANUAL
+        position.entry_margin = raw.get('entry_margin')
         #: Recovered from disk rather than seen happen. The monitor says
         #: so until the reconciler has confirmed both legs at the broker.
         position.recovered = True
