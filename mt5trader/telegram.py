@@ -236,14 +236,16 @@ def title(text, now=None):
 
 #: The commands, in the menu. Ordinary text, so Telegram makes each one
 #: tappable - and no monospace block anywhere in the bot.
-COMMANDS = [('/dashboard', 'everything, one screen'),
-            ('/positions', 'open positions'),
-            ('/balance', 'account balances'),
-            ('/settings', 'every setting, with its key'),
-            ('/set', 'change one: /set <key> <value>'),
-            ('/alerts', 'alerts on / off'),
-            ('/ping', 'alive check'),
-            ('/start', 'this menu')]
+COMMANDS = [('/status', 'Engine & algo state, every ladder'),
+            ('/positions', 'Open positions: live P&L + exit levels'),
+            ('/trades', 'Recent closed trades'),
+            ('/pnl', 'P&L summary'),
+            ('/balance', 'Account balances'),
+            ('/settings', 'Every setting, with its key'),
+            ('/set', 'Change a setting: /set <key> <value>'),
+            ('/alerts', 'Alerts on / off'),
+            ('/ping', 'Alive check'),
+            ('/start', 'Menu')]
 
 
 def command_list():
@@ -593,6 +595,10 @@ class WebDesk:
         return ((self._get('/api/config').get('pairs') or {}).get(key)
                 or {})
 
+    def analysis(self, days=0):
+        """The Analysis tab's report: closed trades, summary, journal."""
+        return self._get(f'/api/analysis?days={float(days)}')
+
     def position(self, position_id):
         """One position as recorded, with its closing prices and z."""
         return self._get('/api/position/'
@@ -764,6 +770,10 @@ class Bot:
             return self.on_positions(chat, None)
         if command == '/balance':
             return self.on_balance(chat, None)
+        if command == '/trades':
+            return self.on_trades(chat, None)
+        if command == '/pnl':
+            return self.on_pnl(chat, None)
         if command in ('/dashboard', '/status', '/algo'):
             return self.on_dashboard(chat, None)
         if command == '/settings':
@@ -793,8 +803,9 @@ class Bot:
 
     def _main_buttons(self, chat):
         alerts = 'OFF' if chat in self.alerts_off else 'ON'
-        return [[('Dashboard', 'dashboard', ()),
+        return [[('Status', 'dashboard', ()),
                  ('Positions', 'positions', ())],
+                [('Trades', 'trades', ()), ('P&L', 'pnl', ())],
                 [('Balance', 'balance', ()),
                  ('Settings', 'settings_list', ())],
                 [(f'Alerts: {alerts}', 'toggle_alerts', ()),
@@ -994,6 +1005,105 @@ class Bot:
         buttons.append([('Refresh', 'positions', ()),
                         ('Main menu', 'main', ())])
         self.show(chat, message_id, '\n\n'.join(parts), buttons)
+
+    def _report_of(self, days=0):
+        report = getattr(self.desk, 'analysis', None)
+        try:
+            return (report(days) if report else {}) or {}
+        except Exception as e:
+            logging.warning('[telegram] the trade record: %s', e)
+            return {}
+
+    def on_trades(self, chat, message_id):
+        """The five most recent closed trades, each in full."""
+        report = self._report_of(0)
+        trips = (report.get('journal') or [])[:5]
+        names = report.get('names') or {}
+        parts = [title('RECENT TRADES', self.clock())]
+        if not report.get('ok'):
+            parts.append('The trade record cannot be read right now.')
+        elif not trips:
+            parts.append('No closed trades yet.')
+        for trip in trips:
+            pnl = trip.get('pnl')
+            result = '—' if pnl is None else ('PROFIT' if pnl >= 0
+                                              else 'LOSS')
+            entry, exit_ = trip.get('entry_spread'), trip.get('exit_spread')
+            change = None if entry is None or exit_ is None else \
+                (exit_ - entry) * _sign(trip.get('side'))
+            rows = [('Exit', trip.get('exit_reason')),
+                    ('Closed', utc(trip.get('closed_at'))),
+                    ('Duration', duration(trip.get('held_sec'))),
+                    ('Source', (trip.get('source') or 'MANUAL').title()),
+                    ('Size', f'{plain(trip.get("quantity"))} spread(s)'),
+                    None]
+            for leg in ('a', 'b'):
+                fill = trip.get('leg_' + leg) or {}
+                rows.append((f'Leg {leg.upper()} Entry',
+                             f'{fill.get("side") or ""} '
+                             f'{plain(fill.get("volume"))} '
+                             f'{fill.get("symbol") or ""} @ '
+                             f'{plain(fill.get("entry"), 4)}'))
+            rows += [None,
+                     ('Entry Spread', plain(entry, 4)
+                      + _z(trip.get('entry_z'))),
+                     ('Exit Spread', plain(exit_, 4) + _z(trip.get('exit_z'))),
+                     ('Spread Chg', plain(change, 4, True)),
+                     None,
+                     ('Net P&L', f'{usd(pnl)}  {result}'),
+                     ('Running', usd(trip.get('cum_pnl')))]
+            ladder = names.get(trip.get('pair_key')) or trip.get('pair_key')
+            parts.append(f'<b>{esc(side_words(trip.get("side")))}  '
+                         f'{esc(ladder)}  {result}</b>\n' + table(rows))
+        self.show(chat, message_id, '\n\n'.join(parts),
+                  [[('Refresh', 'trades', ()), ('Main menu', 'main', ())]])
+
+    def on_pnl(self, chat, message_id):
+        """The P&L on one sheet: all-time, today, and what is open."""
+        snapshot, _ = self._snapshot()
+        report = self._report_of(0)
+        trips = [t for t in report.get('journal') or ()
+                 if t.get('pnl') is not None]
+        now = self.clock()
+        today = time.strftime('%Y-%m-%d', time.gmtime(now))
+        todays = [t for t in trips if time.strftime(
+            '%Y-%m-%d', time.gmtime(t.get('closed_at') or 0)) == today]
+        wins = [t['pnl'] for t in trips if t['pnl'] > 0]
+        losses = [t['pnl'] for t in trips if t['pnl'] <= 0]
+        check = snapshot.get('pnl_check') or {}
+        rows = [('Closed Trades', len(trips)),
+                ('Win Rate', '—' if not trips else
+                 f'{len(wins) / len(trips) * 100:.1f}%  '
+                 f'({len(wins)}W / {len(losses)}L)'),
+                ('Avg Win', usd(sum(wins) / len(wins)) if wins else '—'),
+                ('Avg Loss', usd(sum(losses) / len(losses))
+                 if losses else '—'),
+                ('Best / Worst', '—' if not trips else
+                 f'{usd(max(t["pnl"] for t in trips))}  /  '
+                 f'{usd(min(t["pnl"] for t in trips))}'),
+                None,
+                ('Today Net', usd(sum(t['pnl'] for t in todays))
+                 + f'  ({len(todays)} trade(s))'),
+                ('All-time Net', usd(sum(t['pnl'] for t in trips))
+                 if trips else '—'),
+                ('Max Drawdown', usd(-((report.get('drawdown') or {})
+                                       .get('max') or 0))
+                 if (report.get('drawdown') or {}).get('max') is not None
+                 else '—'),
+                None,
+                ('Unrealized', usd(check.get('ours')))]
+        text = title('P&L SUMMARY', now) + '\n' + table(rows)
+        if not report.get('ok'):
+            text += '\n\nThe trade record cannot be read right now.'
+        self.show(chat, message_id, text,
+                  [[('Refresh', 'pnl', ()), ('Main menu', 'main', ())]])
+
+    def register_commands(self):
+        """Telegram's own command menu - the list that opens on "/" -
+        with a line saying what each one does."""
+        self.api.call('setMyCommands', commands=[
+            {'command': name.lstrip('/'), 'description': what}
+            for name, what in COMMANDS])
 
     def on_balance(self, chat, message_id):
         snapshot, _ = self._snapshot()
@@ -1672,6 +1782,10 @@ def start(app, env=None, api=None):
     secret = secrets.token_urlsafe(24)
     app.config['BOT_SECRET'] = secret
     bot = Bot(api or TelegramAPI(token), WebDesk(app, secret), users)
+    try:
+        bot.register_commands()
+    except TelegramError as e:
+        logging.warning('[telegram] the command menu was not set: %s', e)
 
     def loop(work, pause, name):
         backoff = 5.0

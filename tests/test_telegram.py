@@ -77,6 +77,11 @@ class FakeDesk:
         self.answer = {'ok': True, 'data': {'ok': True}}
         self.event_rows = []
         self.records = {}
+        self.report = {'ok': True, 'journal': [], 'drawdown': {},
+                       'names': {KEY: 'Oil'}}
+
+    def analysis(self, days=0):
+        return json.loads(json.dumps(self.report))
 
     def position(self, position_id):
         return self.records.get(position_id) or {'ok': False}
@@ -143,7 +148,8 @@ def test_a_stranger_gets_no_answer_at_all(bot, caplog):
 def test_the_CONTROL_an_allowed_user_gets_the_menu(bot):
     say(bot, '/start')
     assert 'NEXUS SPREAD DESK' in bot.api.texts()[-1]
-    assert {'Dashboard', 'Settings', 'Alerts: ON', 'KILL ALL'} <= \
+    assert {'Status', 'Positions', 'Trades', 'P&L', 'Balance', 'Settings',
+            'Alerts: ON', 'KILL ALL'} <= \
         set(bot.api.buttons())
 
 
@@ -165,7 +171,8 @@ def test_no_monospace_block_anywhere():
 def test_the_menu_lists_the_commands_as_tappable_text(bot):
     say(bot, '/start')
     text = bot.api.texts()[-1]
-    assert '/positions  -  open positions' in text and '<pre>' not in text
+    assert '/positions  -  Open positions: live P&amp;L + exit levels' \
+        in text and '<pre>' not in text
 
 
 def test_nothing_the_bot_says_carries_an_emoji(bot):
@@ -671,3 +678,55 @@ def test_balance_and_ping(bot):
     assert 'Margin used</b>  <code>45.00 USD' in text
     say(bot, '/ping')
     assert bot.api.texts()[-1].startswith('pong  ·  ')
+
+
+TRIP = {'position_id': 'P1', 'pair_key': KEY, 'side': 'SELL',
+        'quantity': 0.5, 'source': 'ALGO', 'closed_at': 1_800_000_000.0,
+        'held_sec': 1359, 'entry_spread': 13.196, 'exit_spread': 13.119,
+        'entry_z': 1.49, 'exit_z': -0.4,
+        'exit_reason': 'Algo: profit target (after costs)', 'pnl': 3.85,
+        'cum_pnl': 3.85,
+        'leg_a': {'side': 'BUY', 'volume': 0.05, 'symbol': 'USOILZ6.c',
+                  'entry': 89.08},
+        'leg_b': {'side': 'SELL', 'volume': 0.05, 'symbol': 'UKOILZ26.p',
+                  'entry': 102.276}}
+
+
+def test_the_command_menu_is_registered_with_telegram(bot):
+    bot.register_commands()
+    [(method, params)] = [c for c in bot.api.calls if c[0] == 'setMyCommands']
+    listed = {c['command']: c['description'] for c in params['commands']}
+    assert listed['positions'] == 'Open positions: live P&L + exit levels'
+    assert {'status', 'trades', 'pnl', 'balance', 'settings', 'set',
+            'alerts', 'ping', 'start'} <= set(listed)
+    # Telegram takes the names without the slash.
+    assert not any(name.startswith('/') for name in listed)
+
+
+def test_trades_shows_the_recent_closed_trades(bot):
+    bot.desk.report['journal'] = [dict(TRIP)]
+    say(bot, '/trades')
+    text = bot.api.texts()[-1]
+    for part in ('RECENT TRADES', 'H to L  Oil  PROFIT',
+                 'Entry Spread</b>  <code>13.1960  (Z: +1.49)',
+                 'Spread Chg</b>  <code>+0.0770',
+                 'Net P&amp;L</b>  <code>+$3.85  PROFIT'):
+        assert part in text, part
+
+
+def test_the_CONTROL_no_trades_says_so(bot):
+    say(bot, '/trades')
+    assert 'No closed trades yet.' in bot.api.texts()[-1]
+
+
+def test_pnl_sums_the_record(bot):
+    loss = dict(TRIP, position_id='P2', pnl=-1.85, cum_pnl=2.0)
+    bot.desk.report['journal'] = [loss, dict(TRIP)]
+    bot.desk.snapshot['pnl_check'] = {'ours': -8.45}
+    say(bot, '/pnl')
+    text = bot.api.texts()[-1]
+    for part in ('P&amp;L SUMMARY', 'Closed Trades</b>  <code>2',
+                 'Win Rate</b>  <code>50.0%  (1W / 1L)',
+                 'All-time Net</b>  <code>+$2.00',
+                 'Unrealized</b>  <code>-$8.45'):
+        assert part in text, part

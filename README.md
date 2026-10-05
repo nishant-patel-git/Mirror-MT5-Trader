@@ -220,9 +220,11 @@ Optional. With a bot token in `.env` the web process also runs a Telegram
 bot, written the way Stat_Arb_W3 writes its own: a heading with the time
 (`OPEN POSITIONS  ·  14:02:11 UTC`), then a bold label and its value in a box
 for every figure, plain words, no icons and no monospace blocks. `/start` is
-the menu, with buttons and the commands (tap one to run it):
+the menu, with buttons and the commands (tap one to run it). The same
+commands are registered as Telegram's own menu: type `/` and each one is
+listed with what it does.
 
-- `/dashboard`: everything to watch on one screen - the system (engine,
+- `/status` (or `/dashboard`): everything to watch on one screen - the system (engine,
   broker time, cutoff, each account), then per ladder its feed, prices, Algo
   mode and state, warm-up, stretch, entry and what is armed, filters, the
   open position with TP / SL / BE, today, and the last blocked signal.
@@ -231,6 +233,11 @@ the menu, with buttons and the commands (tap one to run it):
   entry and current spread with z, the move with or against, net P&L, the
   BE / TP / SL levels and what each is worth, age, slippage. **Close all**
   per ladder.
+- `/trades`: the five most recent closed trades in full - exit reason,
+  time, duration, Algo or manual, each leg in, the spread in and out with z,
+  net P&L and the running total.
+- `/pnl`: closed trades, win rate, average win and loss, best and worst,
+  today's net, all-time net, max drawdown, and what is open now.
 - `/balance`: each account's balance, equity, margin used and free, margin
   level, floating P&L.
 - `/settings`: every setting of every ladder with the key `/set` takes;
