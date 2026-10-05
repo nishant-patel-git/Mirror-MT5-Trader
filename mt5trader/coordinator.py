@@ -1000,10 +1000,10 @@ class Coordinator:
         the break-even and take-profit the Exit panel shows for it."""
         settings = pair.exit_settings(self.config.settings)
         nights = float(settings.get('BREAK_EVEN_NIGHTS', 0.0) or 0.0)
-        margin = (self.margin_detail(pair) or {}).get('money')
         pct = settings.get('TP_TARGET_PCT_OF_MARGIN')
         rows = []
         for position in self.book.positions(pair.key):
+            margin = self.entry_margin(pair, position)
             levels = takeprofit.for_position(
                 position, md, pair, settings, margin, nights=nights,
                 carry_for=self.holding_carry(pair, position.side.value,
@@ -1016,8 +1016,9 @@ class Coordinator:
                 tp = None
             _gross, net_pnl, _closing = mark_position(position, md, settings)
             be = levels.get('break_even')
-            stop = self._algo_stop_points(pair, position.quantity or 1.0,
-                                          position.spread_units, margin)
+            stop = self._algo_stop_points(
+                pair, position.quantity or 1.0,
+                takeprofit.one_spread_units(position), margin)
             sl = None
             if stop is not None and be is not None:
                 sl = be - stop if position.side is SpreadSide.BUY \
@@ -1034,6 +1035,19 @@ class Coordinator:
                          'net_pnl': net_pnl,
                          **self._leg_marks(position, md)})
         return rows
+
+    def entry_margin(self, pair, position):
+        """The margin per spread a position's TP and SL are a % of:
+        read from the terminals the first time it is priced, then
+        FROZEN on the position and saved, so the levels stay where they
+        were set. Until the terminals can price it, None — never a
+        guess."""
+        if position.entry_margin is None:
+            margin = (self.margin_detail(pair) or {}).get('money')
+            if margin:
+                position.entry_margin = float(margin)
+                self.remember(position)
+        return position.entry_margin
 
     @staticmethod
     def _leg_marks(position, md):
@@ -2324,7 +2338,7 @@ class Coordinator:
                             # the market is not a take-profit.
                             'exit': takeprofit.for_position(
                                 position, md, pair, settings,
-                                margin.get('money'),
+                                self.entry_margin(pair, position),
                                 nights=nights,
                                 carry_for=self.holding_carry(
                                     pair, position.side.value, nights))})

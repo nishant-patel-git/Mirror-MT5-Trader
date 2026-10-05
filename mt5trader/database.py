@@ -195,6 +195,9 @@ class Store:
         # MANUAL or ALGO. NULL on a row written before it existed, which
         # reads back as MANUAL: nothing traded by itself then either.
         ('positions', 'source', 'TEXT'),
+        # The margin per spread frozen when the position was first
+        # priced; NULL on older rows, which freeze on their next read.
+        ('positions', 'entry_margin', 'REAL'),
     )
 
     def _add_missing_columns(self, connection):
@@ -223,8 +226,8 @@ class Store:
                     exit_spread, spread_units, order_type, opened_at,
                     closed_at, close_reason, realized_pnl, entry_slippage,
                     exit_slippage, click_to_on_ms, naked_ms, leg_a, leg_b,
-                    source)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    source, entry_margin)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (row['position_id'], row['pair_key'], row['side'],
                  row['quantity'], row['entry_spread'], row['exit_spread'],
                  row['spread_units'], row['order_type'], row['opened_at'],
@@ -232,7 +235,7 @@ class Store:
                  row['entry_slippage'], row['exit_slippage'],
                  row['click_to_on_ms'], row.get('naked_ms'),
                  json.dumps(row['leg_a']), json.dumps(row['leg_b']),
-                 row.get('source')))
+                 row.get('source'), row.get('entry_margin')))
         return position
 
     def remember_tickets(self, rows):
