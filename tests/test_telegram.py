@@ -368,7 +368,7 @@ def test_back_to_mean_is_switched_and_saved(bot):
 
 
 def test_a_pair_setting_is_saved_on_the_pair(bot):
-    open_settings(bot, 'Costs and session')
+    open_settings(bot, 'Session and costs')
     press(bot, 'Commission per lot, leg A (per side): desk default')
     say(bot, '3.5')
     press(bot, 'Confirm')
@@ -730,3 +730,66 @@ def test_pnl_sums_the_record(bot):
                  'All-time Net</b>  <code>+$2.00',
                  'Unrealized</b>  <code>-$8.45'):
         assert part in text, part
+
+
+# -- each ladder's hours --------------------------------------------------------------
+
+
+def test_set_a_ladders_session_close(bot):
+    say(bot, '/set session_close 23:45')
+    press(bot, 'Confirm')
+    assert bot.desk.saves == [(KEY, {'session_close': '23:45'})]
+
+
+def test_the_daily_break_is_one_setting_with_both_ends(bot):
+    """The desk refuses a break with one end, so the phone sets both at
+    once - two separate saves would fail on the first."""
+    say(bot, '/set break 23:55-1:05')
+    press(bot, 'Confirm')
+    assert bot.desk.saves == [(KEY, {'break_start': '23:55',
+                                     'break_end': '01:05'})]
+    say(bot, '/set break none')
+    press(bot, 'Confirm')
+    assert bot.desk.saves[-1] == (KEY, {'break_start': None,
+                                        'break_end': None})
+
+
+def test_a_bad_time_changes_nothing(bot):
+    say(bot, '/set session_open 25:00')
+    assert 'is not a time' in bot.api.texts()[-1]
+    assert bot.desk.saves == []
+
+
+def test_a_silent_feed_in_the_ladders_break_is_not_news(bot):
+    pair = bot.desk.snapshot['pairs'][KEY]
+    pair['market'] = {'stale_reason': 'leg B unchanged 40s'}
+    pair['session'] = {'state': 'BREAK', 'quiet': True}
+    watch(bot)
+    bot.clock_.now += tg.PROBLEM_SETTLE_SEC + 1
+    assert watch(bot) == []
+    # The CONTROL: the same silence in session is a warning.
+    pair['session'] = {'state': 'OPEN', 'quiet': False}
+    watch(bot)
+    bot.clock_.now += tg.PROBLEM_SETTLE_SEC + 1
+    assert any('FEED WARNING' in t for t in watch(bot))
+
+
+def test_end_of_day_comes_at_each_ladders_own_close(bot):
+    pair = bot.desk.snapshot['pairs'][KEY]
+    pair['session'] = {'close': '23:45', 'state': 'OPEN'}
+    bot.desk.snapshot['broker_clock'] = {'broker_time': '16:56:00',
+                                         'cutoff': '16:55'}
+    watch(bot)
+    assert watch(bot) == []                 # past the desk's, not ITS own
+    bot.desk.snapshot['broker_clock']['broker_time'] = '23:46:00'
+    [told] = watch(bot)
+    assert 'END OF DAY' in told
+
+
+def test_the_dashboard_shows_each_ladders_session(bot):
+    bot.desk.snapshot['pairs'][KEY]['session'] = {
+        'open': '01:05', 'close': '23:45', 'break': '12:00-12:30',
+        'state': 'OPEN'}
+    say(bot, '/status')
+    assert ('Session</b>  <code>open  (01:05 to 23:45, break 12:00-12:30 '
+            'broker time)') in bot.api.texts()[-1]

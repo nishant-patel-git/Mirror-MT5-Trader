@@ -255,7 +255,9 @@ listed with what it does.
   `/set <key> <value>` (or `/set <ladder> <key> <value>` with more than one
   ladder) changes one, `/set mode off | dry | live` switches the Algo. The
   **Settings** button does the same by sections: Algo mode, Entry, Filters,
-  Exits, Daily limits, Costs and session.
+  Exits, Daily limits, Session and costs. A ladder's hours are
+  `/set session_open 01:05`, `/set session_close 23:45` and
+  `/set break 23:55-01:05` (or `none`), broker time.
 - `/alerts` on / off, `/ping`, and **KILL ALL**.
 
 Alerts, to every allowed user: **TRADE ENTRY** when a position opens (legs,

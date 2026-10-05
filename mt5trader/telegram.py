@@ -113,6 +113,10 @@ FIELDS = [
     ('commission_per_lot_b', 'Commission per lot, leg B (per side)', 'pair',
      'number'),
     ('overnight', 'Overnight', 'pair', OVERNIGHT),
+    # This ladder's hours, HH:MM broker time
+    ('session_open', 'Session open', 'pair', 'time'),
+    ('session_close', 'Session close', 'pair', 'time'),
+    ('break', 'Daily break', 'pair', 'range'),
 ]
 FIELD = {f[0]: f for f in FIELDS}
 
@@ -129,8 +133,10 @@ SECTIONS = {
                         'stop_z', 'time_stop_on', 'time_stop_candles']),
     'limits': ('Daily limits', ['max_trades_day', 'max_losses_row',
                                 'daily_loss_limit']),
-    'costs': ('Costs and session', ['commission_per_lot_a',
-                                    'commission_per_lot_b', 'overnight']),
+    'costs': ('Session and costs', ['session_open', 'session_close',
+                                    'break', 'overnight',
+                                    'commission_per_lot_a',
+                                    'commission_per_lot_b']),
 }
 SECTION_OF = {field: section for section, (_, fields) in SECTIONS.items()
               for field in fields}
@@ -891,6 +897,7 @@ class Bot:
         params = effective_params(row)
         problem = self._price_problem(row)
         rows = [('Feed', f'PROBLEM: {problem}' if problem else 'OK'),
+                ('Session', self._session_words(row)),
                 ('Algo', MODE_WORDS[mode_word(row)])]
         on = row.get('algo_on')
         if on:
@@ -1413,6 +1420,15 @@ class Bot:
             return effective_params(row).get(name)
         if name == 'overnight':
             return row.get('overnight') or saved.get(name)
+        hours = row.get('session') or {}
+        if name == 'session_open':
+            return saved.get(name) or 'any'
+        if name == 'session_close':
+            return saved.get(name) or f'desk {hours.get("close") or "cutoff"}'
+        if name == 'break':
+            if saved.get('break_start') and saved.get('break_end'):
+                return f'{saved["break_start"]}-{saved["break_end"]}'
+            return 'none'
         value = saved.get(name)
         return 'desk default' if value is None else value
 
@@ -1423,6 +1439,8 @@ class Bot:
             return 'ON' if value else 'OFF'
         if isinstance(kind, list):
             return dict(kind).get(value, value)
+        if kind in ('time', 'range') and value is None:
+            return 'none'
         return value
 
     def on_edit(self, chat, message_id, key, field):
@@ -1438,10 +1456,12 @@ class Bot:
             options = kind
         else:
             self._waiting[chat] = (self.clock() + INPUT_TTL_SEC, key, field)
+            how = {'time': 'Send HH:MM, broker time - or "none" to clear.',
+                   'range': 'Send HH:MM-HH:MM, broker time - or "none".'} \
+                .get(kind, 'Send the new value as a message.')
             return self.show(chat, message_id,
                              f'<b>{esc(label)}</b>\nCurrent value: '
-                             f'<b>{esc(now)}</b>\n\nSend the new value as '
-                             f'a message.',
+                             f'<b>{esc(now)}</b>\n\n{how}',
                              [[('Cancel', back, args)]])
         self.show(chat, message_id,
                   f'<b>{esc(label)}</b>\nCurrent value: <b>{esc(now)}</b>'
@@ -1452,7 +1472,25 @@ class Bot:
 
     def _typed_value(self, chat, key, field, text):
         from . import algo as algo_module
-        _, label, where, _ = FIELD[field]
+        from . import session as session_module
+        _, label, where, kind = FIELD[field]
+        if kind in ('time', 'range'):
+            raw = text.strip()
+            if raw.lower() in ('', 'none', 'clear', 'off', '-'):
+                return self.on_set_ask(chat, None, key, field, None)
+            try:
+                if kind == 'time':
+                    value = session_module.clean_hhmm(
+                        raw) if session_module.parse_hhmm(raw) else None
+                else:
+                    start, end = [p.strip() for p in raw.split('-', 1)]
+                    session_module.parse_hhmm(start)
+                    session_module.parse_hhmm(end)
+                    value = (f'{session_module.clean_hhmm(start)}-'
+                             f'{session_module.clean_hhmm(end)}')
+            except ValueError as e:
+                return self.send(chat, f'<b>Not changed.</b> {esc(e)}.')
+            return self.on_set_ask(chat, None, key, field, value)
         try:
             value = float(text.replace(',', '.'))
         except ValueError:
@@ -1488,6 +1526,9 @@ class Bot:
             typed = dict(self.desk.config_pair(key).get('algo_params') or {})
             typed[field] = value
             payload = {'algo_params': typed}
+        elif field == 'break':
+            start, end = (value.split('-', 1) if value else (None, None))
+            payload = {'break_start': start, 'break_end': end}
         else:
             payload = {field: value}
         saved = self.desk.save_pair(key, payload)
@@ -1506,9 +1547,24 @@ class Bot:
     # -- alerts -----------------------------------------------------------------------
 
     def _price_problem(self, row):
+        # A feed that is silent because this ladder's market is shut -
+        # its break, or outside the hours set for it - is not news.
+        if (row.get('session') or {}).get('quiet'):
+            return None
         market = row.get('market') or {}
         return (row.get('dark_reason') or market.get('stale_reason')
                 or market.get('jump_reason') or market.get('guard_reason'))
+
+    @staticmethod
+    def _session_words(row):
+        hours = row.get('session') or {}
+        if not hours:
+            return '—'
+        state = (hours.get('state') or 'unknown').lower()
+        span = f'{hours.get("open") or "any"} to {hours.get("close")}'
+        if hours.get('break'):
+            span += f', break {hours["break"]}'
+        return f'{state}  ({span} broker time)'
 
     def alert_once(self):
         """Look once, and push what is new to every allowed user."""
@@ -1547,7 +1603,7 @@ class AlertWatch:
         self.halts = {}
         self.blocked = {}           # pair -> (at, (side, reason), told_at)
         self.positions = {}         # id -> pair key
-        self.summary_day = None
+        self.summary_sent = {}      # pair -> the day its summary went
 
     def check(self, snapshot, events, price_problem, lookup=None):
         out = []
@@ -1679,15 +1735,21 @@ class AlertWatch:
             if text:
                 out.append(text)
 
-        # Once a day, at the session cutoff on the broker's clock.
+        # Once a day per ladder, at THAT ladder's close on the broker's
+        # clock - an oil future and a gold CFD do not end the same day.
         clock = snapshot.get('broker_clock') or {}
-        broker_time, cutoff = clock.get('broker_time'), clock.get('cutoff')
+        broker_time = clock.get('broker_time')
         today = time.strftime('%Y-%m-%d', time.localtime(now))
-        if broker_time and cutoff and broker_time[:5] >= cutoff \
-                and self.summary_day != today:
+        for key, row in sorted(pairs.items()):
+            close = (row.get('session') or {}).get('close') \
+                or clock.get('cutoff')
+            if not broker_time or not close or broker_time[:5] < close \
+                    or self.summary_sent.get(key) == today:
+                continue
             if not first:
-                out.append(self._summary(snapshot, now))
-            self.summary_day = today
+                out.append(self._summary(
+                    dict(snapshot, pairs={key: row}), now))
+            self.summary_sent[key] = today
         return out
 
     @staticmethod
