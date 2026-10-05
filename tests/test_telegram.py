@@ -138,14 +138,21 @@ def test_a_stranger_gets_no_answer_at_all(bot, caplog):
 
 def test_the_CONTROL_an_allowed_user_gets_the_menu(bot):
     say(bot, '/start')
-    assert 'MT5-Trader' in bot.api.texts()[-1]
-    assert {'📊 Status', '📈 Positions', '🤖 Algo', '⚙️ Settings',
-            '🛑 KILL ALL'} <= set(bot.api.buttons())
+    assert 'NEXUS SPREAD DESK' in bot.api.texts()[-1]
+    assert {'Dashboard', 'Settings', 'Alerts: ON', 'KILL ALL'} <= \
+        set(bot.api.buttons())
+
+
+def test_nothing_the_bot_says_carries_an_emoji(bot):
+    """A desk tool, not a chat toy: plain words on every screen."""
+    source = open(tg.__file__, encoding='utf-8').read()
+    assert not [c for c in source if ord(c) >= 0x2190 and c not in
+                '\u2265\u2264\u2212\u2192\u221e'], 'an icon crept in'
 
 
 def test_a_stranger_cannot_press_an_allowed_users_button(bot):
     say(bot, '/start')
-    press(bot, '🛑 KILL ALL', user=STRANGER)
+    press(bot, 'KILL ALL', user=STRANGER)
     assert bot.desk.commands == []
 
 
@@ -165,9 +172,10 @@ def test_no_token_means_no_bot_and_it_says_so(caplog):
 # -- LIVE asks twice ------------------------------------------------------------
 
 
-def open_algo(bot):
-    say(bot, '/algo')
-    press(bot, 'Oil · DRY')
+def open_algo(bot, mode='Dry run'):
+    say(bot, '/settings')
+    press(bot, 'Oil')
+    press(bot, 'Algo mode: ' + mode)
 
 
 def test_LIVE_needs_two_confirms_and_only_then_is_sent(bot):
@@ -175,19 +183,18 @@ def test_LIVE_needs_two_confirms_and_only_then_is_sent(bot):
     press(bot, 'LIVE')
     assert bot.desk.commands == []
     assert 'REAL' in bot.api.texts()[-1]
-    press(bot, 'Yes, continue')
+    press(bot, 'Continue')
     assert bot.desk.commands == []          # still not sent
-    press(bot, '🔴 GO LIVE')
+    press(bot, 'Confirm LIVE')
     assert bot.desk.commands == [('set_algo', {
         'pair': KEY, 'algo': 'ALGO', 'mode': 'LIVE', 'confirmed': True})]
 
 
 def test_the_CONTROL_dry_run_takes_one_confirm(bot):
     bot.desk.snapshot['pairs'][KEY]['algo_on'] = False
-    say(bot, '/algo')
-    press(bot, 'Oil · OFF')
+    open_algo(bot, 'Off')
     press(bot, 'Dry run')
-    press(bot, '✅ Confirm')
+    press(bot, 'Confirm')
     assert bot.desk.commands == [('set_algo', {
         'pair': KEY, 'algo': 'ALGO', 'mode': 'DRY_RUN'})]
 
@@ -195,7 +202,7 @@ def test_the_CONTROL_dry_run_takes_one_confirm(bot):
 def test_cancel_sends_nothing(bot):
     open_algo(bot)
     press(bot, 'LIVE')
-    press(bot, '✖ Cancel')
+    press(bot, 'Cancel')
     assert bot.desk.commands == []
 
 
@@ -203,21 +210,20 @@ def test_an_expired_button_does_nothing(bot):
     open_algo(bot)
     press(bot, 'Off')
     bot.clock_.now += tg.TOKEN_TTL_SEC + 1
-    press(bot, '✅ Confirm')
+    press(bot, 'Confirm')
     assert bot.desk.commands == []
     assert 'expired' in bot.api.texts()[-1]
 
 
 def test_leaving_LIVE_with_a_position_asks_what_to_do(bot):
     bot.desk.snapshot['pairs'][KEY]['algo_mode'] = 'LIVE'
-    say(bot, '/algo')
-    press(bot, 'Oil · LIVE')
+    open_algo(bot, 'LIVE')
     press(bot, 'Off')
     bot.desk.answer = {'ok': False, 'data': {'ok': False, 'choose':
                                              ['close', 'manual'],
                                              'positions': ['P1']}}
-    press(bot, '✅ Confirm')
-    assert 'Close it now' in bot.api.buttons()
+    press(bot, 'Confirm')
+    assert 'Close now' in bot.api.buttons()
     press(bot, 'Hand to manual')
     assert bot.desk.commands[-1] == ('set_algo', {
         'pair': KEY, 'algo': 'NONE', 'mode': 'DRY_RUN',
@@ -227,10 +233,10 @@ def test_leaving_LIVE_with_a_position_asks_what_to_do(bot):
 def test_a_refusal_comes_back_in_the_engines_words(bot):
     open_algo(bot)
     press(bot, 'LIVE')
-    press(bot, 'Yes, continue')
+    press(bot, 'Continue')
     bot.desk.answer = {'ok': False, 'reason': 'the ladder holds a manual '
                                               'position'}
-    press(bot, '🔴 GO LIVE')
+    press(bot, 'Confirm LIVE')
     assert any('holds a manual position' in t for t in bot.api.texts())
 
 
@@ -243,30 +249,31 @@ def test_close_all_on_a_ladder_is_confirmed_first(bot):
         positions=[{'side': 'SELL', 'quantity': 1, 'entry_spread': 12.3,
                     'closing_spread': 12.2, 'net_pnl': 3.2,
                     'source': 'ALGO'}])
-    say(bot, '/positions')
-    assert 'ALGO' in bot.api.texts()[-1]
+    say(bot, '/dashboard')
+    assert '(algo)' in bot.api.texts()[-1]
     press(bot, 'Close all: Oil')
     assert bot.desk.commands == []
     bot.desk.answer = {'ok': True, 'data': {'closed': 1, 'failed': []}}
-    press(bot, '✅ Close all')
+    press(bot, 'Close all')
     assert bot.desk.commands == [('flatten_pair', {'pair': KEY})]
 
 
 def test_kill_all_is_confirmed_first(bot):
     say(bot, '/start')
-    press(bot, '🛑 KILL ALL')
+    press(bot, 'KILL ALL')
     assert bot.desk.commands == []
-    press(bot, '🛑 KILL ALL')
+    press(bot, 'Confirm KILL ALL')
     assert bot.desk.commands == [('kill', {'flatten': True})]
 
 
 # -- settings ---------------------------------------------------------------------
 
 
-def open_settings(bot):
+def open_settings(bot, section='Entry'):
     say(bot, '/start')
-    press(bot, '⚙️ Settings')
+    press(bot, 'Settings')
     press(bot, 'Oil')
+    press(bot, section)
 
 
 def test_a_typed_setting_is_confirmed_saved_and_applied(bot):
@@ -274,7 +281,7 @@ def test_a_typed_setting_is_confirmed_saved_and_applied(bot):
     press(bot, 'Entry z: 2.0')
     say(bot, '2.5')
     assert bot.desk.saves == []
-    press(bot, '✅ Confirm')
+    press(bot, 'Confirm')
     typed = {'entry_z': 2.5}
     assert bot.desk.saves == [(KEY, {'algo_params': typed})]
     assert bot.desk.commands == [('set_pair', {
@@ -301,7 +308,7 @@ def test_a_choice_setting_offers_its_choices(bot):
     open_settings(bot)
     press(bot, 'Direction: Both')
     press(bot, 'H to L only')
-    press(bot, '✅ Confirm')
+    press(bot, 'Confirm')
     assert bot.desk.saves == [(KEY, {'algo_params': {
         'entry_z': 2.0, 'direction': 'H_TO_L'}})]
 
@@ -310,28 +317,28 @@ def test_every_exit_switch_is_in_the_settings_menu(bot):
     """The exits that can close a trade early are switchable from a
     phone — "Back to mean" scratched a trade at break-even once, and the
     trader has to be able to turn it off away from the desk."""
-    open_settings(bot)
+    open_settings(bot, 'Exits')
     labels = set(bot.api.buttons())
-    for label in ('Back to mean (exit): OFF', 'Z-stop (exit): OFF',
-                  'Z-stop at |z|: 4.0', 'Time stop (exit): OFF',
+    for label in ('Back to mean: OFF', 'Z-stop: OFF',
+                  'Z-stop at |z|: 4.0', 'Time stop: OFF',
                   'Time stop (candles): 20', 'Stop loss: ON'):
         assert label in labels, label
 
 
 def test_back_to_mean_is_switched_and_saved(bot):
-    open_settings(bot)
-    press(bot, 'Back to mean (exit): OFF')
+    open_settings(bot, 'Exits')
+    press(bot, 'Back to mean: OFF')
     press(bot, 'ON')
-    press(bot, '✅ Confirm')
+    press(bot, 'Confirm')
     assert bot.desk.saves == [(KEY, {'algo_params': {
         'entry_z': 2.0, 'reversion_on': True}})]
 
 
 def test_a_pair_setting_is_saved_on_the_pair(bot):
-    open_settings(bot)
-    press(bot, 'Comm/lot A (per side): default')
+    open_settings(bot, 'Costs and session')
+    press(bot, 'Commission per lot, leg A (per side): desk default')
     say(bot, '3.5')
-    press(bot, '✅ Confirm')
+    press(bot, 'Confirm')
     assert bot.desk.saves == [(KEY, {'commission_per_lot_a': 3.5})]
 
 
@@ -390,7 +397,7 @@ def test_history_already_in_the_journal_is_not_replayed(bot):
                                               'mode': 'LIVE'}})
     told = watch(bot)
     assert len(told) == 1 and 'ENTER H to L' in told[0]
-    assert '[LIVE]' in told[0]
+    assert '[ALGO LIVE]' in told[0]
 
 
 def test_an_algo_order_that_failed_says_why(bot):
@@ -451,7 +458,7 @@ def test_the_daily_summary_is_sent_once_at_the_cutoff(bot):
     assert watch(bot) == []
     bot.desk.snapshot['broker_clock']['broker_time'] = '16:55:03'
     told = watch(bot)
-    assert 'Daily summary' in told[0]
+    assert 'DAILY SUMMARY' in told[0]
     bot.desk.snapshot['broker_clock']['broker_time'] = '17:30:00'
     assert watch(bot) == []
 

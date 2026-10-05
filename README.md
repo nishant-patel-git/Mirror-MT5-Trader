@@ -217,21 +217,23 @@ as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
 ## Telegram — the desk from a phone
 
 Optional. With a bot token in `.env` the web process also runs a Telegram
-bot with a button menu:
+bot. Plain text, no icons, three places:
 
-- **Status**: the engine, each account's equity and margin level, broker
-  time and the cutoff, each pair's H to L / L to H prices and any price
-  problem.
-- **Positions**: every open position (side, size, entry, now, net P&L,
-  MANUAL/ALGO) with **Close all** per ladder.
-- **Algo**: each ladder's panel (prices and stretch, entry levels, state
-  and why it is held, warm-up, Edge/Regime/Ready, today's count, last
-  blocked signal) with **Off / Dry run / LIVE**.
-- **Settings**: entry z, direction, Algo qty, warm-up, cutoff, cooldown,
-  max entry z, re-entry, the trend filter, stop loss, the optional exits
-  (back to mean, z-stop, time stop), Edge, Regime, the day's limits, TP %
-  of margin, commission per lot (per side), overnight.
-- **KILL ALL**, and **Alerts on/off** (`/alerts`).
+- **Dashboard** (`/dashboard`): everything to watch on one screen. System
+  (engine, broker time and cutoff, each account's equity and margin level),
+  then per ladder: feed, prices, Algo mode and state, warm-up, stretch,
+  entry levels and what is armed, Edge / Regime / Trend / Ready, the open
+  position with its TP / SL / BE, today's trades and P&L, and the last
+  blocked signal. **Close all** per ladder holding a position.
+- **Settings** (`/settings`): pick a ladder, then a section:
+  - *Algo mode*: Off / Dry run (data collection, sends nothing) / LIVE;
+  - *Entry*: entry z, direction, Algo qty, re-entry, max entry z, warm-up,
+    cooldown, no entries before the cutoff;
+  - *Filters*: Edge, Regime, Trend;
+  - *Exits*: take profit, stop loss, back to mean, z-stop, time stop;
+  - *Daily limits*: trades, losses in a row, loss limit;
+  - *Costs and session*: commission per lot (A and B), overnight.
+- **Alerts on/off** (`/alerts`) and **KILL ALL**.
 
 Every action asks Confirm / Cancel first; LIVE asks twice. Buttons expire
 after ten minutes. It goes through the web app's own routes, so every
