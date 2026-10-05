@@ -321,6 +321,11 @@ def zscore(value, mean, sigma):
     return (float(value) - float(mean)) / float(sigma)
 
 
+_POSITION_DISPLAY = ('quantity', 'opened_at', 'age_sec', 'source',
+                     'leg_a_side', 'leg_a_entry', 'leg_a_now',
+                     'leg_b_side', 'leg_b_entry', 'leg_b_now')
+
+
 class AlgoSignal:
     """One ladder's Algo: it watches, decides, and says so.
 
@@ -603,6 +608,12 @@ class AlgoSignal:
                'z_close': z_close, 'tp': tp, 'sl': sl, 'break_even': be,
                'net_pnl': pos.get('net_pnl'), 'exit': None,
                'progress': progress(side, entry, closing, tp, sl)}
+        # What the panel shows about the position itself — its size, its
+        # age and each leg's fill — passes through untouched. Dropping it
+        # made the panel fall back to "1.00 spread(s)" for a 0.5 position.
+        for name in _POSITION_DISPLAY:
+            if name in pos:
+                row[name] = pos[name]
         reason = None
         if closing is not None and sl is not None and (
                 closing <= sl if side == 'BUY' else closing >= sl):

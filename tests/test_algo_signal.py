@@ -414,3 +414,29 @@ def test_a_direction_that_does_not_exist_is_named():
     assert algo.clean_params({'direction': 'sideways'})['direction'] == 'BOTH'
     assert algo.check_params({'direction': 'sideways'})
     assert algo.check_params({'direction': 'l_to_h'}) == []
+
+
+def test_the_panel_sees_the_positions_own_size_age_and_legs():
+    """A 0.5-spread position read "1.00 spread(s)" on the panel: the
+    signal dropped its size, so the screen fell back to 1."""
+    held = {'position_id': 'p1', 'side': 'SELL', 'entry_spread': 10.15,
+            'tp': 9.9, 'sl': 10.5, 'break_even': 10.15, 'net_pnl': -8.45,
+            'quantity': 0.5, 'age_sec': 75.0, 'opened_at': 1.0,
+            'leg_a_side': 'BUY', 'leg_a_entry': 89.08, 'leg_a_now': 89.17,
+            'leg_b_side': 'SELL', 'leg_b_entry': 102.28, 'leg_b_now': 102.54}
+    body = run(touch_signal(), market(10.20, 10.22, 1), positions=[held])
+    [row] = body['positions']
+    assert row['quantity'] == 0.5
+    assert row['age_sec'] == 75.0
+    assert row['leg_a_entry'] == 89.08 and row['leg_b_side'] == 'SELL'
+
+
+def test_one_position_at_a_time_no_entry_while_holding():
+    """A stretch that would enter when flat does nothing while a
+    position is on — and the CONTROL: flat, the same stretch enters."""
+    held = {'position_id': 'p1', 'side': 'SELL', 'entry_spread': 10.15,
+            'quantity': 0.5}
+    body = feed(touch_signal(), 10.26, 10.30, 3, positions=[held])
+    assert body['state'] == 'IN_POSITION' and body['intents'] == []
+    body = feed(touch_signal(), 10.26, 10.30, 3)
+    assert body['intents'][0]['action'] == 'ENTER'
