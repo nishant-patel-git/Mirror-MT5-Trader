@@ -985,6 +985,10 @@ def start(app, env=None, api=None):
     env = os.environ if env is None else env
     token = (env.get('TELEGRAM_BOT_TOKEN') or '').strip()
     if not token:
+        # Said, not silent: "I set it up and nothing happens" has to be
+        # answerable from the console.
+        logging.info('[telegram] no bot: TELEGRAM_BOT_TOKEN is not set in '
+                     '.env (beside config.json)')
         return None
     users = allowed_users(env.get('TELEGRAM_ALLOWED_USERS'))
     if not users:

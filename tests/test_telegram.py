@@ -154,10 +154,12 @@ def test_allowed_users_are_read_from_the_env_list():
     assert tg.allowed_users('') == set()
 
 
-def test_no_token_means_no_bot():
+def test_no_token_means_no_bot_and_it_says_so(caplog):
     class App:
         config = {}
-    assert tg.start(App(), env={}) is None
+    with caplog.at_level('INFO'):
+        assert tg.start(App(), env={}) is None
+    assert 'TELEGRAM_BOT_TOKEN is not set' in caplog.text
 
 
 # -- LIVE asks twice ------------------------------------------------------------
