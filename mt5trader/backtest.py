@@ -22,6 +22,7 @@ import datetime
 import re
 
 from . import algo as algo_module
+from . import algofilters
 from . import bands
 from .algodesk import judge_filters
 
@@ -51,6 +52,9 @@ def run(rows, params, width, cost_in, levels, offset_sec=None,
     - `cost_in`: {'k', 'commission', 'slippage'} as the live filters get.
     - `levels`: {'fee_points', 'target_points', 'stop_points'} per spread,
       as the live Exit panel prices them; None for one that cannot be.
+      With the Algo's stop or target in ATR mode, that one is instead a
+      multiple of the ATR AT EACH ENTRY, as live - and an entry with no
+      ATR yet is not taken, as live.
     - `offset_sec`: the broker's clock offset, for the session cutoff
       and the broker's day.
 
@@ -104,7 +108,26 @@ def run(rows, params, width, cost_in, levels, offset_sec=None,
                 sign * (closing - pos['entry_spread']) * k * qty
                 - commission)))
         _, check = judge_filters(p, md, stats, closes, cost_in)
+        # The stop and target THIS entry would get - from the ATR on the
+        # candles CLOSED before this one, as live - and the same guard:
+        # none until the ATR is measured, none with a stop inside the
+        # bid-ask.
+        trade_target, trade_stop, levels_block = target, stop, None
+        if 'ATR' in (p['stop_mode'], p['target_mode']):
+            atr = algofilters.atr(closes[:-1], p['atr_period'])
+            if not atr:
+                levels_block = 'levels: ATR not measured yet'
+            else:
+                if p['stop_mode'] == 'ATR':
+                    trade_stop = (p['atr_stop_mult'] * atr
+                                  if p['stop_loss_on'] else None)
+                if p['target_mode'] == 'ATR':
+                    trade_target = p['atr_target_mult'] * atr
+        if levels_block is None and trade_stop is not None \
+                and trade_stop <= (width or 0.0):
+            levels_block = 'levels: the stop is inside the bid-ask'
         gates = {'health': None, 'halt': halt, 'entry_check': check,
+                 'levels': levels_block,
                  'cutoff_min': _cutoff_minutes(bucket, offset_sec, *cutoff)}
         body = signal.evaluate(now, md, stats, positions, gates)
         if body.get('blocked_side'):
@@ -124,8 +147,10 @@ def run(rows, params, width, cost_in, levels, offset_sec=None,
                 be = entry + sign * fee
                 pos = {'side': side, 'entry_spread': entry,
                        'opened_at': now, 'break_even': be,
-                       'tp': None if target is None else be + sign * target,
-                       'sl': None if stop is None else be - sign * stop,
+                       'tp': None if trade_target is None
+                       else be + sign * trade_target,
+                       'sl': None if trade_stop is None
+                       else be - sign * trade_stop,
                        'entry_z': intent.get('z')}
                 open_[pid] = pos
                 day['trades'] += 1

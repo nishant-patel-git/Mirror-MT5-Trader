@@ -1169,9 +1169,23 @@ class Coordinator:
                 tp = None
             _gross, net_pnl, _closing = mark_position(position, md, settings)
             be = levels.get('break_even')
+            params = algo_module.clean_params(pair.algo_params)
+            atr = None
+            if 'ATR' in (params['stop_mode'], params['target_mode']):
+                atr = self.entry_atr(pair, position)
             stop = self._algo_stop_points(
                 pair, position.quantity or 1.0,
                 takeprofit.one_spread_units(position), margin)
+            if params['stop_mode'] == 'ATR':
+                # A multiple of the ATR at entry; unmeasured stays
+                # unmeasured - never a stop placed on nothing.
+                stop = (params['atr_stop_mult'] * atr
+                        if params['stop_loss_on'] and atr else None)
+            if params['target_mode'] == 'ATR':
+                tp = None if not atr or be is None else (
+                    be + params['atr_target_mult'] * atr
+                    if position.side is SpreadSide.BUY
+                    else be - params['atr_target_mult'] * atr)
             sl = None
             if stop is not None and be is not None:
                 sl = be - stop if position.side is SpreadSide.BUY \
@@ -1185,7 +1199,9 @@ class Coordinator:
                          'age_sec': self.clock() - (position.opened_at
                                                     or self.clock()),
                          'break_even': be, 'tp': tp, 'sl': sl,
-                         'net_pnl': net_pnl,
+                         'net_pnl': net_pnl, 'entry_atr': atr,
+                         'stop_mode': params['stop_mode'],
+                         'target_mode': params['target_mode'],
                          **self._leg_marks(position, md)})
         return rows
 
@@ -1201,6 +1217,19 @@ class Coordinator:
                 position.entry_margin = float(margin)
                 self.remember(position)
         return position.entry_margin
+
+    def entry_atr(self, pair, position):
+        """The ATR an open position's ATR stop and target are a multiple
+        of: read from the Algo's candles the first time it is priced,
+        then FROZEN on the position and saved. None until it can be
+        read - never a guess."""
+        if position.entry_atr is None:
+            params = algo_module.clean_params(pair.algo_params)
+            value = self.algos.atr(pair.key, params['atr_period'])
+            if value:
+                position.entry_atr = float(value)
+                self.remember(position)
+        return position.entry_atr
 
     @staticmethod
     def _leg_marks(position, md):
@@ -1313,7 +1342,43 @@ class Coordinator:
             size = (self.executor.size(pair, md, qty) or {}).get('reason')
         return {'health': health, 'cutoff_min': cutoff_min, 'day': day,
                 'cost': self._algo_cost(pair), 'size': size,
-                'session': session}
+                'session': session, 'levels': self._levels_check(pair, md)}
+
+    def _levels_check(self, pair, md):
+        """Why the Algo's stop or target cannot be set for an entry NOW,
+        in words, or None.
+
+        An ATR level with no ATR yet is a level placed on nothing: the
+        entry waits. And a stop closer than the spread's own bid-ask is
+        one the trade opens already past - it is taken off at a loss the
+        moment it is on (2 October: in and stopped out in the same
+        second). Exits are never held by this.
+        """
+        params = algo_module.clean_params(pair.algo_params)
+        atr = None
+        if 'ATR' in (params['stop_mode'], params['target_mode']):
+            atr = self.algos.atr(pair.key, params['atr_period'])
+            if not atr:
+                return (f'levels: ATR({params["atr_period"]}) not measured '
+                        f'yet - it needs {params["atr_period"] + 1} closed '
+                        f'candles')
+        if not params['stop_loss_on'] or md is None:
+            return None
+        if params['stop_mode'] == 'ATR':
+            stop = params['atr_stop_mult'] * atr
+        else:
+            stop = self._algo_stop_points(
+                pair, params['algo_qty'],
+                sizing.spread_units(pair.clip_lots_b,
+                                    (pair.meta_b or {}).get('contract_size')))
+        width = None
+        if md.get('long_spread') is not None and \
+                md.get('short_spread') is not None:
+            width = md['long_spread'] - md['short_spread']
+        if stop is not None and width is not None and stop <= width:
+            return (f'levels: the stop ({stop:.4f}) is inside the bid-ask '
+                    f'({width:.4f}) - the trade would open already stopped')
+        return None
 
     def _algo_cost(self, pair):
         """What one Algo trade costs besides the crossing, and `k`.

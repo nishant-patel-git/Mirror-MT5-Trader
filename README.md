@@ -187,6 +187,17 @@ as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
   less 2% of margin (on by default, per ladder). Optional and OFF by default: a
   z-stop, back to the mean in profit, and a time stop in candles. No gate ever
   holds an exit.
+- **Stop and target sized by ATR** (Algo settings: *Stop sized by*, *Target
+  sized by*: % of margin or ATR; *ATR period*, default 14; *Stop x ATR*, 2.0;
+  *Target x ATR*, 1.5). ATR is the spread's average true range, close to
+  close with Wilder's smoothing, on the Algo's own closed candles - a spread
+  candle has no honest high or low, the legs make theirs at different
+  moments. Measured from break-even and frozen when the trade opens (saved,
+  so a restart keeps it). In ATR mode no entry is taken until the ATR is
+  measured (period + 1 closed candles), and in either mode an entry whose
+  stop would sit inside the spread's bid-ask - a trade that opens already
+  stopped - is refused, with the reason. The Statistics panel shows the
+  ATR; the backtest sizes each simulated trade from the ATR at its entry.
 - **In position.** The window names it — `in BUY @ 59.11 — TP 59.31 · SL
   58.93` — and draws an SL ◄ entry ► TP bar with the closing price on it.
 - **The filters** (from the stat-arb system's algo), every one judged before an

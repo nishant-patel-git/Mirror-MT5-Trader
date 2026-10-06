@@ -195,3 +195,24 @@ def regime(closes, er_max=0.6, min_crossings=4):
                 state=('TRENDING' if er >= float(er_max)
                        and crossings <= int(min_crossings) else 'RANGE'))
     return body
+
+
+def atr(closes, period=14):
+    """The average true range of the SPREAD, close to close, Wilder's
+    smoothing - in spread points, or None with too few candles.
+
+    A spread candle keeps its close only: the two legs make their highs
+    and lows at different moments, so a spread high/low built from them
+    is a price that never traded. The true range of a close-only series
+    is the size of each move from one close to the next, and that is
+    what is averaged here: period + 1 closes give the first value.
+    """
+    period = int(period)
+    values = [float(c) for c in closes or () if c is not None]
+    if period < 2 or len(values) < period + 1:
+        return None
+    moves = [abs(b - a) for a, b in zip(values, values[1:])]
+    value = sum(moves[:period]) / period
+    for move in moves[period:]:
+        value = (value * (period - 1) + move) / period
+    return value

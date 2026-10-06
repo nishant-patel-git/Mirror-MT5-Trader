@@ -223,6 +223,8 @@ class Store:
         ('positions', 'peak_min', 'REAL'),
         ('positions', 'trough_pnl', 'REAL'),
         ('positions', 'trough_min', 'REAL'),
+        # The ATR frozen when the position was first priced.
+        ('positions', 'entry_atr', 'REAL'),
     )
 
     def _add_missing_columns(self, connection):
@@ -252,8 +254,8 @@ class Store:
                     closed_at, close_reason, realized_pnl, entry_slippage,
                     exit_slippage, click_to_on_ms, naked_ms, leg_a, leg_b,
                     source, entry_margin, peak_pnl, peak_min, trough_pnl,
-                    trough_min)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    trough_min, entry_atr)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (row['position_id'], row['pair_key'], row['side'],
                  row['quantity'], row['entry_spread'], row['exit_spread'],
                  row['spread_units'], row['order_type'], row['opened_at'],
@@ -263,7 +265,8 @@ class Store:
                  json.dumps(row['leg_a']), json.dumps(row['leg_b']),
                  row.get('source'), row.get('entry_margin'),
                  row.get('peak_pnl'), row.get('peak_min'),
-                 row.get('trough_pnl'), row.get('trough_min')))
+                 row.get('trough_pnl'), row.get('trough_min'),
+                 row.get('entry_atr')))
         return position
 
     def remember_tickets(self, rows):
