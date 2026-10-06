@@ -73,6 +73,10 @@ class Coordinator:
         # without this a LIMIT entry was recovered as NOTHING and a close
         # that filled on a resting order came back OPEN.
         self.quoter.on_change = self.remember
+        # A working order that reached its level and did not go on is
+        # journalled as a refusal, in the broker's words - so the desk
+        # and Telegram both say it.
+        self.quoter.on_refusal = self._working_order_refused
         self.reconciler = Reconciler(config, legs, self.book, self.executor,
                                      clock=clock, store=store)
         self._last_reconcile = None
@@ -1807,6 +1811,11 @@ class Coordinator:
         self.quoter.group_for(pair, order)
         return {'ok': True, 'order': order.to_dict(), 'closed': closed}
 
+    def _working_order_refused(self, pair_key, reason, side, level):
+        if self.store is not None:
+            self.store.event('refused', pair_key, reason=reason, side=side,
+                             level=level)
+
     def _refuse(self, pair_key, side, level, reason, closed=()):
         if self.store is not None:
             self.store.event('refused', pair_key, reason=reason,
@@ -2748,6 +2757,14 @@ class Coordinator:
                 'resting_closes': sum(
                     1 for order in self.book.orders(key)
                     if order.position_id),
+                # ...and the same for an ENTRY held here and crossed at
+                # its level (WORKING_ORDERS = TRIGGER, the default).
+                'held_entries': sum(
+                    1 for quote in self.quoter.snapshot(key)
+                    if quote.get('held')
+                    for _ in quote.get('orders') or ()),
+                'working_orders': 'TRIGGER' if self.quoter.triggers()
+                                  else 'QUOTE',
                 'positions': positions,
                 'net_position': net, 'avg_entry': avg_entry,
                 'open_pnl': open_pnl if positions else None,
