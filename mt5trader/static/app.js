@@ -2207,10 +2207,10 @@
       var first = held[0] || {};
       return 'in ' + positionWords(first, digits) +
         (held.length > 1 ? ' (+' + (held.length - 1) + ' more)' : '') +
-        ' — TP ' + fmt(first.tp, digits) + ' · SL ' +
+        ' — TP ' + levelWords(first.tp, first.tp_money, digits) + ' · SL ' +
         (first.sl === null || first.sl === undefined
           ? (((block.params || {}).stop_loss_on) ? '—' : 'off')
-          : fmt(first.sl, digits));
+          : levelWords(first.sl, first.sl_money, digits));
     }
     if (state === 'BLOCKED') { return 'held: ' + (block.blocked || ''); }
     if (state === 'CONFIRMING') {
@@ -2220,6 +2220,13 @@
     }
     if (state === 'STARTING') { return 'starting…'; }
     return 'watching';
+  }
+
+  function levelWords(level, worth, digits) {
+    /* "59.2000 (+$4.00)": the price to compare with the closing spread,
+     * and what closing there is worth to the whole position, net. */
+    return fmt(level, digits) + (worth === null || worth === undefined ? ''
+      : ' (' + (worth > 0 ? '+' : '') + money(worth) + ')');
   }
 
   function positionWords(position, digits) {
@@ -2254,9 +2261,11 @@
       '<div class="ap-track">' + fill +
       '<div class="ap-entry" style="left:' + (split * 100) + '%"></div>' +
       '</div><div class="ap-ends"><span>' +
-      (toSl === null ? 'no SL' : 'SL ' + fmt(first.sl, digits)) +
+      (toSl === null ? 'no SL'
+        : 'SL ' + levelWords(first.sl, first.sl_money, digits)) +
       '</span><span>' +
-      (toTp === null ? 'no TP' : 'TP ' + fmt(first.tp, digits)) +
+      (toTp === null ? 'no TP'
+        : 'TP ' + levelWords(first.tp, first.tp_money, digits)) +
       '</span></div></div>';
   }
 
@@ -2541,16 +2550,19 @@
         kv('Size', fmt(first.quantity, 2) + ' spread(s)') +
         '</div>' +
         kv('Levels', 'BE ' + fmt(first.break_even, digits) + ' · TP ' +
-           fmt(first.tp, digits) + ' · SL ' +
+           (first.tp === null || first.tp === undefined ? DASH
+             : levelWords(first.tp, first.tp_money, digits)) + ' · SL ' +
            (first.sl === null || first.sl === undefined
-             ? (params.stop_loss_on ? DASH : 'off') : fmt(first.sl, digits)) +
+             ? (params.stop_loss_on ? DASH : 'off')
+             : levelWords(first.sl, first.sl_money, digits)) +
            (first.stop_mode === 'ATR' || first.target_mode === 'ATR'
              ? ' <small>(ATR ' + fmt(first.entry_atr, digits) + ' at entry: ' +
                (first.target_mode === 'ATR' ? 'TP ' + params.atr_target_mult + '\u00d7' : 'TP %') +
                ', ' + (first.stop_mode === 'ATR' ? 'SL ' + params.atr_stop_mult + '\u00d7' : 'SL %') +
                ')</small>' : ''),
            '', 'compare with the CLOSING price: the Sell spread for a LONG, '
-           + 'the Buy spread for a SHORT') +
+           + 'the Buy spread for a SHORT. In brackets: the net P&L of the '
+           + 'whole position closing there, after every cost') +
         (params.progress_bar === false ? '' : progressHtml(first, digits));
     }
     node.querySelector('.aw-signal').innerHTML = html;
