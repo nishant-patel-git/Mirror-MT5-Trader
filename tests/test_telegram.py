@@ -417,20 +417,35 @@ def watch(bot):
     return bot.alert_once()
 
 
+def failed_order(id_):
+    return {'id': id_, 'kind': 'algo_order', 'pair_key': KEY,
+            'detail': {'action': 'ENTER', 'side': 'BUY', 'ok': False,
+                       'reason': '10027 AutoTrading disabled by client'}}
+
+
 def test_history_already_in_the_journal_is_not_replayed(bot):
-    bot.desk.event_rows = [{'id': 5, 'kind': 'algo_signal', 'pair_key': KEY,
-                            'detail': {'action': 'ENTER', 'side': 'SELL'}}]
+    bot.desk.event_rows = [failed_order(5)]
     assert watch(bot) == []
     # The control: one that arrives after the first look IS told.
-    bot.desk.event_rows.insert(0, {'id': 6, 'kind': 'algo_signal',
-                                   'pair_key': KEY,
-                                   'detail': {'action': 'ENTER',
-                                              'side': 'SELL', 'z': 2.1,
-                                              'spread': 12.3,
-                                              'mode': 'LIVE'}})
+    bot.desk.event_rows.insert(0, failed_order(6))
     told = watch(bot)
-    assert len(told) == 1 and 'ENTER H to L' in told[0]
-    assert 'SIGNAL  ·  ENTER H to L  ·  LIVE' in told[0]
+    assert len(told) == 1 and 'ORDER FAILED' in told[0]
+
+
+def test_a_signal_is_not_an_alert_the_trade_is(bot):
+    """A signal, LIVE or dry run, is the desk's business: in LIVE the
+    TRADE ENTRY / EXIT says it, in a dry run nothing happened."""
+    watch(bot)
+    for i, (action, mode) in enumerate((('ENTER', 'LIVE'), ('EXIT', 'LIVE'),
+                                        ('ENTER', 'DRY_RUN'))):
+        bot.desk.event_rows.insert(0, {
+            'id': 10 + i, 'kind': 'algo_signal', 'pair_key': KEY,
+            'detail': {'action': action, 'side': 'SELL', 'z': 2.1,
+                       'spread': 12.3, 'mode': mode}})
+    assert watch(bot) == []
+    # The control: a failure among them still is.
+    bot.desk.event_rows.insert(0, failed_order(20))
+    assert 'ORDER FAILED' in watch(bot)[0]
 
 
 def test_an_algo_order_that_failed_says_why(bot):
@@ -471,18 +486,42 @@ def test_a_price_problem_is_told_once_it_has_lasted(bot):
     assert 'back to normal' in watch(bot)[0]
 
 
-def test_a_blocked_signal_is_told_and_its_repeats_are_not(bot):
+def test_a_blocked_signal_is_never_an_alert(bot):
+    """The edge filter re-judges every tick; its ratio changes with the
+    price, so each look read as new - a stream of SIGNAL BLOCKED."""
     watch(bot)
     block = bot.desk.snapshot['pairs'][KEY]['algo_block']
-    block['last_blocked'] = {'side': 'SELL', 'z': 2.1, 'at': 1,
-                             'reason': 'past the session cutoff'}
-    assert 'past the session cutoff' in watch(bot)[0]
-    block['last_blocked'] = dict(block['last_blocked'], at=2)
-    assert watch(bot) == []                      # the same, again
-    # The control: a different reason is news.
-    block['last_blocked'] = dict(block['last_blocked'], at=3,
-                                 reason='edge filter: capture 0.9x')
-    assert 'edge filter' in watch(bot)[0]
+    for at, ratio in enumerate(('0.11', '0.12', '0.10'), start=1):
+        block['last_blocked'] = {'side': 'BUY', 'z': -0.77, 'at': at,
+                                 'reason': f'edge filter: capture {ratio}x '
+                                           f'the cost, under the 1.3x '
+                                           f'required'}
+        assert watch(bot) == []
+    # The control: a day's limit on the same ladder IS told.
+    block['halt'] = 'max trades for the day (10) reached'
+    assert 'DAILY LIMIT' in watch(bot)[0]
+
+
+def test_going_into_or_out_of_live_is_told(bot):
+    row = bot.desk.snapshot['pairs'][KEY]
+    row.update(algo_on=True, algo_mode='DRY_RUN')
+    watch(bot)
+    row['algo_mode'] = 'LIVE'
+    told = watch(bot)
+    assert len(told) == 1 and 'ALGO MODE' in told[0] and 'LIVE' in told[0]
+    assert watch(bot) == []                      # once
+    row['algo_on'] = False                       # e.g. a restart
+    assert 'LIVE is off' in watch(bot)[0]
+
+
+def test_the_CONTROL_dry_run_and_off_are_not_news(bot):
+    row = bot.desk.snapshot['pairs'][KEY]
+    row.update(algo_on=False)
+    watch(bot)
+    row.update(algo_on=True, algo_mode='DRY_RUN')
+    assert watch(bot) == []
+    row.update(algo_on=False)
+    assert watch(bot) == []
 
 
 def test_the_daily_summary_is_sent_once_at_the_cutoff(bot):

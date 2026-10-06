@@ -21,11 +21,13 @@ What it may do, and how:
   holds it to the commands it is allowed to send.
 - **Buttons expire.** A button is a short token, good for ten minutes.
   A confirm pressed on yesterday's menu does nothing but say so.
-- **Alerts** are pushed to every allowed user: the Algo's entries and
-  exits, problems (the engine stalling, an account dropping out, a
-  stale or jumping price, a day's limit hit, a refusal), blocked
-  signals (throttled), and a summary once a day at the session cutoff.
-  `/alerts` turns them off and on per chat.
+- **Alerts** are pushed to every allowed user, and only for what
+  needs a person: a trade opened or closed, a failure (the engine
+  stalling, an account dropping out, an order failed or refused, a
+  stale or jumping price), a day's limit hit, a ladder going into or
+  out of LIVE, and a summary once a day at each ladder's close. A
+  signal - taken or held back - is not news: the trade is, and the
+  desk shows the rest. `/alerts` turns them off and on per chat.
 
 The desk's screen lock does not apply here: the lock guards the desk
 PC, and the bot has its own guard — the allow-list. It passes the web
@@ -59,8 +61,6 @@ INPUT_TTL_SEC = 300.0
 #: `click`, no `close_at_limit`: it never opens a position.
 ALLOWED_COMMANDS = frozenset({'set_algo', 'set_pair', 'flatten_pair', 'kill'})
 
-#: The same blocked signal again within this long is not news.
-BLOCKED_REPEAT_SEC = 900.0
 
 #: A price problem has to last this long before it is worth a message:
 #: a feed that is stale for one poll and back the next is not one.
@@ -1629,7 +1629,7 @@ class AlertWatch:
         self.problems = {}          # pair -> (problem, since, told)
         self.errors = {}
         self.halts = {}
-        self.blocked = {}           # pair -> (at, (side, reason), told_at)
+        self.live = {}              # pair -> is it LIVE
         self.positions = {}         # id -> pair key
         self.summary_sent = {}      # pair -> the day its summary went
 
@@ -1737,26 +1737,16 @@ class AlertWatch:
                     ('Reason', halt),
                     ('Exits', 'still managed')]))
             self.halts[key] = halt
-            # A signal held back.
-            last = block.get('last_blocked')
-            if last and last.get('at'):
-                seen = self.blocked.get(key)
-                what = (last.get('side'), last.get('reason'))
-                if seen is None or seen[0] != last['at']:
-                    told = seen[2] if seen else None
-                    repeat = (seen is not None and seen[1] == what
-                              and told is not None
-                              and now - told < BLOCKED_REPEAT_SEC)
-                    if not first and not repeat:
-                        out.append(title('SIGNAL BLOCKED', now) + '\n'
-                                   + table([
-                                       ('Ladder', name),
-                                       ('Side', side_words(last.get('side'))),
-                                       ('Z-score', plain(last.get('z'), 2,
-                                                         True)),
-                                       ('Reason', last.get('reason'))]))
-                        told = now
-                    self.blocked[key] = (last['at'], what, told)
+            # Into or out of LIVE - from the desk, the other Telegram
+            # user, or a restart (LIVE is OFF after every restart).
+            # Dry run and off are not money, so not news.
+            live = mode_word(row) == 'LIVE'
+            if key in self.live and live != self.live[key] and not first:
+                out.append(title('ALGO MODE', now) + '\n' + table([
+                    ('Ladder', name),
+                    ('Mode', 'LIVE - the Algo sends orders' if live else
+                     MODE_WORDS[mode_word(row)] + ' - LIVE is off')]))
+            self.live[key] = live
 
         for event in new_events if not first else ():
             text = self._event(event, pairs, now)
@@ -1786,26 +1776,8 @@ class AlertWatch:
         detail = event.get('detail') or {}
         key = event.get('pair_key')
         name = (pairs.get(key) or {}).get('name') or key or ''
-        if kind == 'algo_signal':
-            mode = 'LIVE' if detail.get('mode') == 'LIVE' else 'DRY RUN'
-            side = side_words(detail.get('side'))
-            if detail.get('action') == 'ENTER':
-                return (title(f'SIGNAL  ·  ENTER {side}  ·  {mode}', now)
-                        + '\n' + table([
-                            ('Ladder', name),
-                            ('Spread', plain(detail.get('spread'), 4)),
-                            ('Z-score', plain(detail.get('z'), 2, True)),
-                            ('Action', 'order sent to both accounts'
-                             if mode == 'LIVE' else 'nothing sent')]))
-            return (title(f'SIGNAL  ·  EXIT {side}  ·  {mode}', now)
-                    + '\n' + table([
-                        ('Ladder', name),
-                        ('Reason', detail.get('reason')),
-                        ('Spread', plain(detail.get('spread'), 4)),
-                        ('Z-score', plain(detail.get('z'), 2, True)),
-                        ('Net P&L', usd(detail.get('net_pnl'))),
-                        ('Action', 'closing by ticket' if mode == 'LIVE'
-                         else 'nothing sent')]))
+        # A signal is not news: in LIVE the TRADE ENTRY / EXIT says it,
+        # in a dry run nothing happened. The desk keeps every one.
         if kind == 'algo_order':
             if detail.get('ok'):
                 return None          # the TRADE ENTRY / EXIT says it
@@ -1815,13 +1787,6 @@ class AlertWatch:
                         ('Ladder', name),
                         ('Side', side_words(detail.get('side'))),
                         ('Reason', detail.get('reason'))]))
-        if kind == 'algo_switch':
-            return title('ALGO MODE', now) + '\n' + table([
-                ('Ladder', name),
-                ('Mode', MODE_WORDS.get(
-                    'OFF' if detail.get('algo') != 'ALGO' else
-                    ('LIVE' if detail.get('mode') == 'LIVE' else 'DRY'),
-                    detail.get('algo')))])
         if kind == 'refused':
             return title('ORDER REFUSED', now) + '\n' + table([
                 ('Ladder', name), ('Reason', detail.get('reason'))])

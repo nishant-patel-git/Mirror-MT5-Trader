@@ -271,24 +271,24 @@ listed with what it does.
   `/set break 23:55-01:05` (or `none`), broker time.
 - `/alerts` on / off, `/ping`, and **KILL ALL**.
 
-Alerts, to every allowed user: **TRADE ENTRY** when a position opens (legs,
-notional, margin, entry spread and z, TP / SL / BE and what each is worth),
-**TRADE EXIT** when it closes (each leg in and out, the spread both ways,
-gross, commission, net, slippage, then an ANALYSIS: outcome, peak and trough
-with when, how much of the best it kept, hold time, z path), **SIGNAL** for
-the Algo's entries and exits, **SIGNAL BLOCKED**, **ORDER FAILED** with the
-broker's words, **FEED WARNING / RESTORED**, **SYSTEM ERROR**, **DAILY LIMIT**
-and **END OF DAY** at the session cutoff.
+Alerts go to every allowed user, and only for what needs a person:
+**TRADE ENTRY** when a position opens (legs, notional, margin, entry spread
+and z, TP / SL / BE and what each is worth), **TRADE EXIT** when it closes
+(each leg in and out, the spread both ways, gross, commission, net,
+slippage, then an ANALYSIS: outcome, peak and trough with when, how much of
+the best it kept, hold time, z path), **ORDER FAILED / ORDER REFUSED** with
+the broker's words, **SYSTEM ERROR** (the engine stalling, an account
+dropping out), **ERROR**, **RECONCILER**, **FEED WARNING / RESTORED** (a
+stale or jumping price that lasts 20 s), **DAILY LIMIT**, **ALGO MODE**
+when a ladder goes into or out of LIVE (a restart included), and **END OF
+DAY** at each ladder's close. Signals - taken or held back - are not sent:
+in LIVE the trade is the news, in a dry run nothing happened, and the desk
+and the Dashboard keep every one.
 
 Every action asks Confirm / Cancel first; LIVE asks twice. Buttons expire
 after ten minutes. It goes through the web app's own routes, so every
 check and refusal is the one the screen gets — and it can switch, save
-and CLOSE, never open a position. Alerts: the Algo's entries and exits
-(dry run and LIVE, with the broker's words on a failure), problems (the
-engine stalling, an account dropping out, a stale or jumping price that
-lasts 20 s, a day's limit, a refusal), blocked signals (the same one
-again within 15 minutes is not repeated) and a daily summary at the
-session cutoff.
+and CLOSE, never open a position.
 
 Setting it up:
 
