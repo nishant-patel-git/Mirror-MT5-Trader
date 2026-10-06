@@ -594,3 +594,23 @@ def config(pair):
     cfg = TraderConfig(pairs={pair.key: pair})
     cfg.settings['LEG_DEADLINE_SEC'] = 0.05     # tests do not wait 2s
     return cfg
+
+
+# -- which kind of working order --------------------------------------------------
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        'markers', 'quote: run with WORKING_ORDERS = QUOTE, the one-leg '
+                   'pending the desk used before the spread trigger')
+
+
+@pytest.fixture(autouse=True)
+def _working_orders(request, monkeypatch):
+    """Working orders are held and crossed at the level by default. The
+    tests of the old one-leg quote - its fills, hedges, pulls and the
+    naked legs it can leave - still run against it, marked `quote`, so
+    the desk setting that brings it back stays safe."""
+    if request.node.get_closest_marker('quote'):
+        from mt5trader import config as cfg
+        monkeypatch.setitem(cfg.DEFAULT_SETTINGS, 'WORKING_ORDERS', 'QUOTE')

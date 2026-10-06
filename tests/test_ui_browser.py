@@ -119,6 +119,8 @@ class Publisher:
         #: against the broker's own number.
         self.resting_closes = 0
         self.broker_pendings = None
+        #: Any other field for the pair's row, as the engine sends it.
+        self.pair_extra = {}
         #: Which leg LIMIT mode rests its real pending on. The other
         #: leg is crossed at market when it fills, and a broker window
         #: showing nothing on that leg is the mode, not a fault.
@@ -146,6 +148,8 @@ class Publisher:
                            self.broker_pendings, self.max_qty)
         if at is not None:
             payload['at'] = at
+        for row in payload['pairs'].values():
+            row.update(self.pair_extra)
         # A tmp name of its OWN. The timer thread and the test publish
         # at the same moment often enough to matter: sharing one tmp
         # file, the slower writer's file is gone before it renames it,
@@ -5529,3 +5533,48 @@ def test_the_backtest_button_runs_it_on_the_engine_and_shows_both_runs(page):
         page.evaluate('() => { window.fetch = window.__realFetch || '
                       'window.fetch; }')
         _algo_off(page)
+
+
+def test_a_held_working_order_is_the_mode_not_a_fault(page):
+    """A working order is HELD by the desk and both legs cross when the
+    spread reaches it, so nothing is at the broker - by design. It must
+    not light up as an order that failed to place."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    level = page.evaluate(
+        """() => window.MT5Trader.state.snapshot
+             .pairs['XAUUSD_|GC1226'].rows[5].level""")
+    publisher.orders = [{'order_id': 'O1', 'level': level, 'side': 'SELL',
+                         'quantity': 1, 'filled_quantity': 0,
+                         'state': 'WORKING', 'time_in_force': 'DAY'}]
+    publisher.quotes = [{'pair_key': 'XAUUSD_|GC1226', 'side': 'SELL',
+                         'level': level, 'leg': 'BOTH', 'ticket': None,
+                         'held': True, 'intent': 'OPEN', 'reason': None,
+                         'orders': ['O1']}]
+    publisher.working_sells = 1
+    publisher.broker_pendings = 0
+    publisher.pair_extra = {'working_orders': 'TRIGGER', 'held_entries': 1}
+    publisher.publish()
+    page.wait_for_function(
+        """() => (document.querySelector('.ladder .quoting-note') || {})
+             .textContent && document.querySelector('.ladder .quoting-note')
+             .textContent.indexOf('held here') >= 0""", timeout=WAIT)
+    assert page.locator('.ladder .quoting-note.held').count() == 0
+    assert page.locator('.ladder .cnt-w.mismatch').count() == 0
+    assert page.locator('.ladder td.work.held').count() == 0
+
+    # THE CONTROL: a held order something IS holding (a stale price)
+    # says so, in its own words.
+    publisher.quotes[0]['reason'] = ('leg A stale 30s - holding the '
+                                     'order, nothing sent')
+    publisher.publish()
+    page.wait_for_selector('.ladder .quoting-note.held', timeout=WAIT)
+    note = page.text_content('.ladder .quoting-note')
+    assert 'ORDER HELD' in note and 'stale' in note
+
+    publisher.orders = None
+    publisher.quotes = None
+    publisher.working_sells = 0
+    publisher.broker_pendings = None
+    publisher.pair_extra = {}
+    publisher.publish()

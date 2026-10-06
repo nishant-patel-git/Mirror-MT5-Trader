@@ -1033,6 +1033,12 @@
      * Said in words, because "leg a" on one panel was the only place
      * this appeared and it read as leg A having nothing. */
     if (!quote) { return ''; }
+    if (quote.held) {
+      // A working order held HERE by design: nothing at the broker
+      // until the spread reaches it, then both legs cross together.
+      return ', held by the desk - both legs cross at market when the ' +
+        'spread reaches it' + (quote.reason ? ' (' + quote.reason + ')' : '');
+    }
     if (!quote.ticket) {
       return ', not at the broker yet' +
         (quote.reason ? ' (' + quote.reason + ')' : '');
@@ -1936,12 +1942,16 @@
       var held = null;
       (row.quotes || []).forEach(function (quote) {
         if (held || quote.intent === 'CLOSE' || quote.ticket) { return; }
-        held = quote.reason || 'not at the broker yet';
+        if (quote.held && !quote.reason) { return; }    // held by design
+        held = (quote.held ? 'ORDER HELD: ' : 'NOT AT THE BROKER: ') +
+          (quote.reason || 'not at the broker yet');
       });
       note.textContent = held
-        ? 'NOT AT THE BROKER: ' + held
+        ? held
         : (row.order_type === 'MARKET'
             ? 'MARKET: both legs cross at once'
+            : row.working_orders === 'TRIGGER'
+            ? 'LIMIT: held here · both legs cross when the spread reaches it'
             : (leg
                 ? 'LIMIT: quotes leg ' + leg + (symbol ? ' · ' + symbol : '') +
                   ' · leg ' + (leg === 'A' ? 'B' : 'A') + ' crosses on fill'
@@ -2101,7 +2111,9 @@
     // so counting it against the broker's number made every reducing
     // click read as two orders that had failed to place, in red.
     var closes = row.resting_closes || 0;
-    var expected = working - closes;
+    // A working ENTRY held here (the spread trigger) has no pending
+    // either, by design.
+    var expected = working - closes - (row.held_entries || 0);
     var disagree = resting !== undefined && resting !== expected;
     counts.querySelector('.cnt-w').textContent =
       'W:' + working +
@@ -3171,6 +3183,9 @@
       // the broker" flagged the mode working as a fault — every
       // resting close came up amber, permanently.
       if (quote.intent === 'CLOSE') { return; }
+      // Nor does a held entry: it is the mode, not a fault - unless
+      // something is holding it (a stale price), which IS said.
+      if (quote.held && !quote.reason) { return; }
       (quote.orders || []).forEach(function (id) {
         heldOff[id] = quote.reason ||
           'not resting at the broker yet';
@@ -3844,7 +3859,10 @@
         html += '<td>' + (order.position_id
           ? '<span class="closing">closes ' +
             escapeHtml(order.position_id) + '</span><br>'
-          : '') + (quote.leg
+          : '') + (quote.held
+          ? 'both legs<div class="hint">cross at market when the spread ' +
+            'reaches it</div>'
+          : quote.leg
           ? 'leg ' + quote.leg +
             (quote.symbol ? ' · ' + escapeHtml(quote.symbol) : '') +
             (quote.crosses_leg
@@ -3867,7 +3885,7 @@
         //
         // Its own row, spanning the table, so no scrolling can hide it.
         var whyNot = order.state === 'WORKING' && !quote.ticket &&
-          quote.intent !== 'CLOSE'
+          quote.intent !== 'CLOSE' && !(quote.held && !quote.reason)
           ? (quote.reason || order.reason ||
              'not at the broker yet — no reason given')
           : null;

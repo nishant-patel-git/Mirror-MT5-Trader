@@ -237,6 +237,23 @@ DEFAULT_SETTINGS = {
     #: Ladder row height in pixels. 17 is the reference screen's; a
     #: bigger target is a faster, safer click on a large monitor.
     'ROW_HEIGHT_PX': 17,
+    #: What backs a WORKING ORDER (a LIMIT click, or a MARKET click
+    #: away from the touch) until it fills.
+    #:
+    #: TRIGGER (the default): NOTHING at the broker. The level is held
+    #: here and, when the EXECUTABLE spread reaches it - the Sell
+    #: spread at or over a SELL, the Buy spread at or under a BUY -
+    #: both legs cross at MARKET together, through the same path a
+    #: market click takes. It fills when the SPREAD gets there.
+    #:
+    #: QUOTE: the old way - a real limit on one leg, the other crossed
+    #: when it fills. It earns one leg's bid-ask, but on two legs that
+    #: move together (spot gold against the gold future) the limit
+    #: fills on a move in GOLD, not in the spread, and the leg crossed
+    #: afterwards has moved the same way: live, a SELL at 28.30 went
+    #: on at 26.84, every fill the same direction. Kept for a pair
+    #: whose legs really are independent; not on the screen.
+    'WORKING_ORDERS': 'TRIGGER',
     #: Re-peg dead band, in ladder increments. Every MODIFY loses queue
     #: position, so re-pricing three times a second guarantees you are
     #: never at the front of a queue — which defeats quoting entirely

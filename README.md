@@ -32,7 +32,7 @@ The spec's build order, in order. Steps 1-8 are in:
 | `mt5trader/executor.py` | MARKET entry both legs, the 2.0s escalation, unwind by ticket, ticket-based closes |
 | `mt5trader/book.py` | Synthetic orders one-per-click, positions, net and average |
 | `mt5trader/coordinator.py` | The poll loop, the guards, the sweeps, one status snapshot for every panel |
-| `mt5trader/quoter.py` | The synthetic LIMIT path: quote one leg, re-peg off the OTHER leg by MODIFY, cross on fill |
+| `mt5trader/quoter.py` | Working orders: held here and crossed on both legs when the spread reaches the level (default); the old one-leg quote behind `WORKING_ORDERS = QUOTE`; resting closes |
 | `mt5trader/reconcile.py` | Orphans and ghosts, three strikes, contract-size-correct P&L |
 | `mt5trader/session.py` | The one cutoff: DAY orders die, each ladder's overnight rule decides |
 | `mt5trader/slippage.py` | The session window on the broker's clock, and the slippage report over it |
@@ -109,6 +109,23 @@ account. With two brokers there is no combined margin — each posts its
 own and the pair can only be carried by the **weaker** of the two, so
 that account is named rather than averaged into a total that reads
 comfortable.
+
+**Working orders (LIMIT) are held by the desk.** A LIMIT click - or a
+MARKET click away from the touch - puts NOTHING at the broker. The desk
+holds the level, and when the EXECUTABLE spread reaches it (the Sell
+spread at or over a SELL, the Buy spread at or under a BUY) both legs
+cross at market together, through the same path a market click takes.
+It fills when the SPREAD gets there. It used to be a real limit on one
+leg with the other crossed on the fill; on two legs that move together
+(spot gold against the gold future) that limit filled on a move in gold,
+not in the spread, and the leg crossed after had moved the same way -
+live, a SELL at 28.30 went on at 26.84, every fill the same direction.
+A held order costs both legs' bid-ask and works only while the desk is
+running (as the old one did - our pendings are swept at shutdown). A
+stale or jumping price holds it; one that reaches its level and is
+refused ends there, in the broker's words, and is journalled. The old
+quote is still behind the desk setting `WORKING_ORDERS = QUOTE` for a
+pair whose legs genuinely move apart.
 
 **Slippage — the report over a real session.** The sixth monitor tab
 reports the session you are in, cut at the cutoff on the **broker's**

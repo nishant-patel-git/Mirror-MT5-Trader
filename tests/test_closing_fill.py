@@ -107,6 +107,7 @@ def test_a_resting_close_puts_NOTHING_at_the_broker(engine, pair, legs):
     assert position.is_open is True
 
 
+@pytest.mark.quote
 def test_the_CONTROL_an_ENTRY_still_rests_a_real_pending(engine, pair, legs):
     """The control. Only CLOSING orders lose their pending — an entry
     limit still rests one, because a pending that OPENS is exactly what
