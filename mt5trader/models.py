@@ -278,6 +278,10 @@ class SpreadPosition:
         #: % of it, so they stay where they were set instead of drifting
         #: as the oil price moves the terminals' margin. None until read.
         self.entry_margin = None
+        #: The spread's ATR (spread points) when this position was first
+        #: priced, and kept - an ATR stop or target is sized from it and
+        #: stays where it was set. None until read.
+        self.entry_atr = None
         #: The best and worst net P&L while open, and the minute (from
         #: the open) each was reached — the trade's MFE and MAE. None
         #: until measured: a trade never marked has no extremes, not 0.
@@ -394,6 +398,7 @@ class SpreadPosition:
             'confirmed': self.confirmed,
             'source': self.source,
             'entry_margin': self.entry_margin,
+            'entry_atr': self.entry_atr,
             'peak_pnl': self.peak_pnl, 'peak_min': self.peak_min,
             'trough_pnl': self.trough_pnl, 'trough_min': self.trough_min,
             'leg_a': self.leg_a.to_dict() if self.leg_a else None,
@@ -427,6 +432,7 @@ class SpreadPosition:
         position.naked_ms = raw.get('naked_ms')
         position.source = raw.get('source') or MANUAL
         position.entry_margin = raw.get('entry_margin')
+        position.entry_atr = raw.get('entry_atr')
         for name in ('peak_pnl', 'peak_min', 'trough_pnl', 'trough_min'):
             setattr(position, name, raw.get(name))
         #: Recovered from disk rather than seen happen. The monitor says

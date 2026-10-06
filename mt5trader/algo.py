@@ -173,6 +173,17 @@ DEFAULT_PARAMS = {
     #: is half an exit.
     'stop_loss_on': True,
     'stop_loss_pct': 2.0,
+    #: How the stop and the target are SIZED: MARGIN (a % of the margin
+    #: the trade ties up - the stop above, the ladder's TP % for the
+    #: target) or ATR (a multiple of the spread's average true range,
+    #: close to close, on the Algo's own candles). ATR sizes itself to
+    #: the market: wider when the spread is busy, tighter when quiet.
+    #: Either way it is measured from break-even and frozen at entry.
+    'stop_mode': 'MARGIN',
+    'target_mode': 'MARGIN',
+    'atr_period': 14,
+    'atr_stop_mult': 2.0,
+    'atr_target_mult': 1.5,
     #: Show the SL <- entry -> TP bar while a position is on.
     'progress_bar': True,
     #: What ONE Algo trade is, in spreads (one spread = the ladder's
@@ -221,7 +232,11 @@ _BOOLS = ('stop_z_on', 'reversion_on', 'time_stop_on', 'stop_loss_on',
           'progress_bar', 'edge_on', 'regime_on', 'prob_on', 'reentry_on',
           'trend_on')
 _INTS = ('timeframe_min', 'length', 'confirm_ticks', 'time_stop_candles',
-         'max_trades_day', 'max_losses_row', 'regime_min_crossings')
+         'max_trades_day', 'max_losses_row', 'regime_min_crossings',
+         'atr_period')
+
+#: How a stop or a target is sized.
+LEVEL_MODES = ('MARGIN', 'ATR')
 
 
 #: The directions an entry may take, and the side each one is.
@@ -245,6 +260,11 @@ def clean_params(raw):
             if key == 'direction':
                 chosen = str(value).strip().upper()
                 if chosen in DIRECTIONS:
+                    out[key] = chosen
+                continue
+            if key in ('stop_mode', 'target_mode'):
+                chosen = str(value).strip().upper()
+                if chosen in LEVEL_MODES:
                     out[key] = chosen
                 continue
             if key in _BOOLS:
@@ -275,6 +295,10 @@ def clean_params(raw):
         out['trend_lookback_min'] = DEFAULT_PARAMS['trend_lookback_min']
     if out['algo_qty'] <= 0:
         out['algo_qty'] = DEFAULT_PARAMS['algo_qty']
+    out['atr_period'] = max(2, out['atr_period'])
+    for key in ('atr_stop_mult', 'atr_target_mult'):
+        if out[key] <= 0:
+            out[key] = DEFAULT_PARAMS[key]
     return out
 
 
@@ -291,6 +315,10 @@ def check_params(raw):
             if str(value).strip().upper() not in DIRECTIONS:
                 problems.append(f'direction {value!r} — choose BOTH, '
                                 f'H_TO_L or L_TO_H')
+            continue
+        if key in ('stop_mode', 'target_mode'):
+            if str(value).strip().upper() not in LEVEL_MODES:
+                problems.append(f'{key} {value!r} — choose MARGIN or ATR')
             continue
         try:
             number = float(value)
@@ -309,6 +337,10 @@ def check_params(raw):
                             'inside the band, in z')
         elif key == 'trend_sigma' and number <= 0:
             problems.append('trend filter sigma must be above 0')
+        elif key == 'atr_period' and number < 2:
+            problems.append('ATR period must be 2 candles or more')
+        elif key in ('atr_stop_mult', 'atr_target_mult') and number <= 0:
+            problems.append(f'{key.replace("_", " ")} must be above 0')
         elif number < 0:
             problems.append(f'{key} cannot be negative')
     return problems
@@ -322,6 +354,7 @@ def zscore(value, mean, sigma):
 
 
 _POSITION_DISPLAY = ('quantity', 'opened_at', 'age_sec', 'source',
+                     'entry_atr', 'stop_mode', 'target_mode',
                      'leg_a_side', 'leg_a_entry', 'leg_a_now',
                      'leg_b_side', 'leg_b_entry', 'leg_b_now')
 
@@ -558,6 +591,8 @@ class AlgoSignal:
             return f"cooldown {_mmss(body['cooldown_sec'])}"
         if gates.get('session'):
             return gates['session']
+        if gates.get('levels'):
+            return gates['levels']
         buffer_min = p['cutoff_buffer_min']
         cutoff = gates.get('cutoff_min')
         if buffer_min and cutoff is not None and cutoff <= buffer_min:

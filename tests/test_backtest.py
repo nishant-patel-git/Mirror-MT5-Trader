@@ -90,7 +90,7 @@ def test_the_backtest_cannot_reach_an_order():
                 a.name for a in node.names))
         elif isinstance(node, ast.Import):
             imported.update(a.name for a in node.names)
-    assert imported <= {'datetime', 're', ':algo', ':bands',
+    assert imported <= {'datetime', 're', ':algo', ':algofilters', ':bands',
                         'algodesk:judge_filters'}, imported
 
 

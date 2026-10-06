@@ -1278,6 +1278,11 @@
     ['.ls-az-warmup', 'warmup_min', 'number'],
     ['.ls-az-sl-on', 'stop_loss_on', 'check'],
     ['.ls-az-sl', 'stop_loss_pct', 'number'],
+    ['.ls-az-stop-mode', 'stop_mode', 'text'],
+    ['.ls-az-target-mode', 'target_mode', 'text'],
+    ['.ls-az-atr-period', 'atr_period', 'number'],
+    ['.ls-az-atr-stop', 'atr_stop_mult', 'number'],
+    ['.ls-az-atr-target', 'atr_target_mult', 'number'],
     ['.ls-az-progress', 'progress_bar', 'check'],
     ['.ls-az-qty', 'algo_qty', 'number'],
     ['.ls-az-maxtrades', 'max_trades_day', 'number'],
@@ -2538,7 +2543,12 @@
         kv('Levels', 'BE ' + fmt(first.break_even, digits) + ' · TP ' +
            fmt(first.tp, digits) + ' · SL ' +
            (first.sl === null || first.sl === undefined
-             ? (params.stop_loss_on ? DASH : 'off') : fmt(first.sl, digits)),
+             ? (params.stop_loss_on ? DASH : 'off') : fmt(first.sl, digits)) +
+           (first.stop_mode === 'ATR' || first.target_mode === 'ATR'
+             ? ' <small>(ATR ' + fmt(first.entry_atr, digits) + ' at entry: ' +
+               (first.target_mode === 'ATR' ? 'TP ' + params.atr_target_mult + '\u00d7' : 'TP %') +
+               ', ' + (first.stop_mode === 'ATR' ? 'SL ' + params.atr_stop_mult + '\u00d7' : 'SL %') +
+               ')</small>' : ''),
            '', 'compare with the CLOSING price: the Sell spread for a LONG, '
            + 'the Buy spread for a SHORT') +
         (params.progress_bar === false ? '' : progressHtml(first, digits));
@@ -2559,6 +2569,11 @@
       '<div class="aw-head">Statistics</div><div class="aw-grid">' +
       kv('Mean (EMA)', fmt(block.mean, digits)) +
       kv('Std dev', fmt(block.sigma, digits)) +
+      kv('ATR(' + (block.atr_period || params.atr_period || 14) + ')',
+         fmt(block.atr, digits), '',
+         'the average size of one candle\u2019s move in the spread, close ' +
+         'to close (Wilder). In ATR mode the stop and target are ' +
+         'multiples of it, frozen when the trade opens') +
       kv('Half-life', filters.half_life_minutes === null ||
          filters.half_life_minutes === undefined ? DASH
          : Math.round(filters.half_life_minutes) + ' min', '',

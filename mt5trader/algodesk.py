@@ -165,6 +165,16 @@ class AlgoDesk:
 
     # -- the switch ---------------------------------------------------------
 
+    def atr(self, key, period):
+        """The spread's ATR on this ladder's CLOSED candles, in spread
+        points, or None while the Algo is off or the candles are too
+        few."""
+        run = self._runs.get(key)
+        if run is None:
+            return None
+        closes = [run.candles.closed[b] for b in sorted(run.candles.closed)]
+        return algofilters.atr(closes, period)
+
     def is_on(self, key):
         return key in self._runs
 
@@ -309,6 +319,8 @@ class AlgoDesk:
         gates['entry_check'] = check
         body = run.signal.evaluate(now, md, stats, positions, gates)
         body['filters'] = filters
+        body['atr'] = self.atr(pair.key, params['atr_period'])
+        body['atr_period'] = params['atr_period']
         if body.get('blocked_side'):
             run.last_blocked = {'side': body['blocked_side'],
                                 'z': body.get('blocked_z'), 'at': now,

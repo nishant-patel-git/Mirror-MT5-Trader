@@ -647,6 +647,31 @@
             <span>SL % margin</span>
             <input type="checkbox" class="ls-az-sl-on">
             <input class="ls-az-sl" type="number" min="0" step="0.1"></label>
+          <!-- HOW THE STOP AND THE TARGET ARE SIZED. A % of margin is the
+               same distance on a quiet day and a wild one; an ATR stop
+               sizes itself to the market. Measured from break-even and
+               frozen when the trade opens, either way. -->
+          <label class="lsf" title="How the stop loss is sized. % of margin: the SL % margin above. ATR: a multiple of the spread's average true range (close to close, on the Algo's candles) - wider when the spread is busy, tighter when it is quiet. Frozen when the trade opens.">
+            <span>Stop sized by</span>
+            <select class="ls-az-stop-mode">
+              <option value="MARGIN">% of margin</option>
+              <option value="ATR">ATR</option>
+            </select></label>
+          <label class="lsf" title="How the take-profit is sized. % of margin: this ladder's TP % of margin. ATR: a multiple of the spread's ATR. Frozen when the trade opens.">
+            <span>Target sized by</span>
+            <select class="ls-az-target-mode">
+              <option value="MARGIN">% of margin</option>
+              <option value="ATR">ATR</option>
+            </select></label>
+          <label class="lsf" title="How many candles the ATR averages over - 14 is the usual, 21 is slower and steadier. The Algo takes no entry in ATR mode until it has this many closed candles plus one.">
+            <span>ATR period (candles)</span>
+            <input class="ls-az-atr-period" type="number" min="2" step="1"></label>
+          <label class="lsf" title="Stop loss = break-even less this many ATRs (ATR mode). 2.0 is the usual start.">
+            <span>Stop x ATR</span>
+            <input class="ls-az-atr-stop" type="number" min="0.1" step="0.1"></label>
+          <label class="lsf" title="Take-profit = break-even plus this many ATRs (ATR mode).">
+            <span>Target x ATR</span>
+            <input class="ls-az-atr-target" type="number" min="0.1" step="0.1"></label>
           <label class="lsf check-row" title="While a position is on: a bar from the stop loss to the take-profit, with the entry marked and the closing price on it.">
             <span>Progress bar</span>
             <input type="checkbox" class="ls-az-progress"></label>
