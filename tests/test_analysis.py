@@ -276,3 +276,13 @@ def test_the_analysis_cannot_reach_an_order():
         elif isinstance(node, ast.Import):
             imported.update(a.name for a in node.names)
     assert imported <= {'math'}, imported
+
+
+def test_the_journal_splits_each_trip_into_gross_and_fees():
+    row = closed(4.0, 1, entry_spread=13.20, exit_spread=13.10,
+                 spread_units=50.0)                    # SELL: +0.10 x 50
+    [trip] = analysis.journal([row])
+    assert trip['gross_pnl'] == 5.0 and trip['fees'] == 1.0
+    # Unmeasured stays unmeasured, not zero.
+    [trip] = analysis.journal([closed(4.0, 1)])
+    assert trip['gross_pnl'] is None and trip['fees'] is None
