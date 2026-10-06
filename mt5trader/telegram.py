@@ -299,17 +299,124 @@ def duration(seconds):
     return f'{s // 86400}d {(s % 86400) // 3600}h'
 
 
+def w3(value, digits=2):
+    """Money the way Stat_Arb_W3 writes a P&L: the sign after the
+    dollar - `$+3.85`, `$-9.60`."""
+    if value is None:
+        return '—'
+    return f'${float(value):+,.{digits}f}'
+
+
+def w3fee(value, digits=2):
+    """A cost, as W3 writes one: `-$0.40`."""
+    if value is None:
+        return '—'
+    return f'-${abs(float(value)):,.{digits}f}'
+
+
+def price(value, digits=4):
+    """A leg price, as W3 writes one: `$4,131.0300`."""
+    if value is None:
+        return '—'
+    try:
+        return f'${float(value):,.{digits}f}'
+    except (TypeError, ValueError):
+        return '—'
+
+
+def stamp_ms(at):
+    """`HH:MM:SS.mmm UTC`, as W3 times an order."""
+    if at is None:
+        return '—'
+    at = float(at)
+    return (time.strftime('%H:%M:%S', time.gmtime(at))
+            + f'.{int(round((at % 1) * 1000)) % 1000:03d} UTC')
+
+
+def bps(spread, leg_a_price):
+    """The spread in basis points of leg A, as W3 shows it."""
+    try:
+        return f'  ({float(spread) / float(leg_a_price) * 10000:+.2f} bps)'
+    except (TypeError, ValueError, ZeroDivisionError):
+        return ''
+
+
 def usd(value, signed=True, digits=2):
     if value is None:
         return '—'
     value = float(value)
     if signed:
-        return f'{"+" if value >= 0 else "-"}${abs(value):,.{digits}f}'
+        return w3(value, digits)         # `$+3.85`, as W3 writes it
     return f'${value:,.{digits}f}'
 
 
 def _z(value):
-    return '' if value is None else f'  (Z: {plain(value, 2, True)})'
+    return '' if value is None else f'  (Z: {plain(value, 4, True)})'
+
+
+def _timing(opened, latency_ms):
+    """W3's three timing rows: when the orders went, when the position
+    was on, and the time between - from the desk's own clock."""
+    placed = None if opened is None or latency_ms is None \
+        else float(opened) - float(latency_ms) / 1000.0
+    return [('Orders at', stamp_ms(placed)),
+            ('Filled at', stamp_ms(opened)),
+            ('Latency', '—' if latency_ms is None
+             else f'{float(latency_ms):.0f} ms')]
+
+
+def net_words(row):
+    """The ladder's net position from its OPEN positions, in the desk's
+    words: `flat`, `H to L 0.50`."""
+    net = 0.0
+    for position in row.get('positions') or ():
+        net += _sign(position.get('side')) * float(position.get('quantity')
+                                                   or 0.0)
+    if abs(net) < 1e-9:
+        return 'flat'
+    return f'{side_words("SELL" if net < 0 else "BUY")} {plain(abs(net))}'
+
+
+def _signal_rows(levels, block):
+    """W3's signal rows - the z, the band's SD and mean, the half-life,
+    the regime - from what the Algo measured on this ladder."""
+    block = block or {}
+    filters = block.get('filters') or {}
+    regime = filters.get('regime') or {}
+    rows = [('Z-score', plain((levels or {}).get('entry_z'), 4, True))]
+    if block.get('sigma') is not None:
+        rows.append(('Spread SD', plain(block.get('sigma'), 6)))
+    if block.get('mean') is not None:
+        rows.append(('Spread Mean', plain(block.get('mean'), 4, True)))
+    candles = filters.get('half_life_candles')
+    if candles is not None:
+        minutes = filters.get('half_life_minutes')
+        rows.append(('Half-Life', f'{float(candles):.1f} periods'
+                     + (f'  ({float(minutes):,.0f} min)'
+                        if minutes is not None else '')))
+    if regime.get('state'):
+        rows.append(('Regime', str(regime['state']).lower()
+                     .replace('_', ' ')))
+    return rows
+
+
+def _fees_rows(position, levels):
+    """W3's Est. Fees and Breakeven: what the round trip costs, and the
+    spread move that pays for it - break-even less entry, times k."""
+    be = (levels or {}).get('break_even')
+    if be is None:
+        be = (position.get('exit') or {}).get('break_even')
+    entry = position.get('entry_spread')
+    units = position.get('spread_units')
+    if be is None or entry is None:
+        return [('Est. Fees', '—'), ('Breakeven', '—')]
+    move = (float(be) - float(entry)) * _sign(position.get('side'))
+    if abs(move) < 5e-5:
+        move = 0.0                       # never "-0.0000"
+    fees = abs(move) * float(units) if units else None
+    return [('Est. Fees', f'{w3fee(fees, 4)}  (round trip, both legs)'
+             if fees is not None else '—'),
+            ('Breakeven', f'{move:+.4f} spread move')]
 
 
 def _legs(position):
@@ -373,48 +480,54 @@ def _pct(now, then):
         return ''
 
 
-def trade_entry_text(position, ladder, levels=None):
-    """TRADE ENTRY: what went on, at what, and where it comes off."""
+def trade_entry_text(position, ladder, levels=None, block=None):
+    """TRADE ENTRY, row for row as Stat_Arb_W3 sends it - then the exits
+    this desk sets, which W3 has no rows for."""
     levels = levels or {}
-    rows = [('ID', position.get('position_id')),
-            ('Source', (position.get('source') or 'MANUAL').title()),
-            ('Entry Time', utc(position.get('opened_at'))), None,
-            ('Size', f'{plain(position.get("quantity"))} spread(s)')]
-    for name, fill in _legs(position):
-        rows.append((f'Leg {name}', f'{fill.get("side") or ""} '
-                                    f'{plain(fill.get("volume"))} '
-                                    f'{fill.get("symbol") or ""}'))
+    legs = _legs(position)
     face = notional(position)
-    rows += [('Notional', usd(face, False) if face else '—'),
+    fill_a = (position.get('leg_a') or {})
+    rows = [('ID', f'#{position.get("position_id") or "pending"}'),
+            ('Entry Time', utc(position.get('opened_at'))), None]
+    for name, fill in legs:
+        rows.append((f'Leg {name} Lots', f'{fill.get("side") or ""} '
+                                         f'{plain(fill.get("volume"))} '
+                                         f'{fill.get("symbol") or ""}'))
+    rows += [('Notional', price(face, 2) if face else '—'),
              ('Margin Req', margin_text(position)), None]
-    for name, fill in _legs(position):
-        rows.append((f'Leg {name} Entry', plain(fill.get('price'), 4)))
-    rows.append(('Entry Spread', plain(position.get('entry_spread'), 4)
-                 + _z(levels.get('entry_z'))))
-    if levels:
-        rows.append(None)
-        if levels.get('entry_atr') is not None:
-            rows.append(('ATR at entry', plain(levels.get('entry_atr'), 4)
-                         + f'  (TP {_basis(levels, "target")}, '
-                           f'SL {_basis(levels, "stop")})'))
-        for label, key in (('Break-even', 'break_even'),
-                           ('Take Profit', 'tp'), ('Stop Loss', 'sl')):
+    for name, fill in legs:
+        rows.append((f'Leg {name} Entry', price(fill.get('price'))))
+    rows.append(('Spread', plain(position.get('entry_spread'), 4, True)
+                 + bps(position.get('entry_spread'), fill_a.get('price'))))
+    rows.append(None)
+    rows += _signal_rows(levels, block)
+    rows.append(None)
+    rows += _fees_rows(position, levels)
+    rows.append(None)
+    rows += _timing(position.get('opened_at'),
+                    position.get('click_to_on_ms'))
+    # What this desk adds: where it comes off, and who put it on.
+    rows += [None, ('Source', (position.get('source') or 'MANUAL').title())]
+    if levels.get('entry_atr') is not None:
+        rows.append(('ATR at entry', plain(levels.get('entry_atr'), 4)
+                     + f'  (TP {_basis(levels, "target")}, '
+                       f'SL {_basis(levels, "stop")})'))
+    for label, key in (('Take Profit', 'tp'), ('Stop Loss', 'sl')):
+        if key in levels:
             value = levels.get(key)
-            money_at = level_money(position, value)
             rows.append((label, plain(value, 4) + (
-                f'  ({usd(money_at)})' if money_at is not None
-                and key != 'break_even' else '')))
-    rows += [None,
-             ('Slippage', plain(position.get('entry_slippage'), 4)
-              + ' spread'),
-             ('Click to fill', '—' if position.get('click_to_on_ms') is None
-              else f'{position["click_to_on_ms"]:.0f} ms')]
-    return (title(f'TRADE ENTRY  ·  {side_words(position.get("side"))}  ·  '
+                f'  ({w3(levels.get(key + "_money"))} net)'
+                if levels.get(key + '_money') is not None else
+                f'  ({w3(level_money(position, value))} gross)'
+                if level_money(position, value) is not None else '')))
+    rows.append(('Slippage', plain(position.get('entry_slippage'), 4, True)
+                 + ' spread'))
+    return (title(f'TRADE ENTRY  ·  {side_words(position.get("side"))} '
                   f'{ladder}') + '\n' + table(rows))
 
 
 def trade_exit_text(record, ladder):
-    """TRADE EXIT: the round trip both ways, then what it says."""
+    """TRADE EXIT, row for row as Stat_Arb_W3 sends it, then ANALYSIS."""
     position = record.get('position') or {}
     exits = record.get('exit_prices') or {}
     pnl = position.get('realized_pnl')
@@ -431,39 +544,45 @@ def trade_exit_text(record, ladder):
             ('Duration', duration(held)),
             ('Exit Time', utc(closed)), None]
     for name, fill in _legs(position):
-        rows.append((f'Leg {name} Entry', plain(fill.get('price'), 4)))
+        rows.append((f'Leg {name} Entry', price(fill.get('price'))))
         rows.append((f'Leg {name} Exit',
-                     plain(exits.get('leg_' + name.lower()), 4)))
+                     price(exits.get('leg_' + name.lower()))))
     rows += [None,
-             ('Entry Spread', plain(entry, 4) + _z(record.get('entry_z'))),
-             ('Exit Spread', plain(exit_, 4) + _z(record.get('exit_z'))),
+             ('Entry Spread', plain(entry, 4, True) + _z(record.get('entry_z'))),
+             ('Exit Spread', plain(exit_, 4, True) + _z(record.get('exit_z'))),
              ('Spread Chg', plain(change, 4, True)
               + ('' if change is None else
                  ('  (with)' if change >= 0 else '  (against)'))), None,
-             ('Gross P&L', usd(gross)),
-             ('Commission', f'-{usd(fees, False)}' if fees is not None
-              else '—'),
-             ('Net P&L', usd(pnl) + (f'  ({pnl / face * 100:+.4f}%)'
-                                     if pnl is not None and face else '')),
-             ('Slippage', f'in {plain(position.get("entry_slippage"), 4)}'
-                          f' / out {plain(position.get("exit_slippage"), 4)}')]
+             # The close's own clock: when it was on is all the desk
+             # keeps for an exit, so the send time is not invented.
+             ('Orders at', '—'),
+             ('Filled at', stamp_ms(closed)),
+             ('Latency', '—'), None,
+             ('Gross PnL', w3(gross, 4)),
+             ('Est. Fees', f'{w3fee(fees, 4)}  (commission, both legs)'
+              if fees is not None else '—'),
+             ('Net PnL', w3(pnl, 4) + (f'  ({pnl / face * 100:+.4f}%)'
+                                       if pnl is not None and face else '')),
+             ('Slippage', f'in {plain(position.get("entry_slippage"), 4, True)}'
+                          f' / out '
+                          f'{plain(position.get("exit_slippage"), 4, True)}')]
     peak, trough = position.get('peak_pnl'), position.get('trough_pnl')
     analysis_rows = [('Outcome', _outcome(position.get('close_reason'),
                                           pnl))]
     if peak is not None or trough is not None:
         analysis_rows.append((
             'Peak/Trough',
-            f'{usd(peak)} ({plain(position.get("peak_min"), 0)}m) / '
-            f'{usd(trough)} ({plain(position.get("trough_min"), 0)}m)'))
+            f'{w3(peak)} ({plain(position.get("peak_min"), 0)}m) / '
+            f'{w3(trough)} ({plain(position.get("trough_min"), 0)}m)'))
         if peak and peak > 0 and pnl is not None:
-            analysis_rows.append(('Capture', f'{usd(pnl)} of {usd(peak)} '
+            analysis_rows.append(('Capture', f'{w3(pnl)} of {w3(peak)} '
                                              f'best ({pnl / peak * 100:+.0f}%)'))
     analysis_rows.append(('Hold', duration(held)))
     if record.get('entry_z') is not None or record.get('exit_z') is not None:
         analysis_rows.append(('Z path',
-                              f'{plain(record.get("entry_z"), 2, True)} -> '
-                              f'{plain(record.get("exit_z"), 2, True)}'))
-    return (title(f'TRADE EXIT  ·  {side_words(position.get("side"))}  ·  '
+                              f'{plain(record.get("entry_z"), 4, True)} -> '
+                              f'{plain(record.get("exit_z"), 4, True)}'))
+    return (title(f'TRADE EXIT  ·  {side_words(position.get("side"))} '
                   f'{ladder}  ·  {result}') + '\n' + table(rows)
             + '\n\n' + title('ANALYSIS') + '\n' + table(analysis_rows))
 
@@ -490,49 +609,60 @@ def _outcome(reason, pnl):
 
 
 def position_rows(position, row, levels=None, now=None):
-    """OPEN POSITIONS, one position: everything about it, now."""
+    """OPEN POSITIONS, one position: W3's rows in W3's order, then the
+    P&L and the exits this desk holds for it."""
     levels = levels or {}
     market = row.get('market') or {}
-    rows = [('Position', f'{side_words(position.get("side"))}  ·  '
+    block = row.get('algo_block') or {}
+    legs = _legs(position)
+    rows = [('Position', f'{side_words(position.get("side"))} '
+                         f'{plain(position.get("quantity"))} spread(s)  ·  '
                          f'{(position.get("source") or "MANUAL").lower()}'),
-            None,
-            ('Size', f'{plain(position.get("quantity"))} spread(s)')]
-    for name, fill in _legs(position):
+            None]
+    for name, fill in legs:
         rows.append((f'Leg {name} Lots', f'{fill.get("side") or ""} '
                                          f'{plain(fill.get("volume"))} '
                                          f'{fill.get("symbol") or ""}'))
     face = notional(position)
-    rows += [('Notional', usd(face, False) if face else '—'),
+    rows += [('Notional', price(face, 2) if face else '—'),
              ('Margin Req', margin_text(position)),
              ('Entry Time', utc(position.get('opened_at'))), None]
-    for name, fill in _legs(position):
-        rows.append((f'Leg {name} Entry', plain(fill.get('price'), 4)))
-    rows.append(('Entry Spread', plain(position.get('entry_spread'), 4)
+    for name, fill in legs:
+        rows.append((f'Leg {name} Entry', price(fill.get('price'))))
+    rows.append(('Entry Spread', plain(position.get('entry_spread'), 4, True)
                  + _z(levels.get('entry_z'))))
     rows.append(None)
-    for name, fill in _legs(position):
+    for name, fill in legs:
         now_price = leg_now(position, market, name.lower())
-        rows.append((f'Leg {name} Now', plain(now_price, 4)
+        rows.append((f'Leg {name} Now', price(now_price)
                      + _pct(now_price, fill.get('price'))))
     closing = position.get('closing_spread')
+    z_now = block.get('z_buy' if position.get('side') == 'SELL'
+                      else 'z_sell')
+    rows.append(('Spread Now', plain(closing, 4, True) + _z(z_now)))
+    rows.append(None)
+    rows += _timing(position.get('opened_at'),
+                    position.get('click_to_on_ms'))
+    # What this desk adds.
     entry = position.get('entry_spread')
     delta = None if closing is None or entry is None else closing - entry
     good = None if delta is None else delta * _sign(position.get('side'))
-    rows += [('Spread Now', plain(closing, 4) + _z(levels.get('z_close'))),
-             ('Δ Spread', plain(delta, 4, True) + (
+    rows += [None,
+             ('Spread Chg', plain(delta, 4, True) + (
                  '' if good is None else
                  ('  (with)' if good >= 0 else '  (against)'))),
-             ('Net P&L', usd(position.get('net_pnl')))]
+             ('Net PnL', w3(position.get('net_pnl')))]
     if levels:
-        be, tp, sl = levels.get('break_even'), levels.get('tp'), \
-            levels.get('sl')
-        rows += [None,
-                 ('Levels', f'BE {plain(be, 3)} · TP {plain(tp, 3)} · '
-                            f'SL {plain(sl, 3)}'),
-                 ('Level P&L', f'TP {usd(level_money(position, tp))} · '
-                               f'SL {usd(level_money(position, sl))} gross'),
-                 ('Target/Stop', f'{usd(level_money(position, tp))}  /  '
-                                 f'{usd(level_money(position, sl))}')]
+        for label, key in (('Break-even', 'break_even'),
+                           ('Take Profit', 'tp'), ('Stop Loss', 'sl')):
+            value = levels.get(key)
+            worth = levels.get(key + '_money')
+            if worth is None and key != 'break_even':
+                gross = level_money(position, value)
+                extra = f'  ({w3(gross)} gross)' if gross is not None else ''
+            else:
+                extra = f'  ({w3(worth)} net)' if worth is not None else ''
+            rows.append((label, plain(value, 4) + extra))
         if levels.get('entry_atr') is not None:
             rows.append(('ATR at entry', plain(levels.get('entry_atr'), 4)
                          + f'  (TP {_basis(levels, "target")}, '
@@ -540,11 +670,8 @@ def position_rows(position, row, levels=None, now=None):
     opened = position.get('opened_at')
     if opened and now:
         rows.append(('Age', duration(now - opened)))
-    rows += [None,
-             ('Slippage', plain(position.get('entry_slippage'), 4)
-              + ' spread'),
-             ('Click to fill', '—' if position.get('click_to_on_ms') is None
-              else f'{position["click_to_on_ms"]:.0f} ms')]
+    rows.append(('Slippage', plain(position.get('entry_slippage'), 4, True)
+                 + ' spread'))
     return rows
 
 
@@ -894,7 +1021,7 @@ class Bot:
                          if level else '—'))
         for name in snapshot.get('dark_accounts') or []:
             rows.append((name, 'leg runner NOT ANSWERING'))
-        parts = [title('DASHBOARD', self.clock()) + '\n' + table(rows)]
+        parts = [title('SYSTEM STATUS', self.clock()) + '\n' + table(rows)]
         buttons = []
         for key, row in sorted(pairs.items()):
             parts.append(f'<b>{self._pair_name(pairs, key)}</b>\n'
@@ -917,9 +1044,25 @@ class Bot:
         block = row.get('algo_block') or {}
         params = effective_params(row)
         problem = self._price_problem(row)
-        rows = [('Feed', f'PROBLEM: {problem}' if problem else 'OK'),
-                ('Session', self._session_words(row)),
-                ('Algo', MODE_WORDS[mode_word(row)])]
+        mode = mode_word(row)
+        filters_now = block.get('filters') or {}
+        regime_now = filters_now.get('regime') or {}
+        rows = [('Algo', 'Disabled' if mode == 'OFF' else 'Enabled'),
+                ('Mode', {'OFF': '—', 'DRY': 'Dry run',
+                          'LIVE': 'Live'}[mode]),
+                ('Position', net_words(row)),
+                ('Z-score', plain(block.get('z_mid'), 4, True)),
+                ('Regime', (regime_now.get('state') or '—').lower()
+                 .replace('_', ' ') if regime_now.get('state') else '—')]
+        candles = filters_now.get('half_life_candles')
+        if candles is not None:
+            minutes = filters_now.get('half_life_minutes')
+            rows.append(('Half-Life', f'{float(candles):.1f} periods'
+                         + (f'  ({float(minutes):,.0f} min)'
+                            if minutes is not None else '')))
+        rows += [None,
+                 ('Feed', f'PROBLEM: {problem}' if problem else 'OK'),
+                 ('Session', self._session_words(row))]
         on = row.get('algo_on')
         if on:
             rows.append(('State', (block.get('state') or 'WATCHING')
@@ -964,7 +1107,7 @@ class Bot:
                          ('pass' if edge.get('ok') else 'FAIL')
                          + f' {plain(edge.get("ratio"))}x of '
                            f'{plain(edge.get("required"), 1)}x'))
-            rows.append(('Regime', 'off' if not regime.get('on') else
+            rows.append(('Regime filter', 'off' if not regime.get('on') else
                          (regime.get('state') or '—').lower()
                          .replace('_', ' ')))
             rows.append(('Trend', 'off' if not trend.get('on') else
@@ -980,12 +1123,11 @@ class Bot:
         levels = {p.get('position_id'): p
                   for p in (block.get('positions') or [])}
         positions = row.get('positions') or []
-        rows.append(None)
-        if not positions:
-            rows.append(('Position', 'flat'))
+        if positions:
+            rows.append(None)
         for position in positions:
             level = levels.get(position.get('position_id')) or {}
-            rows.append(('Position', f'{side_words(position.get("side"))} '
+            rows.append(('Holding', f'{side_words(position.get("side"))} '
                          f'{plain(position.get("quantity"))} '
                          f'({(position.get("source") or "MANUAL").lower()})'))
             rows.append(('Entry', plain(position.get('entry_spread'), 3)))
@@ -1059,36 +1201,49 @@ class Bot:
             parts.append('The trade record cannot be read right now.')
         elif not trips:
             parts.append('No closed trades yet.')
+        lookup = getattr(self.desk, 'position', None)
         for trip in trips:
             pnl = trip.get('pnl')
             result = '—' if pnl is None else ('PROFIT' if pnl >= 0
                                               else 'LOSS')
             entry, exit_ = trip.get('entry_spread'), trip.get('exit_spread')
-            change = None if entry is None or exit_ is None else \
-                (exit_ - entry) * _sign(trip.get('side'))
+            # Each leg's closing price, from the broker's own deals.
+            exits = {}
+            if lookup is not None and trip.get('position_id'):
+                try:
+                    exits = (lookup(trip['position_id']) or {}) \
+                        .get('exit_prices') or {}
+                except Exception as e:
+                    logging.warning('[telegram] trade %s: %s',
+                                    trip.get('position_id'), e)
+            fill_a = trip.get('leg_a') or {}
             rows = [('Exit', trip.get('exit_reason')),
-                    ('Closed', utc(trip.get('closed_at'))),
-                    ('Duration', duration(trip.get('held_sec'))),
-                    ('Source', (trip.get('source') or 'MANUAL').title()),
-                    ('Size', f'{plain(trip.get("quantity"))} spread(s)'),
-                    None]
+                    ('Duration', duration(trip.get('held_sec'))), None]
             for leg in ('a', 'b'):
                 fill = trip.get('leg_' + leg) or {}
                 rows.append((f'Leg {leg.upper()} Entry',
-                             f'{fill.get("side") or ""} '
-                             f'{plain(fill.get("volume"))} '
-                             f'{fill.get("symbol") or ""} @ '
-                             f'{plain(fill.get("entry"), 4)}'))
+                             price(fill.get('entry'))))
+                rows.append((f'Leg {leg.upper()} Exit',
+                             price(exits.get('leg_' + leg))))
             rows += [None,
-                     ('Entry Spread', plain(entry, 4)
-                      + _z(trip.get('entry_z'))),
-                     ('Exit Spread', plain(exit_, 4) + _z(trip.get('exit_z'))),
-                     ('Spread Chg', plain(change, 4, True)),
+                     ('Entry Spread', plain(entry, 4, True)
+                      + bps(entry, fill_a.get('entry'))),
+                     ('Exit Spread', plain(exit_, 4, True)),
+                     ('Entry Z', plain(trip.get('entry_z'), 4, True)),
+                     ('Exit Z', plain(trip.get('exit_z'), 4, True)),
                      None,
-                     ('Net P&L', f'{usd(pnl)}  {result}'),
-                     ('Running', usd(trip.get('cum_pnl')))]
+                     ('Gross PnL', w3(trip.get('gross_pnl'))),
+                     ('Est. Fees', w3fee(trip.get('fees'))),
+                     ('Net PnL', f'{w3(pnl)}  {result}'),
+                     # What this desk adds.
+                     None,
+                     ('Closed', utc(trip.get('closed_at'))),
+                     ('Source', (trip.get('source') or 'MANUAL').title()),
+                     ('Size', f'{plain(trip.get("quantity"))} spread(s)'),
+                     ('Running', w3(trip.get('cum_pnl')))]
             ladder = names.get(trip.get('pair_key')) or trip.get('pair_key')
-            parts.append(f'<b>{esc(side_words(trip.get("side")))}  '
+            parts.append(f'<b>#{esc(trip.get("position_id"))}  '
+                         f'{esc(side_words(trip.get("side")))} '
                          f'{esc(ladder)}  {result}</b>\n' + table(rows))
         self.show(chat, message_id, '\n\n'.join(parts),
                   [[('Refresh', 'trades', ()), ('Main menu', 'main', ())]])
@@ -1106,27 +1261,38 @@ class Bot:
         wins = [t['pnl'] for t in trips if t['pnl'] > 0]
         losses = [t['pnl'] for t in trips if t['pnl'] <= 0]
         check = snapshot.get('pnl_check') or {}
+
+        def total(field, among):
+            values = [t.get(field) for t in among]
+            if not values or any(v is None for v in values):
+                return None              # unmeasured is not zero
+            return sum(values)
+        drawdown = (report.get('drawdown') or {}).get('max')
         rows = [('Closed Trades', len(trips)),
                 ('Win Rate', '—' if not trips else
                  f'{len(wins) / len(trips) * 100:.1f}%  '
-                 f'({len(wins)}W / {len(losses)}L)'),
-                ('Avg Win', usd(sum(wins) / len(wins)) if wins else '—'),
-                ('Avg Loss', usd(sum(losses) / len(losses))
+                 f'({len(wins)}W / {len(losses)}L net)'),
+                ('Avg Win (net)', w3(sum(wins) / len(wins)) if wins else '—'),
+                ('Avg Loss (net)', w3(sum(losses) / len(losses))
                  if losses else '—'),
-                ('Best / Worst', '—' if not trips else
-                 f'{usd(max(t["pnl"] for t in trips))}  /  '
-                 f'{usd(min(t["pnl"] for t in trips))}'),
                 None,
-                ('Today Net', usd(sum(t['pnl'] for t in todays))
-                 + f'  ({len(todays)} trade(s))'),
-                ('All-time Net', usd(sum(t['pnl'] for t in trips))
+                ('Today Gross', w3(total('gross_pnl', todays))
+                 + f'  ({len(todays)} trades)'),
+                ('Today Fees', w3fee(total('fees', todays))),
+                ('Today Net', w3(sum(t['pnl'] for t in todays))),
+                None,
+                ('All-time Gross', w3(total('gross_pnl', trips))),
+                ('All-time Fees', w3fee(total('fees', trips))),
+                ('All-time Net', w3(sum(t['pnl'] for t in trips))
                  if trips else '—'),
-                ('Max Drawdown', usd(-((report.get('drawdown') or {})
-                                       .get('max') or 0))
-                 if (report.get('drawdown') or {}).get('max') is not None
-                 else '—'),
+                ('Unrealized', w3(check.get('ours'))),
+                # What this desk adds.
                 None,
-                ('Unrealized', usd(check.get('ours')))]
+                ('Best / Worst', '—' if not trips else
+                 f'{w3(max(t["pnl"] for t in trips))}  /  '
+                 f'{w3(min(t["pnl"] for t in trips))}'),
+                ('Max Drawdown', w3(-drawdown) if drawdown is not None
+                 else '—')]
         text = title('P&L SUMMARY', now) + '\n' + table(rows)
         if not report.get('ok'):
             text += '\n\nThe trade record cannot be read right now.'
@@ -1155,13 +1321,26 @@ class Bot:
                 return '—' if value is None else \
                     f'{float(value):,.2f} {currency}'.strip()
             level = info.get('margin_level')
+            # The broker's OWN margin-call and stop-out levels, not ours.
+            health = 'OK'
+            if level:
+                if info.get('margin_so_so') and level <= info['margin_so_so']:
+                    health = 'STOP OUT'
+                elif info.get('margin_so_call') and \
+                        level <= info['margin_so_call']:
+                    health = 'MARGIN CALL'
+            account = ' · '.join(str(v) for v in (info.get('login'),
+                                                  info.get('server')) if v)
             parts.append(f'<b>{esc(name)}</b>\n' + table([
-                ('Balance', amount('balance')),
+                ('Account', f'{account}  (MT5)' if account else 'MT5'),
                 ('Equity', amount('equity')),
-                ('Margin used', amount('margin')),
-                ('Free margin', amount('margin_free')),
-                ('Margin level', f'{float(level):,.0f}%' if level else '—'),
-                ('Floating P&L', money(info.get('profit')))]))
+                ('Available', amount('margin_free')),
+                ('Used', amount('margin')),
+                ('Margin', f'{float(level):,.1f}%  [{health}]' if level
+                 else '—  (no margin in use)'),
+                ('Unrealized', w3(info.get('profit'))),
+                None,
+                ('Balance', amount('balance'))]))
         if len(parts) == 1:
             parts.append('No accounts are reporting.')
         self.show(chat, message_id, '\n\n'.join(parts),
@@ -1682,7 +1861,7 @@ class AlertWatch:
                 current[pid] = key
                 if not first and pid not in self.positions:
                     out.append(trade_entry_text(position, name_of(key),
-                                                levels.get(pid)))
+                                                levels.get(pid), block))
         if not first:
             for pid, key in self.positions.items():
                 if pid in current:
@@ -1799,18 +1978,38 @@ class AlertWatch:
 
     @staticmethod
     def _summary(snapshot, now=None):
-        parts = [title('END OF DAY', now)]
+        """END OF DAY, as Stat_Arb_W3 sends it, one block per ladder."""
+        at = time.strftime('%Y-%m-%d %H:%M UTC',
+                           time.gmtime(time.time() if now is None else now))
+        parts = [f'<b>END OF DAY  ·  {at}</b>']
+        accounts = snapshot.get('accounts') or {}
         for key, row in sorted((snapshot.get('pairs') or {}).items()):
             block = row.get('algo_block') or {}
             day = block.get('day') or {}
+            regime = (block.get('filters') or {}).get('regime') or {}
+            equity = []
+            for account in (row.get('leg_a_account'),
+                            row.get('leg_b_account')):
+                info = accounts.get(account) or {}
+                if account and info.get('equity') is not None:
+                    equity.append(f'{account} {float(info["equity"]):,.2f}')
             parts.append(f'<b>{esc(row.get("name") or key)}</b>\n' + table([
-                ('Algo', MODE_WORDS[mode_word(row)]),
-                ('Trades', day.get('trades') or 0),
-                ('P&L', usd(day.get('pnl'))),
-                ('Losses in row', day.get('losses_row') or 0),
+                ('Trades', f'{day.get("trades") or 0}  '
+                           f'({day.get("wins") or 0} wins)'
+                 if 'wins' in day else day.get('trades') or 0),
+                ('PnL', w3(day.get('pnl'))),
                 None,
-                ('Net position', plain(row.get('net_position'), 2, True)),
-                ('Open P&L', usd(row.get('open_pnl')))]))
+                ('Equity', '  ·  '.join(equity) if equity else '—'),
+                ('Unrealized', w3(row.get('open_pnl'))),
+                None,
+                ('Position', net_words(row)),
+                ('Z-score', plain(block.get('z_mid'), 4, True)),
+                ('Regime', (regime.get('state') or '—').lower()
+                 .replace('_', ' ') if regime.get('state') else '—'),
+                # What this desk adds.
+                None,
+                ('Algo', MODE_WORDS[mode_word(row)]),
+                ('Losses in row', day.get('losses_row') or 0)]))
         return '\n\n'.join(parts)
 
 

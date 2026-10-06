@@ -606,6 +606,15 @@ LEVELS = {'position_id': 'P7', 'tp': 13.119, 'sl': 13.388,
           'break_even': 13.196, 'entry_z': 1.49}
 
 
+def in_order(text, parts):
+    """Each part is in the message, and after the one before it."""
+    at = 0
+    for part in parts:
+        found = text.find(part, at)
+        assert found >= 0, (part, text[at:at + 300])
+        at = found + len(part)
+
+
 def holding(bot):
     pair = bot.desk.snapshot['pairs'][KEY]
     pair['positions'] = [dict(POSITION)]
@@ -618,10 +627,15 @@ def test_a_position_that_opens_is_a_trade_entry(bot):
     watch(bot)                                   # bearings: flat
     holding(bot)
     [told] = watch(bot)
-    assert 'TRADE ENTRY  ·  H to L  ·  Oil' in told
-    assert '<b>Entry Spread</b>  <code>13.1960  (Z: +1.49)</code>' in told
-    assert 'Take Profit' in told and '+$3.85' in told    # 0.077 x 50
-    assert 'Margin Req' in told and '(' in told          # leverage shown
+    assert '<b>TRADE ENTRY  ·  H to L Oil</b>' in told
+    # Stat_Arb_W3's rows, in W3's order.
+    in_order(told, ['ID</b>  <code>#P7', 'Entry Time', 'Leg A Lots',
+                    'Notional', 'Margin Req', 'Leg A Entry</b>  <code>$89.0800',
+                    'Leg B Entry</b>  <code>$102.2760',
+                    'Spread</b>  <code>+13.1960  (+1481.37 bps)',
+                    'Z-score</b>  <code>+1.4900', 'Est. Fees', 'Breakeven',
+                    'Orders at', 'Filled at', 'Latency</b>  <code>180 ms'])
+    assert 'Take Profit' in told and '$+3.85' in told    # 0.077 x 50
 
 
 def test_a_position_that_closes_is_a_trade_exit_with_its_analysis(bot):
@@ -637,13 +651,20 @@ def test_a_position_that_closes_is_a_trade_exit_with_its_analysis(bot):
                               'entry_z': 1.49, 'exit_z': -0.4}
     bot.desk.snapshot['pairs'][KEY]['positions'] = []
     [told] = watch(bot)
-    assert 'TRADE EXIT  ·  H to L  ·  Oil  ·  PROFIT' in told
-    for part in ('Duration</b>  <code>22m 39s', 'Leg A Exit',
-                 'Spread Chg</b>  <code>+0.0770  (with)',
-                 'ANALYSIS', 'TARGET HIT', 'Peak/Trough',
-                 'Capture</b>  <code>+$3.85 of +$4.10 best (+94%)',
-                 'Z path</b>  <code>+1.49 -&gt; -0.40'):
-        assert part in told, part
+    assert '<b>TRADE EXIT  ·  H to L Oil  ·  PROFIT</b>' in told
+    in_order(told, ['Reason', 'Duration</b>  <code>22m 39s', 'Exit Time',
+                    'Leg A Entry', 'Leg A Exit</b>  <code>$89.2000',
+                    'Leg B Entry', 'Leg B Exit',
+                    'Entry Spread</b>  <code>+13.1960  (Z: +1.4900)',
+                    'Exit Spread</b>  <code>+13.1190  (Z: -0.4000)',
+                    'Spread Chg</b>  <code>+0.0770  (with)',
+                    'Orders at', 'Filled at', 'Latency',
+                    'Gross PnL</b>  <code>$+3.8500',
+                    'Est. Fees</b>  <code>-$0.0000',
+                    'Net PnL</b>  <code>$+3.8500',
+                    'ANALYSIS', 'TARGET HIT', 'Peak/Trough',
+                    'Capture</b>  <code>$+3.85 of $+4.10 best (+94%)',
+                    'Z path</b>  <code>+1.4900 -&gt; -0.4000'])
 
 
 def test_the_CONTROL_positions_open_at_start_are_not_news(bot):
@@ -655,11 +676,15 @@ def test_open_positions_shows_the_whole_position_now(bot):
     holding(bot)
     say(bot, '/positions')
     text = bot.api.texts()[-1]
-    for part in ('OPEN POSITIONS', 'Leg A Now', '(+0.10%)',
-                 'Δ Spread</b>  <code>+0.1690  (against)',
-                 'BE 13.196 · TP 13.119 · SL 13.388',
-                 'Target/Stop</b>  <code>+$3.85  /  -$9.60'):
-        assert part in text, part
+    assert 'OPEN POSITIONS' in text
+    in_order(text, ['Position', 'Leg A Lots', 'Notional', 'Margin Req',
+                    'Entry Time', 'Leg A Entry', 'Entry Spread',
+                    'Leg A Now</b>  <code>$89.1710  (+0.10%)', 'Leg B Now',
+                    'Spread Now', 'Orders at', 'Filled at', 'Latency',
+                    'Spread Chg</b>  <code>+0.1690  (against)',
+                    'Net PnL</b>  <code>$-8.45',
+                    'Take Profit</b>  <code>13.1190  ($+3.85 gross)',
+                    'Stop Loss</b>  <code>13.3880  ($-9.60 gross)'])
     assert 'Close all: Oil' in bot.api.buttons()
 
 
@@ -713,8 +738,12 @@ def test_balance_and_ping(bot):
         'currency': 'USD'}}
     say(bot, '/balance')
     text = bot.api.texts()[-1]
-    assert 'ACCOUNT BALANCE' in text and '16,031.20 USD' in text
-    assert 'Margin used</b>  <code>45.00 USD' in text
+    assert 'ACCOUNT BALANCE' in text
+    in_order(text, ['Account', 'Equity</b>  <code>16,031.20 USD',
+                    'Available</b>  <code>15,986.20 USD',
+                    'Used</b>  <code>45.00 USD',
+                    'Margin</b>  <code>35,625.0%  [OK]',
+                    'Unrealized</b>  <code>$+31.20'])
     say(bot, '/ping')
     assert bot.api.texts()[-1].startswith('pong  ·  ')
 
@@ -724,7 +753,7 @@ TRIP = {'position_id': 'P1', 'pair_key': KEY, 'side': 'SELL',
         'held_sec': 1359, 'entry_spread': 13.196, 'exit_spread': 13.119,
         'entry_z': 1.49, 'exit_z': -0.4,
         'exit_reason': 'Algo: profit target (after costs)', 'pnl': 3.85,
-        'cum_pnl': 3.85,
+        'gross_pnl': 3.85, 'fees': 0.0, 'cum_pnl': 3.85,
         'leg_a': {'side': 'BUY', 'volume': 0.05, 'symbol': 'USOILZ6.c',
                   'entry': 89.08},
         'leg_b': {'side': 'SELL', 'volume': 0.05, 'symbol': 'UKOILZ26.p',
@@ -746,11 +775,14 @@ def test_trades_shows_the_recent_closed_trades(bot):
     bot.desk.report['journal'] = [dict(TRIP)]
     say(bot, '/trades')
     text = bot.api.texts()[-1]
-    for part in ('RECENT TRADES', 'H to L  Oil  PROFIT',
-                 'Entry Spread</b>  <code>13.1960  (Z: +1.49)',
-                 'Spread Chg</b>  <code>+0.0770',
-                 'Net P&amp;L</b>  <code>+$3.85  PROFIT'):
-        assert part in text, part
+    assert 'RECENT TRADES' in text and '#P1  H to L Oil  PROFIT' in text
+    in_order(text, ['Exit</b>', 'Duration', 'Leg A Entry', 'Leg A Exit',
+                    'Leg B Entry', 'Leg B Exit',
+                    'Entry Spread</b>  <code>+13.1960', 'Exit Spread',
+                    'Entry Z</b>  <code>+1.4900', 'Exit Z</b>  <code>-0.4000',
+                    'Gross PnL</b>  <code>$+3.85',
+                    'Est. Fees</b>  <code>-$0.00',
+                    'Net PnL</b>  <code>$+3.85  PROFIT'])
 
 
 def test_the_CONTROL_no_trades_says_so(bot):
@@ -759,16 +791,22 @@ def test_the_CONTROL_no_trades_says_so(bot):
 
 
 def test_pnl_sums_the_record(bot):
-    loss = dict(TRIP, position_id='P2', pnl=-1.85, cum_pnl=2.0)
+    loss = dict(TRIP, position_id='P2', pnl=-1.85, gross_pnl=-1.45,
+                fees=0.40, cum_pnl=2.0)
     bot.desk.report['journal'] = [loss, dict(TRIP)]
     bot.desk.snapshot['pnl_check'] = {'ours': -8.45}
     say(bot, '/pnl')
     text = bot.api.texts()[-1]
-    for part in ('P&amp;L SUMMARY', 'Closed Trades</b>  <code>2',
-                 'Win Rate</b>  <code>50.0%  (1W / 1L)',
-                 'All-time Net</b>  <code>+$2.00',
-                 'Unrealized</b>  <code>-$8.45'):
-        assert part in text, part
+    assert 'P&amp;L SUMMARY' in text
+    in_order(text, ['Closed Trades</b>  <code>2',
+                    'Win Rate</b>  <code>50.0%  (1W / 1L net)',
+                    'Avg Win (net)</b>  <code>$+3.85',
+                    'Avg Loss (net)</b>  <code>$-1.85',
+                    'Today Gross', 'Today Fees', 'Today Net',
+                    'All-time Gross</b>  <code>$+2.40',
+                    'All-time Fees</b>  <code>-$0.40',
+                    'All-time Net</b>  <code>$+2.00',
+                    'Unrealized</b>  <code>$-8.45'])
 
 
 # -- each ladder's hours --------------------------------------------------------------
@@ -867,3 +905,52 @@ def test_positions_and_status_show_the_atr(bot):
             in bot.api.texts()[-1])
     say(bot, '/status')
     assert 'ATR(14)</b>  <code>0.0912' in bot.api.texts()[-1]
+
+
+# -- Stat_Arb_W3's layout on the screens -----------------------------------------------
+
+
+def test_status_opens_each_ladder_with_w3s_rows(bot):
+    block = bot.desk.snapshot['pairs'][KEY]['algo_block']
+    block['z_mid'] = 1.2345
+    block['filters'].update(half_life_candles=296.5, half_life_minutes=4447,
+                            regime={'on': True, 'state': 'MEAN_REVERTING'})
+    holding(bot)
+    say(bot, '/status')
+    text = bot.api.texts()[-1]
+    assert '<b>SYSTEM STATUS  ·  ' in text
+    in_order(text, ['Algo</b>  <code>Enabled', 'Mode</b>  <code>Dry run',
+                    'Position</b>  <code>H to L 0.50',
+                    'Z-score</b>  <code>+1.2345',
+                    'Regime</b>  <code>mean reverting',
+                    'Half-Life</b>  <code>296.5 periods  (4,447 min)'])
+
+
+def test_the_CONTROL_a_ladder_with_the_algo_off_says_disabled_and_flat(bot):
+    bot.desk.snapshot['pairs'][KEY]['algo_on'] = False
+    say(bot, '/status')
+    text = bot.api.texts()[-1]
+    assert 'Algo</b>  <code>Disabled' in text
+    assert 'Position</b>  <code>flat' in text
+
+
+def test_end_of_day_is_w3s_report_per_ladder():
+    snapshot = {'pairs': {KEY: row(algo_block={
+        'z_mid': -0.5, 'day': {'trades': 2, 'pnl': 4.1, 'losses_row': 0},
+        'filters': {'regime': {'state': 'TRENDING'}}})}}
+    text = tg.AlertWatch._summary(snapshot, 1_800_000_000)
+    assert text.startswith('<b>END OF DAY  ·  2027-01-15 08:00 UTC</b>')
+    in_order(text, ['Trades', 'PnL</b>  <code>$+4.10', 'Equity',
+                    'Unrealized', 'Position</b>  <code>flat',
+                    'Z-score</b>  <code>-0.5000',
+                    'Regime</b>  <code>trending'])
+
+
+def test_an_unmeasured_gross_is_a_dash_not_a_zero(bot):
+    bot.desk.report['journal'] = [dict(TRIP, gross_pnl=None, fees=None)]
+    say(bot, '/pnl')
+    text = bot.api.texts()[-1]
+    assert 'All-time Gross</b>  <code>—' in text
+    assert 'All-time Fees</b>  <code>—' in text
+    # The net was measured, and is still said.
+    assert 'All-time Net</b>  <code>$+3.85' in text

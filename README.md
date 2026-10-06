@@ -292,6 +292,15 @@ listed with what it does.
   `/set break 23:55-01:05` (or `none`), broker time.
 - `/alerts` on / off, `/ping`, and **KILL ALL**.
 
+Every message is laid out row for row as Stat_Arb_W3's bot lays it out
+- a bold label, the value in code type, blank lines between the same
+groups, W3's labels (Orders at / Filled at / Latency, Gross PnL / Est.
+Fees / Net PnL, Spread SD, Spread Mean, Half-Life, Regime) and W3's
+number styles (`$+3.85`, `-$0.40`, `$4,131.0300`, z to four places) -
+with the desk's own rows (the exits it holds, slippage, the analysis)
+after W3's, and the desk's words for a side (H to L / L to H). No
+monospace block anywhere.
+
 Alerts go to every allowed user, and only for what needs a person:
 **TRADE ENTRY** when a position opens (legs, notional, margin, entry spread
 and z, TP / SL / BE and what each is worth), **TRADE EXIT** when it closes
