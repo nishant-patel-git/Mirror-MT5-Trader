@@ -1037,7 +1037,8 @@
       // A working order held HERE by design: nothing at the broker
       // until the spread reaches it, then both legs cross together.
       return ', held by the desk - both legs cross at market when the ' +
-        'spread reaches it' + (quote.reason ? ' (' + quote.reason + ')' : '');
+        'spread reaches it' + (quote.reason ? ' (' + quote.reason + ')' : '') +
+        flickerWords(quote);
     }
     if (!quote.ticket) {
       return ', not at the broker yet' +
@@ -1050,6 +1051,14 @@
       (quote.crosses_leg
         ? ' — leg ' + quote.crosses_leg + ' crosses at market when it fills'
         : '');
+  }
+
+  function flickerWords(quote) {
+    /* The re-check before sending: how many times the spread only
+     * flickered to this level and the order was NOT sent. */
+    var n = (quote && quote.rechecks_missed) || 0;
+    return n ? ' · ' + n + ' flicker' + (n > 1 ? 's' : '') +
+      ' to the level not traded' : '';
   }
 
   function sideForColumn(column) {
@@ -3872,7 +3881,8 @@
           : DASH) + '</td>';
         html += '<td>' + (quote.repegs === undefined ? DASH : quote.repegs) +
           '</td>';
-        html += '<td>' + (quote.reason || order.reason || '') + '</td>';
+        html += '<td>' + escapeHtml((quote.reason || order.reason || '') +
+          flickerWords(quote)) + '</td>';
         html += '<td><button class="btn cancel-order">Cancel</button></td>';
         html += '</tr>';
         // AN ORDER THAT IS NOT AT THE BROKER, ACROSS THE WHOLE ROW.

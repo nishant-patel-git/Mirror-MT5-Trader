@@ -182,3 +182,66 @@ def test_the_ladder_does_not_count_a_held_order_as_missing_at_the_broker(
     row = engine.snapshot()['pairs'][pair.key]
     assert row['working_orders'] == 'TRIGGER'
     assert row['held_entries'] == 1 and row['broker_pendings'] == 0
+
+
+# -- the re-check before sending ------------------------------------------------
+
+
+def flicker(engine, pair, legs, level):
+    """The poll saw the spread at the level; by the time the orders would
+    go, the broker's prices are back where they were."""
+    seen = dict(engine.market[pair.key])
+    seen['short_spread'] = level + 0.01
+    return seen
+
+
+def test_a_level_the_spread_only_flickered_to_is_not_sent(engine, pair, legs):
+    level = sell_above(engine, pair)
+    engine.click(pair.key, SpreadSide.SELL, level)
+    engine.poll_once()
+    events = engine.quoter.work(pair, flicker(engine, pair, legs, level))
+    assert [e['action'] for e in events] == ['recheck_missed']
+    assert engine.book.positions(pair.key) == []
+    assert nothing_at_the_broker(legs)
+    [quote] = engine.quoter.snapshot(pair.key)
+    assert quote['rechecks_missed'] == 1
+    assert engine.book.orders(pair.key)[0].is_working   # still working
+    # When the spread really is there, it goes.
+    move(legs, 'acct_b', +0.30)
+    engine.poll_once()
+    assert len(engine.book.positions(pair.key)) == 1
+
+
+def test_the_CONTROL_with_the_recheck_off_the_flicker_is_traded(engine, pair,
+                                                                legs):
+    engine.config.settings['RECHECK_BEFORE_SEND'] = False
+    level = sell_above(engine, pair)
+    engine.click(pair.key, SpreadSide.SELL, level)
+    engine.poll_once()
+    engine.quoter.work(pair, flicker(engine, pair, legs, level))
+    [position] = engine.book.positions(pair.key)
+    # ...and it went on below the level: the bad fill the re-check stops.
+    assert position.entry_spread < level
+
+
+def test_it_is_sent_on_the_fresh_prices_not_the_polls(engine, pair, legs):
+    level = sell_above(engine, pair)
+    engine.click(pair.key, SpreadSide.SELL, level)
+    engine.poll_once()
+    seen = flicker(engine, pair, legs, level)
+    move(legs, 'acct_b', +0.50)               # further still, by now
+    engine.quoter.work(pair, seen)
+    [position] = engine.book.positions(pair.key)
+    assert position.entry_spread > level + 0.1
+
+
+def test_a_leg_that_cannot_be_re_read_sends_nothing(engine, pair, legs):
+    level = sell_above(engine, pair)
+    engine.click(pair.key, SpreadSide.SELL, level)
+    engine.poll_once()
+    move(legs, 'acct_b', +0.30)
+    seen = dict(engine.market[pair.key], short_spread=level + 0.3)
+    legs['acct_a'].tick = lambda symbol: None
+    engine.quoter.work(pair, seen)
+    assert engine.book.positions(pair.key) == []
+    assert 'could not re-read' in engine.quoter.snapshot(pair.key)[0]['reason']

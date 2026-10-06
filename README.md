@@ -120,7 +120,11 @@ leg with the other crossed on the fill; on two legs that move together
 (spot gold against the gold future) that limit filled on a move in gold,
 not in the spread, and the leg crossed after had moved the same way -
 live, a SELL at 28.30 went on at 26.84, every fill the same direction.
-A held order costs both legs' bid-ask and works only while the desk is
+Just before sending, both legs' prices are read AGAIN, fresh, and the
+order goes only if the spread is still at the level - a level the poll
+saw for an instant and the market has already left is not traded, and
+the order keeps working (`RECHECK_BEFORE_SEND`, on; the Working orders
+panel counts the flickers it skipped). A held order costs both legs' bid-ask and works only while the desk is
 running (as the old one did - our pendings are swept at shutdown). A
 stale or jumping price holds it; one that reaches its level and is
 refused ends there, in the broker's words, and is journalled. The old
