@@ -75,6 +75,7 @@ import logging
 from . import sizing
 from .book import close_failure
 from .executor import slippage
+from .spread import compute_spread
 from .models import (LegFill, OrderState, OrderType, SpreadPosition,
                      SpreadSide, new_id)
 
@@ -129,6 +130,9 @@ class QuoteGroup:
         #: An ENTRY held here and crossed at the level (`WORKING_ORDERS`
         #: TRIGGER): nothing at the broker, by design, like a close.
         self.held = False
+        #: Times the poll saw the level and the fresh re-read just
+        #: before sending did not: a flicker NOT traded.
+        self.rechecks_missed = 0
 
     @property
     def quantity(self):
@@ -148,6 +152,7 @@ class QuoteGroup:
                 'leg': 'BOTH' if (self.closing or self.held)
                        else self.leg.upper(),
                 'held': self.held,
+                'rechecks_missed': self.rechecks_missed,
                 'position_id': self.position_id,
                 'intent': 'CLOSE' if self.closing else 'OPEN',
                 'ticket': self.ticket, 'price': self.price,
@@ -894,6 +899,29 @@ class Quoter:
             group.reason = None
             return None
 
+        if self.config.get('RECHECK_BEFORE_SEND', True):
+            # The poll saw the level. Is it STILL there? Read both legs
+            # again now, and send on those prices or not at all.
+            fresh, why = self._fresh_market(pair, md)
+            if fresh is None:
+                group.reason = (f'could not re-read the prices before '
+                                f'sending ({why}) — nothing sent')
+                return None
+            if not closing_trigger_reached(group.side, group.level, fresh):
+                group.rechecks_missed += 1
+                group.reason = None
+                logging.info(
+                    '%s: %s at %s - the poll saw the level, the fresh '
+                    'prices did not (%s %s); not sent, still working',
+                    pair.key, group.side.value, group.level,
+                    'Sell spread' if group.side is SpreadSide.SELL
+                    else 'Buy spread',
+                    fresh.get('short_spread' if group.side is SpreadSide.SELL
+                              else 'long_spread'))
+                return {'group': key, 'action': 'recheck_missed',
+                        'level': group.level}
+            md = fresh
+
         quantity = group.quantity
         try:
             result = self.executor.market_entry(
@@ -947,6 +975,35 @@ class Quoter:
         return {'group': key, 'action': 'rejected', 'ok': False,
                 'reason': reason,
                 'naked': getattr(result, 'naked', None)}
+
+    def _fresh_market(self, pair, md):
+        """Both legs' prices read NOW, as the poll's market data.
+
+        Returns (md, None), or (None, why) when either leg could not be
+        read - and then nothing is sent: the point of looking again is
+        lost if the look is skipped. Everything the poll measured that
+        a tick cannot (the guards, sigma) is carried over from `md`.
+        """
+        ticks = {}
+        for name, account, symbol in (('A', pair.account_a, pair.symbol_a),
+                                      ('B', pair.account_b, pair.symbol_b)):
+            leg = self.legs.get(account)
+            try:
+                tick = leg.tick(symbol) if leg is not None else None
+            except Exception as e:
+                tick, error = None, str(e)
+            else:
+                error = 'no tick'
+            if not tick:
+                return None, f'leg {name} {symbol}: {error}'
+            ticks[name] = tick
+        try:
+            fresh = compute_spread(pair, ticks['A'], ticks['B'],
+                                   pair.hedge_ratio,
+                                   clock=self.executor.clock)
+        except Exception as e:
+            return None, f'the prices did not make a spread: {e}'
+        return dict(md, **fresh), None
 
     def _work_closing(self, pair, md, group):
         """One pass over a resting CLOSE. Nothing of this is at the broker.

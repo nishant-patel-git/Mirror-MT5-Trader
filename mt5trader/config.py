@@ -254,6 +254,13 @@ DEFAULT_SETTINGS = {
     #: on at 26.84, every fill the same direction. Kept for a pair
     #: whose legs really are independent; not on the screen.
     'WORKING_ORDERS': 'TRIGGER',
+    #: Before a held working order is sent, read BOTH legs' prices
+    #: again, fresh, and send only if the spread is STILL at the level.
+    #: The poll that saw the level can be up to a poll old; a spread
+    #: that only flickered there has gone back by the time the orders
+    #: land, and that fill is the bad one. Costs one tick read per leg,
+    #: only at the moment of sending. Off sends on the poll's prices.
+    'RECHECK_BEFORE_SEND': True,
     #: Re-peg dead band, in ladder increments. Every MODIFY loses queue
     #: position, so re-pricing three times a second guarantees you are
     #: never at the front of a queue — which defeats quoting entirely
