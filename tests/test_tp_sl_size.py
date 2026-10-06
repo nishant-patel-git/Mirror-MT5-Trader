@@ -111,3 +111,50 @@ def test_a_zero_margin_is_never_frozen(config, pair, legs):
     legs['acct_b'].broker.margin_per_lot = 2000.0
     coordinator._margin_cache.clear()
     assert coordinator.entry_margin(pair, position) == pytest.approx(MARGIN)
+
+
+# -- the levels in money, on the panel ------------------------------------------
+
+
+@pytest.mark.parametrize('side', [SpreadSide.BUY, SpreadSide.SELL])
+def test_each_level_says_what_closing_there_is_worth_net(config, pair, legs,
+                                                         side):
+    """The $ beside the TP and SL is the net P&L of the whole position
+    closing at that price - checked against the mark the desk itself
+    uses, not against the formula that made it."""
+    from mt5trader.executor import mark_position
+    coordinator = engine(config, legs)
+    pair.algo_params = {'stop_loss_on': True, 'stop_loss_pct': 5.0}
+    position = opened(coordinator, pair, 2.0, side=side)
+    md = coordinator.market[pair.key]
+    [row] = coordinator._algo_positions(pair, md)
+    assert row['sl_money'] == pytest.approx(-0.05 * MARGIN * 2.0)
+    assert row['tp_money'] > 0
+    settings = pair.exit_settings(coordinator.config.settings)
+    for level, worth in ((row['tp'], row['tp_money']),
+                         (row['sl'], row['sl_money'])):
+        there = dict(md, short_spread=level, long_spread=level)
+        _gross, net, _ = mark_position(position, there, settings)
+        assert net == pytest.approx(worth, abs=0.01)
+
+
+def test_the_CONTROL_with_the_stop_off_there_is_no_stop_money(config, pair,
+                                                               legs):
+    coordinator = engine(config, legs)
+    pair.algo_params = {'stop_loss_on': False}
+    opened(coordinator, pair, 1.0)
+    [row] = coordinator._algo_positions(pair, coordinator.market[pair.key])
+    assert row['sl'] is None and row['sl_money'] is None
+
+
+def test_the_money_reaches_the_algos_panel_row():
+    from test_algo_signal import STATS, touch_signal
+    held = {'position_id': 'p1', 'side': 'BUY', 'entry_spread': 9.80,
+            'tp': 10.5, 'sl': 9.5, 'break_even': 9.82, 'quantity': 0.5,
+            'tp_money': 4.0, 'sl_money': -10.0}
+    body = touch_signal().evaluate(0.0, {'short_spread': 9.90,
+                                         'long_spread': 9.92,
+                                         'mid_spread': 9.91, 'quote_id': 1},
+                                   STATS, [held], {})
+    [row] = body['positions']
+    assert (row['tp_money'], row['sl_money']) == (4.0, -10.0)

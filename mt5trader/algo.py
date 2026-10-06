@@ -355,6 +355,7 @@ def zscore(value, mean, sigma):
 
 _POSITION_DISPLAY = ('quantity', 'opened_at', 'age_sec', 'source',
                      'entry_atr', 'stop_mode', 'target_mode',
+                     'tp_money', 'sl_money',
                      'leg_a_side', 'leg_a_entry', 'leg_a_now',
                      'leg_b_side', 'leg_b_entry', 'leg_b_now')
 

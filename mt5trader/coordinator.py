@@ -1190,6 +1190,16 @@ class Coordinator:
             if stop is not None and be is not None:
                 sl = be - stop if position.side is SpreadSide.BUY \
                     else be + stop
+            # What each level is worth to the WHOLE position, net: break
+            # even is after every cost, so the distance from it times k
+            # is the net P&L closing there. Unpriced stays None.
+            units = position.spread_units
+            sign = 1.0 if position.side is SpreadSide.BUY else -1.0
+
+            def worth(level):
+                if level is None or be is None or not units:
+                    return None
+                return round(sign * (level - be) * units, 2)
             rows.append({'position_id': position.position_id,
                          'side': position.side.value,
                          'source': getattr(position, 'source', MANUAL),
@@ -1199,6 +1209,7 @@ class Coordinator:
                          'age_sec': self.clock() - (position.opened_at
                                                     or self.clock()),
                          'break_even': be, 'tp': tp, 'sl': sl,
+                         'tp_money': worth(tp), 'sl_money': worth(sl),
                          'net_pnl': net_pnl, 'entry_atr': atr,
                          'stop_mode': params['stop_mode'],
                          'target_mode': params['target_mode'],
