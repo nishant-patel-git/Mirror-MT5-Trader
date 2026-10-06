@@ -68,6 +68,7 @@ PROBLEM_SETTLE_SEC = 20.0
 
 DIRECTIONS = [('BOTH', 'Both'), ('H_TO_L', 'H to L only'),
               ('L_TO_H', 'L to H only')]
+LEVEL_MODES = [('MARGIN', '% of margin'), ('ATR', 'ATR')]
 OVERNIGHT = [('ALLOW', 'Hold overnight'),
              ('EXIT_IF_PROFIT', 'Exit if in profit'),
              ('EXIT_ALWAYS', 'Exit anyway')]
@@ -98,6 +99,11 @@ FIELDS = [
      'number'),
     ('stop_loss_on', 'Stop loss', 'algo', 'bool'),
     ('stop_loss_pct', 'Stop loss (% of margin)', 'algo', 'number'),
+    ('stop_mode', 'Stop sized by', 'algo', LEVEL_MODES),
+    ('target_mode', 'Target sized by', 'algo', LEVEL_MODES),
+    ('atr_period', 'ATR period (candles)', 'algo', 'number'),
+    ('atr_stop_mult', 'Stop x ATR', 'algo', 'number'),
+    ('atr_target_mult', 'Target x ATR', 'algo', 'number'),
     ('reversion_on', 'Back to mean', 'algo', 'bool'),
     ('stop_z_on', 'Z-stop', 'algo', 'bool'),
     ('stop_z', 'Z-stop at |z|', 'algo', 'number'),
@@ -129,7 +135,8 @@ SECTIONS = {
                             'trend_on', 'trend_sigma',
                             'trend_lookback_min']),
     'exits': ('Exits', ['tp_target_pct_of_margin', 'stop_loss_on',
-                        'stop_loss_pct', 'reversion_on', 'stop_z_on',
+                        'stop_loss_pct', 'stop_mode', 'target_mode',
+                        'atr_period', 'atr_stop_mult', 'atr_target_mult', 'reversion_on', 'stop_z_on',
                         'stop_z', 'time_stop_on', 'time_stop_candles']),
     'limits': ('Daily limits', ['max_trades_day', 'max_losses_row',
                                 'daily_loss_limit']),
@@ -166,6 +173,8 @@ UNITS = {
     'edge_multiple': ' x', 'trend_sigma': ' sigma',
     'trend_lookback_min': ' min', 'tp_target_pct_of_margin': ' %',
     'stop_loss_pct': ' %', 'stop_z': ' sigma', 'time_stop_candles': ' bars',
+    'atr_period': ' candles', 'atr_stop_mult': ' x ATR',
+    'atr_target_mult': ' x ATR',
     'max_trades_day': ' trades', 'max_losses_row': ' losses',
     'daily_loss_limit': ' USD', 'commission_per_lot_a': ' USD/lot',
     'commission_per_lot_b': ' USD/lot',
@@ -384,6 +393,10 @@ def trade_entry_text(position, ladder, levels=None):
                  + _z(levels.get('entry_z'))))
     if levels:
         rows.append(None)
+        if levels.get('entry_atr') is not None:
+            rows.append(('ATR at entry', plain(levels.get('entry_atr'), 4)
+                         + f'  (TP {_basis(levels, "target")}, '
+                           f'SL {_basis(levels, "stop")})'))
         for label, key in (('Break-even', 'break_even'),
                            ('Take Profit', 'tp'), ('Stop Loss', 'sl')):
             value = levels.get(key)
@@ -455,6 +468,10 @@ def trade_exit_text(record, ladder):
             + '\n\n' + title('ANALYSIS') + '\n' + table(analysis_rows))
 
 
+def _basis(levels, which):
+    return 'by ATR' if levels.get(f'{which}_mode') == 'ATR' else '% margin'
+
+
 def _outcome(reason, pnl):
     reason = str(reason or '').lower()
     if 'profit target' in reason:
@@ -516,6 +533,10 @@ def position_rows(position, row, levels=None, now=None):
                                f'SL {usd(level_money(position, sl))} gross'),
                  ('Target/Stop', f'{usd(level_money(position, tp))}  /  '
                                  f'{usd(level_money(position, sl))}')]
+        if levels.get('entry_atr') is not None:
+            rows.append(('ATR at entry', plain(levels.get('entry_atr'), 4)
+                         + f'  (TP {_basis(levels, "target")}, '
+                           f'SL {_basis(levels, "stop")})'))
     opened = position.get('opened_at')
     if opened and now:
         rows.append(('Age', duration(now - opened)))
@@ -949,6 +970,13 @@ class Bot:
             rows.append(('Trend', 'off' if not trend.get('on') else
                          (trend.get('state') or 'waiting').lower()))
             rows.append(('Ready', 'yes' if filters.get('ready') else 'no'))
+            atr_modes = 'ATR' in (params.get('stop_mode'),
+                                  params.get('target_mode'))
+            rows.append((f'ATR({block.get("atr_period") or params.get("atr_period")})',
+                         plain(block.get('atr'), 4)
+                         + (f'  (stop {plain(params.get("atr_stop_mult"), 1)}x'
+                            f', target {plain(params.get("atr_target_mult"), 1)}x)'
+                            if atr_modes else '')))
         levels = {p.get('position_id'): p
                   for p in (block.get('positions') or [])}
         positions = row.get('positions') or []

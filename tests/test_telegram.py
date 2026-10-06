@@ -793,3 +793,38 @@ def test_the_dashboard_shows_each_ladders_session(bot):
     say(bot, '/status')
     assert ('Session</b>  <code>open  (01:05 to 23:45, break 12:00-12:30 '
             'broker time)') in bot.api.texts()[-1]
+
+
+# -- the ATR stop and target -------------------------------------------------------
+
+
+def test_set_the_stop_and_target_to_atr(bot):
+    say(bot, '/set stop_mode atr')
+    press(bot, 'Confirm')
+    say(bot, '/set atr_period 21')
+    press(bot, 'Confirm')
+    assert [s[1]['algo_params'] for s in bot.desk.saves] == [
+        {'entry_z': 2.0, 'stop_mode': 'ATR'},
+        {'entry_z': 2.0, 'atr_period': 21}]
+
+
+def test_the_exits_section_lists_the_atr_settings(bot):
+    open_settings(bot, 'Exits')
+    labels = set(bot.api.buttons())
+    for label in ('Stop sized by: % of margin', 'Target sized by: % of margin',
+                  'ATR period (candles): 14', 'Stop x ATR: 2.0',
+                  'Target x ATR: 1.5'):
+        assert label in labels, label
+
+
+def test_positions_and_status_show_the_atr(bot):
+    holding(bot)
+    pair = bot.desk.snapshot['pairs'][KEY]
+    pair['algo_block']['positions'][0].update(
+        entry_atr=0.0960, stop_mode='ATR', target_mode='ATR')
+    pair['algo_block'].update(atr=0.0912, atr_period=14)
+    say(bot, '/positions')
+    assert ('ATR at entry</b>  <code>0.0960  (TP by ATR, SL by ATR)'
+            in bot.api.texts()[-1])
+    say(bot, '/status')
+    assert 'ATR(14)</b>  <code>0.0912' in bot.api.texts()[-1]
