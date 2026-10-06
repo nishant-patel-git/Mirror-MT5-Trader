@@ -261,6 +261,19 @@ def _pnl(row):
     return None if value is None else float(value)
 
 
+def _gross(row):
+    """Closed: (exit - entry) x k, signed for the side. None if any part
+    of it was not measured."""
+    try:
+        entry = float(row['entry_spread'])
+        exit_ = float(row['exit_spread'])
+        units = float(row['spread_units'])
+    except (KeyError, TypeError, ValueError):
+        return None
+    sign = 1.0 if row.get('side') == 'BUY' else -1.0
+    return (exit_ - entry) * sign * units
+
+
 def summary(positions):
     """Trades opened in the window, the closed ones' net and win rate."""
     rows = list(positions or ())
@@ -392,6 +405,7 @@ def journal(positions, entry_z=None, exit_z=None):
                          'entry': fill.get('price'),
                          'symbol': fill.get('symbol')}
         opened = row.get('opened_at')
+        gross = _gross(row)
         out.append({
             'position_id': row.get('position_id'),
             'pair_key': row.get('pair_key'), 'side': row.get('side'),
@@ -407,6 +421,12 @@ def journal(positions, entry_z=None, exit_z=None):
             'leg_a': legs['a'], 'leg_b': legs['b'],
             'exit_reason': row.get('close_reason'),
             'pnl': None if pnl is None else round(pnl, 2),
+            # The spread's move times k, before commission; the fees
+            # are what lies between that and the net. Either is None
+            # when a side of it was not measured.
+            'gross_pnl': None if gross is None else round(gross, 2),
+            'fees': (None if gross is None or pnl is None
+                     else round(gross - pnl, 2)),
             'cum_pnl': round(running, 2)})
     out.reverse()
     return out
