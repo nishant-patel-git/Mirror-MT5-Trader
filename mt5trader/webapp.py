@@ -496,7 +496,11 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         columns = ['opened_at', 'closed_at', 'pair_key', 'side', 'quantity',
                    'order_type', 'entry_points', 'entry_money', 'exit_points',
                    'exit_money', 'round_trip_points', 'round_trip_money',
-                   'click_to_on_ms', 'realized_pnl', 'position_id']
+                   'click_to_on_ms', 'realized_pnl', 'position_id',
+                   # Which LEG slipped: its own price points against the
+                   # touch it was sent at, positive a cost.
+                   'symbol_a', 'entry_leg_a', 'exit_leg_a',
+                   'symbol_b', 'entry_leg_b', 'exit_leg_b']
         writer = csv.DictWriter(buffer, fieldnames=columns,
                                 extrasaction='ignore')
         writer.writeheader()

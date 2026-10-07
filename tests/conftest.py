@@ -84,6 +84,9 @@ class FakeBroker:
         #: leg that goes on and then cannot be taken off again.
         self.fail_closes = set()
         self.reject_orders = {}          # symbol -> error string
+        #: symbol -> price points a market order fills WORSE than the
+        #: touch it was sent at: a broker that executes off its quote.
+        self.fill_worse = {}
         #: symbol -> (lots that DEAL anyway, the broker's refusal).
         #: The shape the real fault had: order_send answers with a
         #: retcode that is not DONE, and a position is on regardless -
@@ -310,14 +313,17 @@ class FakeBroker:
                                error=error)
         # HEDGING: this OPENS a position. It never closes another one.
         magic = MAGIC_NUMBER if comment != 'by hand' else 0
+        worse = float(self.fill_worse.get(symbol, 0.0))
+        filled = price + worse if side is OrderSide.BUY else price - worse
         self.positions[ticket] = {
             'ticket': ticket, 'symbol': symbol, 'side': side.value,
-            'volume': volume, 'price_open': price, 'magic': magic,
+            'volume': volume, 'price_open': filled, 'magic': magic,
             'comment': comment, 'profit': 0.0, 'filled_at': self._stamp()}
-        self._record_deal(symbol, side.value, volume, price, 'open', comment,
-                          ticket, magic)
-        return OrderResult(True, requested_price=price, executed_price=price,
-                           ticket=ticket, volume=volume)
+        self._record_deal(symbol, side.value, volume, filled, 'open',
+                          comment, ticket, magic)
+        return OrderResult(True, requested_price=price,
+                           executed_price=filled, ticket=ticket,
+                           volume=volume)
 
     def order_fill_state(self, ticket):
         position = self.positions.get(int(ticket))
@@ -363,7 +369,10 @@ class FakeBroker:
             return OrderResult(False, error='forced failure')
         info = self.symbols[symbol]
         close_side = entry_side.opposite
-        price = info.ask if close_side is OrderSide.BUY else info.bid
+        quoted = info.ask if close_side is OrderSide.BUY else info.bid
+        worse = float(self.fill_worse.get(symbol, 0.0))
+        price = quoted + worse if close_side is OrderSide.BUY \
+            else quoted - worse
         move = price - position['price_open']
         if entry_side is OrderSide.SELL:
             move = -move
@@ -374,7 +383,8 @@ class FakeBroker:
             del self.positions[int(ticket)]
         else:
             position['volume'] -= volume
-        return OrderResult(True, executed_price=price, ticket=int(ticket),
+        return OrderResult(True, requested_price=quoted,
+                           executed_price=price, ticket=int(ticket),
                            volume=volume)
 
     def positions_by_magic(self, symbol=None):
