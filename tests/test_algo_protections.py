@@ -83,6 +83,65 @@ def test_re_entry_cannot_be_set_at_or_past_the_mean():
     assert algo.check_params({'reentry_back': 0})
 
 
+# -- the re-entry window -----------------------------------------------------------
+#
+# Live: oil armed past +2.00, came back, and was still an "entry" at
+# +0.05 - with nothing left to revert. The window now ends half-way
+# back: entry 2.0, back 0.5, window 50 % enters between +1.50 and +0.75.
+
+
+def test_the_window_is_half_way_back_by_default():
+    p = algo.clean_params(REENTRY)
+    assert algo.reentry_window(p) == pytest.approx((1.5, 0.75))
+
+
+def test_a_signal_near_the_mean_is_not_an_entry():
+    signal = algo.AlgoSignal(REENTRY)
+    feed(signal, 10.25, 10.27, 1, start=0)            # armed at z +2.5
+    body = feed(signal, 10.005, 10.02, 1, start=1)    # z +0.05
+    assert body['intents'] == []
+    assert body['armed']['SELL'] is False             # through the window
+
+
+def test_the_CONTROL_the_open_window_still_takes_it():
+    signal = algo.AlgoSignal(dict(REENTRY, reentry_window_pct=100))
+    feed(signal, 10.25, 10.27, 1, start=0)
+    body = feed(signal, 10.005, 10.02, 1, start=1)
+    assert body['intents'][0]['side'] == 'SELL'
+
+
+def test_inside_the_window_it_enters():
+    signal = algo.AlgoSignal(REENTRY)
+    feed(signal, 10.25, 10.27, 1, start=0)
+    body = feed(signal, 10.09, 10.11, 1, start=1)     # z +0.9: in window
+    assert body['intents'][0]['z'] == pytest.approx(0.9)
+
+
+def test_a_jump_through_the_window_disarms_and_never_comes_back_to_it():
+    signal = algo.AlgoSignal(REENTRY)
+    feed(signal, 10.25, 10.27, 1, start=0)            # armed
+    feed(signal, 10.05, 10.07, 1, start=1)            # z +0.5: through
+    body = feed(signal, 10.12, 10.14, 1, start=2)     # z +1.2: not armed
+    assert body['intents'] == [] and body['armed']['SELL'] is False
+
+
+def test_the_buy_side_is_the_mirror():
+    signal = algo.AlgoSignal(REENTRY)
+    feed(signal, 9.73, 9.75, 1, start=0)              # buy z -2.5: armed
+    body = feed(signal, 9.97, 9.99, 1, start=1)       # buy z -0.1
+    assert body['intents'] == [] and body['armed']['BUY'] is False
+    signal = algo.AlgoSignal(REENTRY)
+    feed(signal, 9.73, 9.75, 1, start=0)
+    body = feed(signal, 9.88, 9.90, 1, start=1)       # buy z -1.0: inside
+    assert body['intents'][0]['side'] == 'BUY'
+
+
+def test_the_window_setting_is_checked():
+    assert algo.check_params({'reentry_window_pct': 0})
+    assert algo.check_params({'reentry_window_pct': 120})
+    assert algo.check_params({'reentry_window_pct': 50}) == []
+
+
 # -- trend direction ------------------------------------------------------------
 
 

@@ -173,7 +173,10 @@ as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
   - *Re-entry* — a side is ARMED when its stretch reaches Entry z and enters
     only when the spread comes back inside by `Re-entry back by` (2.0 armed,
     1.5 enters). A spread riding the band never comes back, so it gives no
-    entry; disarmed if the spread reaches the mean first.
+    entry. The entry window ends `Re-entry window %` of the way back to the
+    mean (50: between 1.50 and 0.75); past that the side disarms, so a
+    spread armed hours ago is never an "entry" sitting on the mean. 100 is
+    the old window, all the way to the mean.
   - *Trend filter* — if the band's middle moved more than `Trend filter (σ)`
     over `Trend lookback (min)` (1σ over 120 min), no entry against it: no
     H to L while it rises, no L to H while it falls. The panel's Trend badge

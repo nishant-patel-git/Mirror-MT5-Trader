@@ -1309,6 +1309,7 @@
     ['.ls-az-regime-on', 'regime_on', 'check'],
     ['.ls-az-reentry-on', 'reentry_on', 'check'],
     ['.ls-az-reentry', 'reentry_back', 'number'],
+    ['.ls-az-reentry-window', 'reentry_window_pct', 'number'],
     ['.ls-az-trend-on', 'trend_on', 'check'],
     ['.ls-az-trend', 'trend_sigma', 'number'],
     ['.ls-az-trend-look', 'trend_lookback_min', 'number'],
@@ -2508,18 +2509,24 @@
           ' (' + fmt(sell ? block.upper : block.lower, digits) + ')</div>';
       }
       var inZ = Math.max(0, (entryZ || 0) - (params.reentry_back || 0));
+      // The window ends this far back: past it the side disarms.
+      var windowPct = params.reentry_window_pct === undefined ||
+        params.reentry_window_pct === null ? 50 : params.reentry_window_pct;
+      var outZ = inZ * (1 - windowPct / 100);
       var level = (block.mean === null || block.mean === undefined ||
                    !block.sigma) ? null
         : block.mean + (sell ? 1 : -1) * inZ * block.sigma;
       var armed = (block.armed || {})[sell ? 'SELL' : 'BUY'];
       return '<div class="aw-tile-entry" title="Armed when the stretch ' +
         'reaches ' + (sell ? '+' : '\u2212') + entryZ + '; entered on the ' +
-        'way back in, at ' + (sell ? '+' : '\u2212') + inZ.toFixed(2) +
-        '. Lost if the spread reaches the mean first.">' +
+        'way back in, between ' + (sell ? '+' : '\u2212') + inZ.toFixed(2) +
+        ' and ' + (sell ? '+' : '\u2212') + outZ.toFixed(2) + '. Past ' +
+        outZ.toFixed(2) + ' it disarms - too close to the mean to trade.">' +
         (armed ? '<b class="aw-armed">ARMED</b> ' : 'arm ' +
          (sell ? '\u2265 +' : '\u2264 \u2212') + entryZ + ' \u00b7 ') +
         (sell ? 'short' : 'long') + ' back at ' + (sell ? '+' : '\u2212') +
-        inZ.toFixed(2) + ' (' + fmt(level, digits) + ')</div>';
+        inZ.toFixed(2) + ' to ' + (sell ? '+' : '\u2212') + outZ.toFixed(2) +
+        ' (' + fmt(level, digits) + ')</div>';
     }
     var held = block.positions || [];
     var first = held[0] || null;
