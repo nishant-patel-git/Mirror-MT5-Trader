@@ -553,6 +553,17 @@ def test_the_slippage_report_covers_the_session_that_was_just_traded(
     # counted over the same stretch as a check on coverage.
     assert body['window']['clock'] == 'broker'
     assert body['journal']['fills'] >= 4
+    # WHICH LEG: each one's send price came back through the leg runner
+    # and the database, so every leg at both ends is measured - here at
+    # zero, because the fake fills at its quote.
+    [row] = body['rows']
+    for key in ('entry_leg_a', 'entry_leg_b', 'exit_leg_a', 'exit_leg_b'):
+        assert row[key] == pytest.approx(0.0), key
+    csv_text = app.test_client().get('/api/slippage.csv').get_data(
+        as_text=True)
+    header = csv_text.splitlines()[0].split(',')
+    for column in ('entry_leg_a', 'exit_leg_a', 'entry_leg_b', 'exit_leg_b'):
+        assert column in header
 
 
 def test_the_slippage_report_is_on_the_screen(desk, browser_page, round_turn):

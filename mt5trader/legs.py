@@ -167,6 +167,9 @@ class LocalLeg:
             'ok': result.success,
             'filled_volume': filled,
             'price': price,
+            # The touch the order was SENT at, as MT5 was quoting it:
+            # beside `price` it says how far this one leg slipped.
+            'requested_price': result.requested_price,
             'ticket': result.ticket,
             'position_tickets': position_tickets,
             'error': result.error,
@@ -197,6 +200,7 @@ class LocalLeg:
             'ok': result.success,
             'filled_volume': result.volume if result.success else 0.0,
             'price': result.executed_price,
+            'requested_price': result.requested_price,
             'error': result.error,
         }
 

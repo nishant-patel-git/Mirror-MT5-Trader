@@ -4176,9 +4176,35 @@
     });
     html += '</tbody></table>';
 
+    // WHICH LEG it comes from: each leg against the touch it was SENT
+    // at, in that leg's own price points (positive a cost).
+    html += '<table><thead><tr><th>By leg (own price points)</th>' +
+      '<th>Leg A</th><th>Leg A entry</th><th>Leg A exit</th>' +
+      '<th>Leg B</th><th>Leg B entry</th><th>Leg B exit</th>' +
+      '</tr></thead><tbody>';
+    Object.keys(report.by_pair).forEach(function (key) {
+      var group = report.by_pair[key];
+      var legs = group.legs || {};
+      var sample = (report.rows || []).filter(function (r) {
+        return r.pair_key === key;
+      })[0] || {};
+      function cell(name) {
+        var leg = legs[name] || {};
+        return leg.measured ? slipPoints(leg.points_mean)
+          : '<td><span class="hint">not kept</span></td>';
+      }
+      html += '<tr><td>' + escapeHtml(group.name || key) + '</td>' +
+        '<td>' + escapeHtml(sample.symbol_a || 'A') + '</td>' +
+        cell('entry_leg_a') + cell('exit_leg_a') +
+        '<td>' + escapeHtml(sample.symbol_b || 'B') + '</td>' +
+        cell('entry_leg_b') + cell('exit_leg_b') + '</tr>';
+    });
+    html += '</tbody></table>';
+
     if ((report.worst || []).length) {
       html += '<table><thead><tr><th>Worst entries</th><th>Side</th>' +
         '<th>Qty</th><th>Type</th><th>Slip</th><th>Cost</th>' +
+        '<th>Leg A</th><th>Leg B</th>' +
         '<th>Click→on</th><th>Opened</th></tr></thead><tbody>';
       report.worst.forEach(function (row) {
         html += '<tr><td>' + (row.pair_key || DASH) + '</td>';
@@ -4187,6 +4213,8 @@
         html += '<td>' + (row.order_type || DASH) + '</td>';
         html += slipPoints(row.entry_points);
         html += slipMoney(row.entry_money);
+        html += slipPoints(row.entry_leg_a);
+        html += slipPoints(row.entry_leg_b);
         html += '<td>' + (row.click_to_on_ms === null ||
                           row.click_to_on_ms === undefined
           ? DASH : Math.round(row.click_to_on_ms) + 'ms') + '</td>';

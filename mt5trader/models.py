@@ -183,6 +183,13 @@ class LegFill:
         self.position_tickets = list(position_tickets or [])
         self.contract_size = contract_size
         self.at = clock() if at is None else at
+        #: What MT5 was quoting this leg at when the order was SENT, and
+        #: the same for the close: beside the fills they say which leg
+        #: slipped and by how much. None when it was not reported (a
+        #: limit that filled, a fill from before this was kept).
+        self.sent_price = None
+        self.exit_sent_price = None
+        self.exit_price = None
 
     def to_dict(self):
         return {
@@ -191,16 +198,23 @@ class LegFill:
             'price': self.price, 'order_ticket': self.order_ticket,
             'position_tickets': list(self.position_tickets),
             'contract_size': self.contract_size, 'at': self.at,
+            'sent_price': self.sent_price,
+            'exit_sent_price': self.exit_sent_price,
+            'exit_price': self.exit_price,
         }
 
     @classmethod
     def from_dict(cls, raw):
         if not raw:
             return None
-        return cls(raw['account'], raw['symbol'], raw['side'], raw['volume'],
+        fill = cls(raw['account'], raw['symbol'], raw['side'], raw['volume'],
                    raw['price'], order_ticket=raw.get('order_ticket'),
                    position_tickets=raw.get('position_tickets'),
                    contract_size=raw.get('contract_size'), at=raw.get('at'))
+        fill.sent_price = raw.get('sent_price')
+        fill.exit_sent_price = raw.get('exit_sent_price')
+        fill.exit_price = raw.get('exit_price')
+        return fill
 
 
 #: Who opened a position. See `SpreadPosition.source`.
