@@ -131,6 +131,15 @@ refused ends there, in the broker's words, and is journalled. The old
 quote is still behind the desk setting `WORKING_ORDERS = QUOTE` for a
 pair whose legs genuinely move apart.
 
+**The Algo's take-profit is confirmed before it is sent.** Both legs are
+read again and the close goes only if the fresh closing price still
+reaches the target, and on those prices - one poll's bad print once
+"reached" oil's target 0.16 past it and the close filled 0.235 back,
+banking $0.10 of a $3.90 target. Held, it is tried again in 5 s while
+the Algo still sees the target; the stop stands throughout. The stop
+loss, the cutoff, a kill and every manual close are never re-checked
+(`RECHECK_TAKE_PROFIT`, on).
+
 **Slippage — the report over a real session.** The sixth monitor tab
 reports the session you are in, cut at the cutoff on the **broker's**
 clock so it lines up with the day MT5 stamps its deals in. Entries are

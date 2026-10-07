@@ -983,12 +983,59 @@ class Coordinator:
             position = self.book.position(position_id)
             if position is None or not position.is_open:
                 return {'ok': True, 'reason': 'already closed'}
+            md = self.market.get(pair.key)
+            if reason == 'PROFIT_TARGET' and \
+                    self.config.get('RECHECK_TAKE_PROFIT', True):
+                # A TAKE-PROFIT, and only a take-profit, is confirmed on
+                # prices read NOW. Live, one poll showed oil's closing
+                # spread 0.16 past the target; the close filled 0.235
+                # back from it, and a +$3.90 target banked +$0.10. A
+                # stop, a cutoff, a kill and every manual close go out
+                # unconfirmed and at once - waiting there adds risk.
+                # Waiting here costs at most the opportunity: the stop
+                # still stands while the target is unconfirmed.
+                fresh, unconfirmed = self._confirm_take_profit(
+                    pair, position, md)
+                if unconfirmed:
+                    logging.info('[ALGO %s] take-profit on %s not sent: %s',
+                                 pair.key, position_id, unconfirmed)
+                    if self.store is not None:
+                        self.store.event('algo_tp_unconfirmed', pair.key,
+                                         position_id=position_id,
+                                         reason=unconfirmed)
+                    return {'ok': False, 'held': True,
+                            'reason': unconfirmed}
+                md = fresh
             result = self.executor.close_position(
-                pair, position, self.market.get(pair.key),
+                pair, position, md,
                 reason=f'Algo: {algo_module.EXIT_WORDS.get(reason, reason)}')
             self.remember(position)
             return {'ok': bool(result.get('ok')),
                     'reason': result.get('reason') or result.get('error')}
+
+    def _confirm_take_profit(self, pair, position, md):
+        """(fresh market, None) when both legs, read again now, still
+        put the closing price at or past this position's take-profit;
+        (None, why) when they do not, or could not be read."""
+        rows = {r['position_id']: r for r in self._algo_positions(pair, md)
+                if md} if md else {}
+        tp = (rows.get(position.position_id) or {}).get('tp')
+        if tp is None:
+            return None, 'its take-profit could not be priced'
+        fresh, why = self.quoter._fresh_market(pair, md)
+        if fresh is None:
+            return None, f'the prices could not be read again ({why})'
+        closing = executable_spread(fresh, position.side, closing=True)
+        reached = closing is not None and (
+            closing >= tp - 1e-9 if position.side is SpreadSide.BUY
+            else closing <= tp + 1e-9)
+        if not reached:
+            return None, (f'the fresh closing price {closing:.4f} is short '
+                          f'of the take-profit {tp:.4f} - the poll that saw '
+                          f'it had a price that is not there now'
+                          if closing is not None else
+                          'the fresh prices make no closing price')
+        return fresh, None
 
     def _realized_of(self, position_id):
         position = self.book.position(position_id)
