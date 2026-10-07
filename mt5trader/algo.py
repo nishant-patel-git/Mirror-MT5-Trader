@@ -148,6 +148,13 @@ DEFAULT_PARAMS = {
     #: if the spread reaches the mean first.
     'reentry_on': True,
     'reentry_back': 0.5,
+    #: The re-entry WINDOW: how much of the way from the entry level back
+    #: to the mean still counts as an entry, in %. 50: entry z 2.0 and
+    #: back 0.5 enter between 1.50 and 0.75 - past 0.75 the side
+    #: disarms. Without it every z from 1.50 down to 0 was an entry: a
+    #: spread armed hours ago signalled at +0.05, with nothing left to
+    #: revert. 100 is that old, open window.
+    'reentry_window_pct': 50.0,
     #: TREND DIRECTION: when the band's middle (the EMA) has moved more
     #: than `trend_sigma` sigma over the last `trend_lookback_min`, no
     #: entry AGAINST it — no H to L while it rises, no L to H while it
@@ -291,6 +298,8 @@ def clean_params(raw):
     # past the mean, where there is nothing left to revert.
     out['reentry_back'] = min(max(out['reentry_back'], 0.05),
                               out['entry_z'] * 0.9)
+    out['reentry_window_pct'] = min(max(out['reentry_window_pct'], 5.0),
+                                    100.0)
     if out['trend_lookback_min'] <= 0:
         out['trend_lookback_min'] = DEFAULT_PARAMS['trend_lookback_min']
     if out['algo_qty'] <= 0:
@@ -335,6 +344,9 @@ def check_params(raw):
         elif key == 'reentry_back' and number <= 0:
             problems.append('re-entry must be above 0 — how far back '
                             'inside the band, in z')
+        elif key == 'reentry_window_pct' and not 0 < number <= 100:
+            problems.append('re-entry window must be above 0 and at most '
+                            '100 % of the way back to the mean')
         elif key == 'trend_sigma' and number <= 0:
             problems.append('trend filter sigma must be above 0')
         elif key == 'atr_period' and number < 2:
@@ -358,6 +370,13 @@ _POSITION_DISPLAY = ('quantity', 'opened_at', 'age_sec', 'source',
                      'tp_money', 'sl_money',
                      'leg_a_side', 'leg_a_entry', 'leg_a_now',
                      'leg_b_side', 'leg_b_entry', 'leg_b_now')
+
+
+def reentry_window(p):
+    """(enters at, window ends at), as |z|, for re-entry: 2.0 armed,
+    back 0.5, window 50 % -> (1.50, 0.75)."""
+    back_at = p['entry_z'] - p['reentry_back']
+    return back_at, back_at * (1.0 - p['reentry_window_pct'] / 100.0)
 
 
 class AlgoSignal:
@@ -486,24 +505,27 @@ class AlgoSignal:
         entry = p['entry_z']
         z_sell, z_buy = body['z_sell'], body['z_buy']
         if p['reentry_on']:
-            back_at = entry - p['reentry_back']
-            # Armed by the stretch, disarmed at the mean.
+            back_at, floor = reentry_window(p)
+            # Armed by the stretch; disarmed once the spread is through
+            # the window's far edge - it came back too far, too fast, to
+            # leave anything worth trading (at 100 % that edge is the
+            # mean, as it always was).
             if z_sell is not None:
                 if z_sell >= entry:
                     self._armed['SELL'] = True
-                elif z_sell <= 0:
+                elif z_sell <= floor:
                     self._armed['SELL'] = False
             if z_buy is not None:
                 if z_buy <= -entry:
                     self._armed['BUY'] = True
-                elif z_buy >= 0:
+                elif z_buy >= -floor:
                     self._armed['BUY'] = False
-            # The entry is the way back IN: inside the band, short of
-            # the mean.
+            # The entry is the way back IN: inside the band, inside the
+            # window - never near the mean.
             hits = {'SELL': (self._armed['SELL'] and z_sell is not None
-                             and 0 < z_sell <= back_at),
+                             and floor < z_sell <= back_at),
                     'BUY': (self._armed['BUY'] and z_buy is not None
-                            and -back_at <= z_buy < 0)}
+                            and -back_at <= z_buy < -floor)}
         else:
             self._armed = {'BUY': False, 'SELL': False}
             hits = {'SELL': z_sell is not None and z_sell >= entry,

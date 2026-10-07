@@ -592,6 +592,9 @@
             <span>Re-entry back by</span>
             <input type="checkbox" class="ls-az-reentry-on">
             <input class="ls-az-reentry" type="number" min="0.05" step="0.1"></label>
+          <label class="lsf" title="Re-entry window: how much of the way from where it enters back to the mean still counts as an entry, in %. 50 with entry z 2.0 and back 0.5: enters between 1.50 and 0.75, and past 0.75 the side disarms - so nothing near the mean is ever an entry. 100 = all the way to the mean.">
+            <span>Re-entry window %</span>
+            <input class="ls-az-reentry-window" type="number" min="5" max="100" step="5"></label>
           <label class="lsf" title="No entry signal in the last this-many minutes before the session cutoff, or after it. 0 = off.">
             <span>Cutoff (min)</span>
             <input class="ls-az-buffer" type="number" min="0" step="1"></label>
