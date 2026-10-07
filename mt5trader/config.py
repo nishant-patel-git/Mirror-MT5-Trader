@@ -261,6 +261,11 @@ DEFAULT_SETTINGS = {
     #: land, and that fill is the bad one. Costs one tick read per leg,
     #: only at the moment of sending. Off sends on the poll's prices.
     'RECHECK_BEFORE_SEND': True,
+    #: The same for the Algo's TAKE-PROFIT, and only that exit: both
+    #: legs read again, and the close goes only if the fresh closing
+    #: price still reaches the target. A stop, the cutoff, a kill and
+    #: every manual close are never re-checked - nothing waits there.
+    'RECHECK_TAKE_PROFIT': True,
     #: Re-peg dead band, in ladder increments. Every MODIFY loses queue
     #: position, so re-pricing three times a second guarantees you are
     #: never at the front of a queue — which defeats quoting entirely

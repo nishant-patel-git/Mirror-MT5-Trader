@@ -55,6 +55,10 @@ from.
   report while the money sits at the broker.
 - **Unmeasured is not zero.** Return None and render "—".
 - Guards may withhold an ORDER. **A guard must never prevent a close.**
+  The one agreed exception: the Algo's TAKE-PROFIT is confirmed on
+  prices read again before it is sent (`RECHECK_TAKE_PROFIT`) - a
+  target is an opportunity, not a risk, and the stop stands meanwhile.
+  Stops, the cutoff, kills and manual closes are never re-checked.
 - A refusal carries the broker's own words (`10027 AutoTrading disabled
   by client`), never "check the log".
 - `mt5trader/broker.py` is the only module allowed to import
