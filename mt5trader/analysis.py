@@ -403,6 +403,7 @@ def journal(positions, entry_z=None, exit_z=None):
             legs[leg] = {'side': fill.get('side'),
                          'volume': fill.get('volume'),
                          'entry': fill.get('price'),
+                         'exit': fill.get('exit_price'),
                          'symbol': fill.get('symbol')}
         opened = row.get('opened_at')
         gross = _gross(row)

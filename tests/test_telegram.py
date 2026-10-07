@@ -971,3 +971,20 @@ def test_set_the_re_entry_window(bot):
     assert bot.desk.saves[-1][1]['algo_params']['reentry_window_pct'] == 60
     say(bot, '/set reentry_window_pct 0')            # the control: refused
     assert 're-entry window' in bot.api.texts()[-1]
+
+
+def test_a_trade_exit_falls_back_to_each_legs_own_close_price(bot):
+    holding(bot)
+    watch(bot)
+    legs = {leg: dict(POSITION[leg], exit_price=price) for leg, price in
+            (('leg_a', 88.95), ('leg_b', 101.75))}
+    closed = dict(POSITION, closed_at=POSITION['opened_at'] + 60,
+                  exit_spread=12.80, realized_pnl=0.1,
+                  close_reason='Algo: profit target (after costs)', **legs)
+    # The fills journal has nothing for it yet.
+    bot.desk.records['P7'] = {'ok': True, 'position': closed,
+                              'exit_prices': {'leg_a': None, 'leg_b': None}}
+    bot.desk.snapshot['pairs'][KEY]['positions'] = []
+    [told] = watch(bot)
+    assert 'Leg A Exit</b>  <code>$88.9500' in told
+    assert 'Leg B Exit</b>  <code>$101.7500' in told

@@ -549,8 +549,12 @@ def trade_exit_text(record, ladder):
             ('Exit Time', utc(closed)), None]
     for name, fill in _legs(position):
         rows.append((f'Leg {name} Entry', price(fill.get('price'))))
-        rows.append((f'Leg {name} Exit',
-                     price(exits.get('leg_' + name.lower()))))
+        # The broker's closing deals first; failing those, the close
+        # price the leg itself recorded when it was filled.
+        closed_at = exits.get('leg_' + name.lower())
+        if closed_at is None:
+            closed_at = fill.get('exit_price')
+        rows.append((f'Leg {name} Exit', price(closed_at)))
     rows += [None,
              ('Entry Spread', plain(entry, 4, True) + _z(record.get('entry_z'))),
              ('Exit Spread', plain(exit_, 4, True) + _z(record.get('exit_z'))),
@@ -1229,10 +1233,12 @@ class Bot:
                     ('Duration', duration(trip.get('held_sec'))), None]
             for leg in ('a', 'b'):
                 fill = trip.get('leg_' + leg) or {}
+                closed_at = exits.get('leg_' + leg)
+                if closed_at is None:
+                    closed_at = fill.get('exit')
                 rows.append((f'Leg {leg.upper()} Entry',
                              price(fill.get('entry'))))
-                rows.append((f'Leg {leg.upper()} Exit',
-                             price(exits.get('leg_' + leg))))
+                rows.append((f'Leg {leg.upper()} Exit', price(closed_at)))
             rows += [None,
                      ('Entry Spread', plain(entry, 4, True)
                       + bps(entry, fill_a.get('entry'))),
