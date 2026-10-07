@@ -954,3 +954,20 @@ def test_an_unmeasured_gross_is_a_dash_not_a_zero(bot):
     assert 'All-time Fees</b>  <code>—' in text
     # The net was measured, and is still said.
     assert 'All-time Net</b>  <code>$+3.85' in text
+
+
+def test_the_dashboard_shows_the_whole_re_entry_window(bot):
+    row = bot.desk.snapshot['pairs'][KEY]
+    row['algo_params'] = dict(row['algo_params'], reentry_on=True,
+                              reentry_back=0.5)
+    say(bot, '/status')
+    assert 'Enters at</b>  <code>z +/-1.50 to +/-0.75 (way back)' \
+        in bot.api.texts()[-1]
+
+
+def test_set_the_re_entry_window(bot):
+    say(bot, '/set reentry_window_pct 60')
+    press(bot, 'Confirm')
+    assert bot.desk.saves[-1][1]['algo_params']['reentry_window_pct'] == 60
+    say(bot, '/set reentry_window_pct 0')            # the control: refused
+    assert 're-entry window' in bot.api.texts()[-1]

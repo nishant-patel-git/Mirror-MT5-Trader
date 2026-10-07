@@ -83,6 +83,7 @@ FIELDS = [
     ('algo_qty', 'Algo qty (spreads)', 'algo', 'number'),
     ('reentry_on', 'Wait for re-entry', 'algo', 'bool'),
     ('reentry_back', 'Re-entry back (sigma)', 'algo', 'number'),
+    ('reentry_window_pct', 'Re-entry window (%)', 'algo', 'number'),
     ('max_entry_z', 'Max entry z', 'algo', 'number'),
     ('warmup_min', 'Warm-up (min)', 'algo', 'number'),
     ('cooldown_min', 'Cooldown (min)', 'algo', 'number'),
@@ -129,7 +130,8 @@ FIELD = {f[0]: f for f in FIELDS}
 #: The settings screen's sections, in order, and what is in each.
 SECTIONS = {
     'entry': ('Entry', ['entry_z', 'direction', 'algo_qty', 'reentry_on',
-                        'reentry_back', 'max_entry_z', 'warmup_min',
+                        'reentry_back', 'reentry_window_pct', 'max_entry_z',
+                        'warmup_min',
                         'cooldown_min', 'cutoff_buffer_min']),
     'filters': ('Filters', ['edge_on', 'edge_multiple', 'regime_on',
                             'trend_on', 'trend_sigma',
@@ -152,6 +154,7 @@ SECTION_OF = {field: section for section, (_, fields) in SECTIONS.items()
 #: the label column.
 SHORT_LABELS = {
     'reentry_on': 'Re-entry', 'reentry_back': 'Re-entry back',
+    'reentry_window_pct': 'Re-entry window',
     'warmup_min': 'Warm-up min', 'cooldown_min': 'Cooldown min',
     'cutoff_buffer_min': 'Cutoff min', 'algo_qty': 'Algo qty',
     'edge_multiple': 'Edge required', 'trend_sigma': 'Trend limit',
@@ -168,7 +171,8 @@ SHORT_LABELS = {
 
 #: What each setting is counted in, for the settings list.
 UNITS = {
-    'algo_qty': ' spreads', 'reentry_back': ' sigma', 'warmup_min': ' min',
+    'algo_qty': ' spreads', 'reentry_back': ' sigma',
+    'reentry_window_pct': ' %', 'warmup_min': ' min',
     'cooldown_min': ' min', 'cutoff_buffer_min': ' min',
     'edge_multiple': ' x', 'trend_sigma': ' sigma',
     'trend_lookback_min': ' min', 'tp_target_pct_of_margin': ' %',
@@ -1088,8 +1092,12 @@ class Bot:
             if params.get('reentry_on'):
                 back = max(0.0, (entry or 0) - (params.get('reentry_back')
                                                 or 0))
+                edge = back * (1.0 - (params.get('reentry_window_pct')
+                                      or 100.0) / 100.0)
                 rows.append(('Arms at', f'z +/-{plain(entry)}'))
-                rows.append(('Enters at', f'z +/-{plain(back)} (way back)'))
+                # The whole window: past its far edge the side disarms.
+                rows.append(('Enters at', f'z +/-{plain(back)} to '
+                                          f'+/-{plain(edge)} (way back)'))
                 armed = block.get('armed') or {}
                 rows.append(('Armed', ', '.join(
                     side_words(s) for s in ('SELL', 'BUY') if armed.get(s))
