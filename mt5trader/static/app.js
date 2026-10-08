@@ -207,7 +207,13 @@
     placed: [{hz: 880, ms: 70, gain: 0.05}],
     filled: [{hz: 660, ms: 80, gain: 0.07}, {hz: 1040, ms: 130, gain: 0.07}],
     cancelled: [{hz: 320, ms: 110, gain: 0.05}],
-    refused: [{hz: 180, ms: 200, gain: 0.06}]
+    refused: [{hz: 180, ms: 200, gain: 0.06}],
+    // SIGNALS mode: rising for an entry, falling for an exit - each its
+    // own, so the trader knows which without looking.
+    signal_entry: [{hz: 523, ms: 110, gain: 0.08}, {hz: 659, ms: 110, gain: 0.08},
+                   {hz: 784, ms: 180, gain: 0.08}],
+    signal_exit: [{hz: 784, ms: 110, gain: 0.08}, {hz: 659, ms: 110, gain: 0.08},
+                  {hz: 523, ms: 180, gain: 0.08}]
   };
   var audio = null;
 
@@ -272,6 +278,50 @@
     if (data.cancelled !== undefined || data.closed !== undefined) {
       return sound('cancelled');
     }
+  }
+
+  function stickyToast(message) {
+    /* A SIGNALS alert: it stays until the trader dismisses it. The
+     * trade it asks for is theirs to make, so it must not scroll away
+     * unread the way an ordinary outcome does. */
+    var box = document.createElement('div');
+    box.className = 'toast signal';
+    box.innerHTML = '<span class="dismiss">&times;</span>';
+    box.appendChild(document.createTextNode(message));
+    box.addEventListener('click', function () { box.remove(); });
+    el('toasts').appendChild(box);
+  }
+
+  function announceSignals() {
+    /* Each ladder's SIGNALS alert, said ONCE: by its id, never by its
+     * text. On a page that has just loaded, one already showing is
+     * taken as seen unless it is fresh - a reload never replays the
+     * morning's alerts. */
+    var snapshot = state.snapshot;
+    state.signalSeen = state.signalSeen || {};
+    Object.keys(snapshot.pairs || {}).forEach(function (key) {
+      var row = snapshot.pairs[key];
+      var alert = (row.algo_block || {}).signal_alert;
+      if (!alert || !alert.id) { return; }
+      var seen = state.signalSeen[key];
+      state.signalSeen[key] = alert.id;
+      if (seen === alert.id) { return; }
+      if (seen === undefined && typeof alert.at === 'number' &&
+          typeof snapshot.at === 'number' && snapshot.at - alert.at > 30) {
+        return;                       // on load, and not fresh: seen
+      }
+      stickyToast((row.name || key) + ': ' + alert.text);
+      sound(alert.kind === 'ENTRY' ? 'signal_entry' : 'signal_exit');
+      // The ladder's frame flashes - only if its window is open.
+      var node = document.querySelector(
+        '.ladder[data-pair="' + cssEscape(key) + '"]');
+      if (node) {
+        node.classList.add('signal-flash');
+        window.setTimeout(function () {
+          node.classList.remove('signal-flash');
+        }, 3000);
+      }
+    });
   }
 
   function toastOutcome(result) {
@@ -1369,12 +1419,14 @@
     if (!button) { return; }
     var live = !!(row.algo_on && row.algo_mode === 'LIVE');
     var dry = !!(row.algo_on && !live);
-    button.textContent = live ? 'ALGO LIVE' : (dry ? 'ALGO DRY' : 'ALGO OFF');
+    button.textContent = live ? 'ALGO LIVE'
+      : (dry ? 'ALGO SIGNALS' : 'ALGO OFF');
     button.className = 'algo-btn ' + (live ? 'live' : (dry ? 'dry' : 'off'));
     button.title = live
       ? 'The Algo is TRADING this ladder — manual orders here are off; '
         + 'CLOSE ALL still closes. Click to change.'
-      : dry ? 'The Algo is on in a dry run: signals only, nothing is sent. '
+      : dry ? 'Signals: the Algo signals and watches your position\u2019s '
+          + 'TP and SL; you trade on this ladder, nothing is sent. '
           + 'Click to change.'
         : 'The Algo is off on this ladder. Click to turn it on.';
   }
@@ -1559,7 +1611,8 @@
       if (algoState) {
         algoState.textContent = !live.algo_on ? ''
           : (live.algo_mode === 'LIVE' ? 'LIVE — trading this ladder'
-                                       : 'on — dry run, signals only');
+                                       : 'on — Signals: the Algo signals, '
+                                         + 'you trade');
       }
       var typeBox = pane.querySelector('.ls-pair-type');
       fairKindFields(pane, {pair_type:
@@ -2479,11 +2532,11 @@
     var live = block.mode === 'LIVE';
     node.querySelector('.aw-pair').textContent = (row.name || key) + ' · Algo';
     var mode = node.querySelector('.aw-mode');
-    mode.textContent = live ? 'LIVE' : 'DRY RUN';
+    mode.textContent = live ? 'LIVE' : 'SIGNALS';
     mode.className = 'aw-mode ' + (live ? 'live' : 'dry');
     mode.title = live
       ? 'the Algo TRADES this ladder — manual orders on it are off'
-      : 'signals only — nothing is sent';
+      : 'Signals: the Algo signals, you trade — nothing is sent';
     var market = row.market || {};
     var entryZ = params.entry_z;
 
@@ -2549,7 +2602,8 @@
     var held = block.positions || [];
     var first = held[0] || null;
     var position = first
-      ? (first.side === 'BUY' ? 'LONG' : 'SHORT') + ' ' +
+      ? (first.source && first.source !== 'ALGO' ? 'YOUR ' : '') +
+        (first.side === 'BUY' ? 'LONG' : 'SHORT') + ' ' +
         fmt(first.quantity, 2) : 'FLAT';
     var html = '<div class="aw-head">Signal &amp; Position</div>' +
       '<div class="aw-tiles">' + tile('SELL') + tile('BUY') +
@@ -2739,7 +2793,7 @@
       ' · ' + new Date(last.at * 1000).toLocaleTimeString();
     var outcome;
     if (last.mode !== 'LIVE') {
-      outcome = '<div class="hint">dry run — nothing sent</div>';
+      outcome = '<div class="hint">signal — nothing sent</div>';
     } else if (last.done) {
       outcome = '<div class="up">sent — done</div>';
     } else {
@@ -3233,6 +3287,20 @@
       bucket.push(order);
     });
 
+    // The Algo's levels for each position it is watching - its own in
+    // LIVE, YOURS in Signals: ENTRY, BE, TP and SL marked on the rows
+    // they fall on, so the ladder shows where the trade comes off.
+    var levelMarks = [];
+    ((row.algo_block || {}).positions || []).forEach(function (held) {
+      [['ENTRY', held.entry_spread, 'entry'], ['BE', held.break_even, 'be'],
+       ['TP', held.tp, 'tp'], ['SL', held.sl, 'sl']].forEach(function (m) {
+        if (m[1] !== null && m[1] !== undefined && isFinite(m[1])) {
+          levelMarks.push({tag: m[0], at: m[1], cls: m[2]});
+        }
+      });
+    });
+    var half = (row.increment || 0.01) / 2;
+
     var out = [];
     rows.forEach(function (line) {
       var level = line.level;
@@ -3318,8 +3386,14 @@
       cells += '<td class="bid' + (line.is_best_bid ? ' has-qty' : '') +
         '" title="' + clickHint('bid', level) + '">' +
         depthText(line.bid_size, line.is_best_bid, '▲') + '</td>';
+      var tags = levelMarks.filter(function (m) {
+        return Math.abs(m.at - level) < half;
+      }).map(function (m) {
+        return '<span class="lvl-tag ' + m.cls + '" title="' + m.tag + ' ' +
+          fmt(m.at, digitsFor(row.increment) + 2) + '">' + m.tag + '</span>';
+      }).join('');
       cells += '<td class="price' + (isLast ? ' last-trade' : '') + '">' +
-        fmt(level, digitsFor(row.increment)) + '</td>';
+        fmt(level, digitsFor(row.increment)) + tags + '</td>';
       cells += '<td class="ask' + (line.is_best_ask ? ' has-qty' : '') +
         '" title="' + clickHint('ask', level) + '">' +
         depthText(line.ask_size, line.is_best_ask, '▼') + '</td>';
@@ -4535,7 +4609,7 @@
       }).join('') + '</select> <button class="btn an-bt-run"' +
       (bt && bt.running ? ' disabled' : '') + '>Run backtest</button></div>' +
       '<div class="an-bt-out ' + (bt ? bt.cls || '' : 'hint') + '">' +
-      (bt ? bt.html : 'The ladder\u2019s Algo must be on (Dry run is fine).') +
+      (bt ? bt.html : 'The ladder\u2019s Algo must be on (Signals is fine).') +
       '</div>';
 
     // 6. Z-score excursions.
@@ -5093,6 +5167,7 @@
     renderUnclaimed();
     reportDeadOrders();
     renderSameLogin();
+    announceSignals();
 
     var wanted = {};
     state.open.forEach(function (id) { wanted[id] = true; });

@@ -2172,3 +2172,33 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
   width: 64px;
   margin-left: 2px;
 }
+
+/* SIGNALS mode. An alert stays until dismissed, in its own colour; the
+   ladder it is about flashes its frame for a moment. */
+.toast.signal {
+  background: #1d3b6b;
+  color: #fff;
+  border-left: 4px solid #ffcc33;
+  font-weight: bold;
+}
+@keyframes signal-flash {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 204, 51, 0); }
+  50% { box-shadow: 0 0 0 4px rgba(255, 204, 51, 0.95); }
+}
+.ladder.signal-flash { animation: signal-flash 0.6s ease-in-out 5; }
+
+/* The Algo's levels on the ladder: ENTRY, BE, TP, SL. */
+.ladder .price .lvl-tag {
+  display: inline-block;
+  margin-left: 3px;
+  padding: 0 2px;
+  font-size: 8px;
+  line-height: 10px;
+  border-radius: 2px;
+  color: #fff;
+  vertical-align: middle;
+}
+.ladder .price .lvl-tag.entry { background: #555; }
+.ladder .price .lvl-tag.be { background: #8a6d00; }
+.ladder .price .lvl-tag.tp { background: #1a7f37; }
+.ladder .price .lvl-tag.sl { background: #b42318; }

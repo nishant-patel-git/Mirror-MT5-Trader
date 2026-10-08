@@ -262,14 +262,14 @@
       <span class="title"></span>
       <span class="route"></span>
       <span class="mode-badge"></span>
-      <!-- The Algo's switch, where the ladder is: OFF / DRY RUN / LIVE,
+      <!-- The Algo's switch, where the ladder is: OFF / SIGNALS / LIVE,
            one click to the menu. LIVE still asks to confirm, and the
            engine still refuses what it cannot do. -->
       <span class="algo-switch">
-        <button type="button" class="algo-btn" title="This ladder's Algo — click to turn it off, to a dry run, or LIVE">ALGO OFF</button>
+        <button type="button" class="algo-btn" title="This ladder's Algo — click to turn it off, to Signals, or LIVE">ALGO OFF</button>
         <span class="algo-menu" hidden>
           <button type="button" data-algo="NONE">Off</button>
-          <button type="button" data-algo="ALGO">Dry run — signals only</button>
+          <button type="button" data-algo="ALGO">Signals — the Algo signals, you trade</button>
           <button type="button" data-algo="ALGO_LIVE" class="live">LIVE — it trades</button>
         </span>
       </span>
@@ -551,12 +551,12 @@
         <div class="ls-group">
           <h4>Algo <small class="ls-algo-state"></small></h4>
           <label class="lsf"
-                 title="Turn this ladder&#8217;s Algo on or off. Dry run: it shows and records its signals and sends nothing. LIVE: it trades this ladder by its rules, and manual orders on it are off. Fair spread: no Algo, the carry reading only.">
+                 title="Turn this ladder&#8217;s Algo on or off. Signals: it signals entries and watches YOUR position&#8217;s TP and SL, with an alert and a chime; it sends nothing and you trade on the ladder. LIVE: it trades this ladder by its rules, and manual orders on it are off. Fair spread: no Algo, the carry reading only.">
             <span>Algo</span>
             <select class="ls-algo">
               <option value="NONE">Off</option>
               <option value="FAIR_SPREAD">Fair spread</option>
-              <option value="ALGO">Dry run</option>
+              <option value="ALGO">Signals</option>
               <option value="ALGO_LIVE">LIVE (trades)</option>
             </select></label>
           <label class="lsf" title="Enter when the executable spread is this many sigma from the middle line: SELL at +z or above, BUY at &#8722;z or below.">
@@ -710,8 +710,9 @@
             <span>Time stop</span>
             <input type="checkbox" class="ls-az-time-on">
             <input class="ls-az-time" type="number" min="1" step="1"></label>
-          <div class="lsf-note hint">Dry run: signals only — nothing is
-            sent, and clicks on the ladder are unaffected. LIVE: the Algo
+          <div class="lsf-note hint">Signals: the Algo signals, you trade —
+            nothing is sent, clicks on the ladder work, and your position
+            gets the Algo's TP and SL as alerts. LIVE: the Algo
             trades this ladder (MARKET in, closes by ticket) and manual
             orders on it are OFF; closes still work. Off again after a
             restart.</div>

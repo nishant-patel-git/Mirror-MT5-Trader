@@ -2983,7 +2983,7 @@ def test_the_window_is_ONE_choice_on_the_ladder_it_belongs_to(page):
     # The group says out loud what the Algo is NOT.
     note = ' '.join(page.text_content(
         '.ladder .ls-group:has(.ls-algo) .lsf-note').split())
-    assert 'nothing is sent' in note and 'unaffected' in note
+    assert 'nothing is sent' in note and 'clicks on the ladder work' in note
     page.click('.ladder .ls-close')
 
 
@@ -5189,7 +5189,7 @@ def test_the_Algo_has_a_window_of_its_own_with_the_three_panels(page):
         assert '2.40' in text and 'req 1.5' in text        # capture / cost
         assert 'Mean-rev' in text and '42 min' in text
         assert page.locator('.window.algowin .aw-tile.sell.hit').count() == 1
-        assert page.text_content('.window.algowin .aw-mode') == 'DRY RUN'
+        assert page.text_content('.window.algowin .aw-mode') == 'SIGNALS'
         # The Fair Spread window no longer carries the Algo.
         assert 'H to L signal' not in (page.text_content('.window.fairwin')
                                      if page.locator('.window.fairwin').count()
@@ -5317,7 +5317,7 @@ def _ladder_with_algo(page, mode):
     publisher.algo = 'ALGO'
     publisher.algo_block = _algo_block(mode=mode)
     publisher.publish()
-    want = 'ALGO LIVE' if mode == 'LIVE' else 'ALGO DRY'
+    want = 'ALGO LIVE' if mode == 'LIVE' else 'ALGO SIGNALS'
     page.wait_for_function(
         "(want) => (document.querySelector('.ladder .algo-btn') || {})"
         ".textContent === want", arg=want, timeout=WAIT)
@@ -5636,3 +5636,76 @@ def test_each_side_can_have_its_own_exits_and_blank_is_the_ladders(page):
         assert key not in params, key
     page.evaluate("() => document.getElementById('toasts').innerHTML = ''")
     page.wait_for_selector('.ladder .grid tbody tr')
+
+
+def test_a_signals_alert_is_said_once_and_stays_until_dismissed(page):
+    """SIGNALS mode: the trade is the trader's to make, so the alert
+    stays on screen. Said once by its id - the next poll carrying the
+    same alert says nothing more. The control: a NEW id is said."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+
+    def alert(alert_id):
+        return {'id': alert_id, 'seq': 1, 'kind': 'ENTRY', 'side': 'SELL',
+                'reason': None, 'at': time.time(),
+                'text': 'H to L — SELL 1 @ 59.1000 (z +2.61) ' + alert_id}
+    publisher.algo_block = _algo_block(signal_alert=alert('A1'))
+    try:
+        publisher.publish()
+        page.wait_for_selector('#toasts .toast.signal', timeout=WAIT)
+        page.wait_for_timeout(600)                 # three more polls
+        toasts = page.locator('#toasts .toast.signal')
+        assert toasts.count() == 1
+        assert 'H to L — SELL 1 @ 59.1000' in toasts.first.text_content()
+        toasts.first.click()                       # dismissed
+        page.wait_for_timeout(600)
+        assert page.locator('#toasts .toast.signal').count() == 0
+        publisher.algo_block = _algo_block(signal_alert=alert('A2'))
+        publisher.publish()
+        page.wait_for_selector('#toasts .toast.signal', timeout=WAIT)
+        assert 'A2' in page.text_content('#toasts .toast.signal')
+        page.locator('#toasts .toast.signal').first.click()
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def test_your_position_is_marked_on_the_ladder_and_named_yours(page):
+    """A manual position the Algo watches: YOUR SHORT in its window, and
+    its entry / target / stop tagged on the ladder's own prices."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    levels = page.evaluate(
+        """() => window.MT5Trader.state.snapshot
+             .pairs['XAUUSD_|GC1226'].rows.map(r => r.level)""")
+    publisher.algo = 'ALGO'
+    held = {'position_id': 'P1', 'side': 'SELL', 'quantity': 1,
+            'source': 'MANUAL', 'entry_spread': levels[4],
+            'closing_spread': levels[5], 'break_even': None,
+            'tp': levels[7], 'sl': levels[2], 'exit': None}
+    publisher.algo_block = _algo_block(state='IN_POSITION', signal=None,
+                                       positions=[held])
+    try:
+        publisher.publish()
+        page.wait_for_selector('.ladder .lvl-tag.tp', timeout=WAIT)
+        assert page.locator('.ladder .lvl-tag.entry').count() == 1
+        assert page.locator('.ladder .lvl-tag.sl').count() == 1
+        # Unmeasured is not marked: no break-even, no BE tag.
+        assert page.locator('.ladder .lvl-tag.be').count() == 0
+        page.wait_for_function(
+            "() => (document.querySelector('.window.algowin .aw-pos')"
+            " || {textContent: ''}).textContent.includes('YOUR SHORT')",
+            timeout=WAIT)
+        # The control: the Algo's own position is not called yours.
+        held['source'] = 'ALGO'
+        publisher.publish()
+        page.wait_for_function(
+            "() => (document.querySelector('.window.algowin .aw-pos')"
+            " || {textContent: ''}).textContent.indexOf('SHORT') === 0",
+            timeout=WAIT)
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()

@@ -28,7 +28,7 @@ from.
   never touches a position it cannot explain.
 - **Automatic orders come ONLY from a ladder's Algo in LIVE.** LIVE is
   per ladder, confirmed every time it is switched on, and OFF after
-  every restart; DRY_RUN signals and sends nothing. While a ladder is
+  every restart; Signals (DRY_RUN) signals and sends nothing - the trader trades. While a ladder is
   LIVE it takes NO new manual orders (closes still work), and LIVE is
   refused on a ladder holding a manual position or a working order.
   The Algo trades through the same executor a click uses: MARKET both
