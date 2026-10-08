@@ -675,6 +675,34 @@
           <label class="lsf" title="Take-profit = break-even plus this many ATRs (ATR mode).">
             <span>Target x ATR</span>
             <input class="ls-az-atr-target" type="number" min="0.1" step="0.1"></label>
+          <!-- EACH SIDE'S OWN EXITS. Blank is the ladder's own value
+               above; a trade keeps the levels it was given when it
+               opened. -->
+          <div class="lsf-side-note hint">Per side - H to L | L to H. Blank uses the value above.</div>
+          <label class="lsf side-pair" title="Stop sized by for H to L (left) and L to H (right). Blank = the ladder&#39;s own.">
+            <span>SL by</span>
+            <select class="ls-az-stop-mode-sell" title="blank = the ladder&#39;s own"><option value="">same</option><option value="MARGIN">%</option><option value="ATR">ATR</option></select>
+            <select class="ls-az-stop-mode-buy" title="blank = the ladder&#39;s own"><option value="">same</option><option value="MARGIN">%</option><option value="ATR">ATR</option></select></label>
+          <label class="lsf side-pair" title="Target sized by for H to L (left) and L to H (right). Blank = the ladder&#39;s own.">
+            <span>TP by</span>
+            <select class="ls-az-target-mode-sell" title="blank = the ladder&#39;s own"><option value="">same</option><option value="MARGIN">%</option><option value="ATR">ATR</option></select>
+            <select class="ls-az-target-mode-buy" title="blank = the ladder&#39;s own"><option value="">same</option><option value="MARGIN">%</option><option value="ATR">ATR</option></select></label>
+          <label class="lsf side-pair" title="SL % margin for H to L (left) and L to H (right). Blank = the ladder&#39;s own.">
+            <span>SL %</span>
+            <input class="ls-az-sl-sell" type="number" min="0" step="0.1" placeholder="H to L">
+            <input class="ls-az-sl-buy" type="number" min="0" step="0.1" placeholder="L to H"></label>
+          <label class="lsf side-pair" title="TP % margin for H to L (left) and L to H (right). Blank = the ladder&#39;s own.">
+            <span>TP %</span>
+            <input class="ls-az-tp-sell" type="number" min="0" step="0.1" placeholder="H to L">
+            <input class="ls-az-tp-buy" type="number" min="0" step="0.1" placeholder="L to H"></label>
+          <label class="lsf side-pair" title="Stop x ATR for H to L (left) and L to H (right). Blank = the ladder&#39;s own.">
+            <span>SL ATR</span>
+            <input class="ls-az-atr-stop-sell" type="number" min="0" step="0.1" placeholder="H to L">
+            <input class="ls-az-atr-stop-buy" type="number" min="0" step="0.1" placeholder="L to H"></label>
+          <label class="lsf side-pair" title="Target x ATR for H to L (left) and L to H (right). Blank = the ladder&#39;s own.">
+            <span>TP ATR</span>
+            <input class="ls-az-atr-target-sell" type="number" min="0" step="0.1" placeholder="H to L">
+            <input class="ls-az-atr-target-buy" type="number" min="0" step="0.1" placeholder="L to H"></label>
           <label class="lsf check-row" title="While a position is on: a bar from the stop loss to the take-profit, with the entry marked and the closing price on it.">
             <span>Progress bar</span>
             <input type="checkbox" class="ls-az-progress"></label>

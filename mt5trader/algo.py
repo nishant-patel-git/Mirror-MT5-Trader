@@ -235,6 +235,42 @@ DEFAULT_PARAMS = {
     'time_stop_candles': 20,
 }
 
+#: The exit settings a SIDE can have its own value of. Blank (None) is
+#: the ladder's own value - which, for `tp_pct`, is the ladder's TP % of
+#: margin. `stop_loss_on` stays one switch for both sides: a stop is a
+#: protection, not a per-side preference.
+SIDE_KEYS = ('stop_mode', 'target_mode', 'stop_loss_pct', 'atr_stop_mult',
+             'atr_target_mult', 'tp_pct')
+SIDES = {'SELL': 'sell', 'BUY': 'buy'}
+for _key in SIDE_KEYS:
+    for _suffix in SIDES.values():
+        DEFAULT_PARAMS[f'{_key}_{_suffix}'] = None
+
+
+def _side_base(key):
+    """`stop_mode_sell` -> `stop_mode`; any other key -> None."""
+    for suffix in SIDES.values():
+        if key.endswith('_' + suffix) and key[:-len(suffix) - 1] in SIDE_KEYS:
+            return key[:-len(suffix) - 1]
+    return None
+
+
+def for_side(params, side):
+    """The settings ONE side trades on: the ladder's, with that side's
+    own exit values laid over them where it has any. `tp_pct` is the
+    side's TP % of margin, or None for the ladder's."""
+    suffix = SIDES.get(getattr(side, 'value', side))
+    out = dict(params)
+    out['tp_pct'] = None
+    if suffix is None:
+        return out
+    for key in SIDE_KEYS:
+        value = params.get(f'{key}_{suffix}')
+        if value is not None:
+            out[key] = value
+    return out
+
+
 _BOOLS = ('stop_z_on', 'reversion_on', 'time_stop_on', 'stop_loss_on',
           'progress_bar', 'edge_on', 'regime_on', 'prob_on', 'reentry_on',
           'trend_on')
@@ -269,7 +305,8 @@ def clean_params(raw):
                 if chosen in DIRECTIONS:
                     out[key] = chosen
                 continue
-            if key in ('stop_mode', 'target_mode'):
+            if key in ('stop_mode', 'target_mode') or \
+                    _side_base(key) in ('stop_mode', 'target_mode'):
                 chosen = str(value).strip().upper()
                 if chosen in LEVEL_MODES:
                     out[key] = chosen
@@ -308,6 +345,12 @@ def clean_params(raw):
     for key in ('atr_stop_mult', 'atr_target_mult'):
         if out[key] <= 0:
             out[key] = DEFAULT_PARAMS[key]
+    # A side's own number that is not above 0 is no override at all -
+    # never a stop or target of zero.
+    for key in list(out):
+        if _side_base(key) not in (None, 'stop_mode', 'target_mode') and \
+                out[key] is not None and out[key] <= 0:
+            out[key] = None
     return out
 
 
@@ -325,7 +368,8 @@ def check_params(raw):
                 problems.append(f'direction {value!r} — choose BOTH, '
                                 f'H_TO_L or L_TO_H')
             continue
-        if key in ('stop_mode', 'target_mode'):
+        if key in ('stop_mode', 'target_mode') or \
+                _side_base(key) in ('stop_mode', 'target_mode'):
             if str(value).strip().upper() not in LEVEL_MODES:
                 problems.append(f'{key} {value!r} — choose MARGIN or ATR')
             continue
@@ -351,6 +395,9 @@ def check_params(raw):
             problems.append('trend filter sigma must be above 0')
         elif key == 'atr_period' and number < 2:
             problems.append('ATR period must be 2 candles or more')
+        elif _side_base(key) is not None and number <= 0:
+            problems.append(f'{key.replace("_", " ")} must be above 0 - '
+                            f'leave it blank for the ladder\'s own')
         elif key in ('atr_stop_mult', 'atr_target_mult') and number <= 0:
             problems.append(f'{key.replace("_", " ")} must be above 0')
         elif number < 0:
@@ -367,7 +414,8 @@ def zscore(value, mean, sigma):
 
 _POSITION_DISPLAY = ('quantity', 'opened_at', 'age_sec', 'source',
                      'entry_atr', 'stop_mode', 'target_mode',
-                     'tp_money', 'sl_money',
+                     'tp_money', 'sl_money', 'atr_stop_mult',
+                     'atr_target_mult',
                      'leg_a_side', 'leg_a_entry', 'leg_a_now',
                      'leg_b_side', 'leg_b_entry', 'leg_b_now')
 
@@ -614,8 +662,15 @@ class AlgoSignal:
             return f"cooldown {_mmss(body['cooldown_sec'])}"
         if gates.get('session'):
             return gates['session']
-        if gates.get('levels'):
-            return gates['levels']
+        levels = gates.get('levels')
+        if isinstance(levels, dict):
+            # Each side has its own exits, so its own answer. With no
+            # signal yet, only a block on BOTH sides holds the ladder.
+            levels = (levels.get(side) if side is not None else
+                      (levels.get('SELL') if levels.get('SELL') and
+                       levels.get('BUY') else None))
+        if levels:
+            return levels
         buffer_min = p['cutoff_buffer_min']
         cutoff = gates.get('cutoff_min')
         if buffer_min and cutoff is not None and cutoff <= buffer_min:

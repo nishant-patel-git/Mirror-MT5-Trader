@@ -1202,11 +1202,19 @@ class Coordinator:
     def _algo_positions(self, pair, md):
         """This ladder's open positions as the Algo reads them: each with
         the break-even and take-profit the Exit panel shows for it."""
-        settings = pair.exit_settings(self.config.settings)
-        nights = float(settings.get('BREAK_EVEN_NIGHTS', 0.0) or 0.0)
-        pct = settings.get('TP_TARGET_PCT_OF_MARGIN')
+        ladder_settings = pair.exit_settings(self.config.settings)
+        nights = float(ladder_settings.get('BREAK_EVEN_NIGHTS', 0.0) or 0.0)
+        ladder_params = algo_module.clean_params(pair.algo_params)
         rows = []
         for position in self.book.positions(pair.key):
+            # THIS position's side's exits: the ladder's, with the side's
+            # own values over them where it has any.
+            params = algo_module.for_side(ladder_params, position.side)
+            settings = ladder_settings
+            if params['tp_pct'] is not None:
+                settings = dict(ladder_settings,
+                                TP_TARGET_PCT_OF_MARGIN=params['tp_pct'])
+            pct = settings.get('TP_TARGET_PCT_OF_MARGIN')
             margin = self.entry_margin(pair, position)
             levels = takeprofit.for_position(
                 position, md, pair, settings, margin, nights=nights,
@@ -1220,13 +1228,12 @@ class Coordinator:
                 tp = None
             _gross, net_pnl, _closing = mark_position(position, md, settings)
             be = levels.get('break_even')
-            params = algo_module.clean_params(pair.algo_params)
             atr = None
             if 'ATR' in (params['stop_mode'], params['target_mode']):
                 atr = self.entry_atr(pair, position)
             stop = self._algo_stop_points(
                 pair, position.quantity or 1.0,
-                takeprofit.one_spread_units(position), margin)
+                takeprofit.one_spread_units(position), margin, params=params)
             if params['stop_mode'] == 'ATR':
                 # A multiple of the ATR at entry; unmeasured stays
                 # unmeasured - never a stop placed on nothing.
@@ -1264,6 +1271,9 @@ class Coordinator:
                          'net_pnl': net_pnl, 'entry_atr': atr,
                          'stop_mode': params['stop_mode'],
                          'target_mode': params['target_mode'],
+                         # THIS side's multiples, for the panel's note.
+                         'atr_stop_mult': params['atr_stop_mult'],
+                         'atr_target_mult': params['atr_target_mult'],
                          **self._leg_marks(position, md)})
         return rows
 
@@ -1341,18 +1351,27 @@ class Coordinator:
         settings = pair.exit_settings(self.config.settings)
         margin = (self.margin_detail(pair) or {}).get('money')
         terms = takeprofit.break_even_terms(pair, md, settings, qty, k, 0)
-        pct = settings.get('TP_TARGET_PCT_OF_MARGIN')
-        if not pct:
-            target = 0.0
-        elif margin:
-            target = takeprofit.points(
-                float(pct) / 100.0 * float(margin) * float(qty), k, qty)
-        else:
-            target = None          # asked for, and cannot be priced
+        def target_for(pct):
+            if not pct:
+                return 0.0
+            if margin:
+                return takeprofit.points(
+                    float(pct) / 100.0 * float(margin) * float(qty), k, qty)
+            return None            # asked for, and cannot be priced
+        ladder_pct = settings.get('TP_TARGET_PCT_OF_MARGIN')
         levels = {'fee_points': terms.get('added_points') or 0.0,
-                  'target_points': target,
+                  'target_points': target_for(ladder_pct),
                   'stop_points': self._algo_stop_points(pair, qty, k,
                                                         margin)}
+        # Each side's own, where the side has its own exits.
+        levels['by_side'] = {}
+        for side in ('SELL', 'BUY'):
+            own = algo_module.for_side(params, side)
+            levels['by_side'][side] = {
+                'target_points': target_for(
+                    ladder_pct if own['tp_pct'] is None else own['tp_pct']),
+                'stop_points': self._algo_stop_points(pair, qty, k, margin,
+                                                      params=own)}
         cutoff = PairSession(pair, self.config).cutoff
         offset = self._offset_of(pair.account_a)
         result = backtest.run(rows, params, width, cost_in, levels, offset,
@@ -1366,12 +1385,15 @@ class Coordinator:
                 cutoff)['summary']
         return answer
 
-    def _algo_stop_points(self, pair, quantity, units, margin=None):
+    def _algo_stop_points(self, pair, quantity, units, margin=None,
+                          params=None):
         """The stop loss's distance from break-even, in spread points:
         `stop_loss_pct` of the margin `quantity` spreads tie up, through
         the one `k`. None when the stop is off or cannot be priced —
-        never 0, which would put the stop AT break-even."""
-        params = algo_module.clean_params(pair.algo_params)
+        never 0, which would put the stop AT break-even. `params` are a
+        side's own (`algo.for_side`); None is the ladder's."""
+        if params is None:
+            params = algo_module.clean_params(pair.algo_params)
         if not params['stop_loss_on'] or not params['stop_loss_pct']:
             return None
         if margin is None:
@@ -1404,9 +1426,17 @@ class Coordinator:
             size = (self.executor.size(pair, md, qty) or {}).get('reason')
         return {'health': health, 'cutoff_min': cutoff_min, 'day': day,
                 'cost': self._algo_cost(pair), 'size': size,
-                'session': session, 'levels': self._levels_check(pair, md)}
+                'session': session, 'levels': self._levels_gate(pair, md)}
 
-    def _levels_check(self, pair, md):
+    def _levels_gate(self, pair, md):
+        """The levels check for an entry, per SIDE when the sides have
+        their own exits: {'SELL': reason, 'BUY': reason}. One reason (or
+        None) when both sides would get the same answer."""
+        sell = self._levels_check(pair, md, 'SELL')
+        buy = self._levels_check(pair, md, 'BUY')
+        return sell if sell == buy else {'SELL': sell, 'BUY': buy}
+
+    def _levels_check(self, pair, md, side=None):
         """Why the Algo's stop or target cannot be set for an entry NOW,
         in words, or None.
 
@@ -1414,9 +1444,12 @@ class Coordinator:
         entry waits. And a stop closer than the spread's own bid-ask is
         one the trade opens already past - it is taken off at a loss the
         moment it is on (2 October: in and stopped out in the same
-        second). Exits are never held by this.
+        second). Exits are never held by this. `side` reads that side's
+        own exits; None is the ladder's.
         """
         params = algo_module.clean_params(pair.algo_params)
+        if side is not None:
+            params = algo_module.for_side(params, side)
         atr = None
         if 'ATR' in (params['stop_mode'], params['target_mode']):
             atr = self.algos.atr(pair.key, params['atr_period'])
@@ -1432,7 +1465,8 @@ class Coordinator:
             stop = self._algo_stop_points(
                 pair, params['algo_qty'],
                 sizing.spread_units(pair.clip_lots_b,
-                                    (pair.meta_b or {}).get('contract_size')))
+                                    (pair.meta_b or {}).get('contract_size')),
+                params=params)
         width = None
         if md.get('long_spread') is not None and \
                 md.get('short_spread') is not None:

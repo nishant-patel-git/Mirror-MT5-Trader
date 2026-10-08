@@ -131,6 +131,14 @@ refused ends there, in the broker's words, and is journalled. The old
 quote is still behind the desk setting `WORKING_ORDERS = QUOTE` for a
 pair whose legs genuinely move apart.
 
+**Each side can have its own exits.** Under the ATR settings, a "Per
+side" block gives H to L and L to H their own SL by / TP by (% or ATR),
+SL %, TP % and ATR multiples. Blank is the ladder's own value - never a
+zero - and a trade keeps the levels it was given when it opened. The
+entry check (a stop inside the bid-ask, an ATR not yet measured) is made
+per side, so one side being held never holds the other; the backtest
+sizes each trade from its own side.
+
 **The Algo's take-profit is confirmed before it is sent.** Both legs are
 read again and the close goes only if the fresh closing price still
 reaches the target, and on those prices - one poll's bad print once
