@@ -43,6 +43,25 @@ def _broker_day(at, offset_sec):
         at + (offset_sec or 0)).date().isoformat()
 
 
+def _side_levels(p, closes, width, base):
+    """(target, stop, block) for an entry on one side, on that side's
+    own settings `p`: the margin levels `base` priced for it, or - in ATR
+    mode - a multiple of the ATR on the candles CLOSED before this one,
+    as live; no ATR yet, or a stop inside the bid-ask, blocks it."""
+    target, stop = base.get('target_points'), base.get('stop_points')
+    if 'ATR' in (p['stop_mode'], p['target_mode']):
+        atr = algofilters.atr(closes[:-1], p['atr_period'])
+        if not atr:
+            return target, stop, 'levels: ATR not measured yet'
+        if p['stop_mode'] == 'ATR':
+            stop = p['atr_stop_mult'] * atr if p['stop_loss_on'] else None
+        if p['target_mode'] == 'ATR':
+            target = p['atr_target_mult'] * atr
+    if stop is not None and stop <= (width or 0.0):
+        return target, stop, 'levels: the stop is inside the bid-ask'
+    return target, stop, None
+
+
 def run(rows, params, width, cost_in, levels, offset_sec=None,
         cutoff=(16, 55)):
     """Replay `rows` [(bucket, mid close), ...] through the Algo.
@@ -112,20 +131,15 @@ def run(rows, params, width, cost_in, levels, offset_sec=None,
         # candles CLOSED before this one, as live - and the same guard:
         # none until the ATR is measured, none with a stop inside the
         # bid-ask.
-        trade_target, trade_stop, levels_block = target, stop, None
-        if 'ATR' in (p['stop_mode'], p['target_mode']):
-            atr = algofilters.atr(closes[:-1], p['atr_period'])
-            if not atr:
-                levels_block = 'levels: ATR not measured yet'
-            else:
-                if p['stop_mode'] == 'ATR':
-                    trade_stop = (p['atr_stop_mult'] * atr
-                                  if p['stop_loss_on'] else None)
-                if p['target_mode'] == 'ATR':
-                    trade_target = p['atr_target_mult'] * atr
-        if levels_block is None and trade_stop is not None \
-                and trade_stop <= (width or 0.0):
-            levels_block = 'levels: the stop is inside the bid-ask'
+        sided = {}
+        for side in ('SELL', 'BUY'):
+            sided[side] = _side_levels(
+                algo_module.for_side(p, side), closes, width,
+                ((levels or {}).get('by_side') or {}).get(side)
+                or {'target_points': target, 'stop_points': stop})
+        levels_block = (sided['SELL'][2] if sided['SELL'][2] ==
+                        sided['BUY'][2] else
+                        {side: sided[side][2] for side in sided})
         gates = {'health': None, 'halt': halt, 'entry_check': check,
                  'levels': levels_block,
                  'cutoff_min': _cutoff_minutes(bucket, offset_sec, *cutoff)}
@@ -142,6 +156,7 @@ def run(rows, params, width, cost_in, levels, offset_sec=None,
                 counter += 1
                 pid = f'bt{counter}'
                 side = intent['side']
+                trade_target, trade_stop, _ = sided[side]
                 entry = intent['spread']
                 sign = 1.0 if side == 'BUY' else -1.0
                 be = entry + sign * fee

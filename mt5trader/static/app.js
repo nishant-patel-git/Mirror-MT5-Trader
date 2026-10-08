@@ -1297,6 +1297,19 @@
     ['.ls-az-target-mode', 'target_mode', 'text'],
     ['.ls-az-atr-period', 'atr_period', 'number'],
     ['.ls-az-atr-stop', 'atr_stop_mult', 'number'],
+    // Each side's own exits: blank is the ladder's own value.
+    ['.ls-az-stop-mode-sell', 'stop_mode_sell', 'text'],
+    ['.ls-az-stop-mode-buy', 'stop_mode_buy', 'text'],
+    ['.ls-az-target-mode-sell', 'target_mode_sell', 'text'],
+    ['.ls-az-target-mode-buy', 'target_mode_buy', 'text'],
+    ['.ls-az-sl-sell', 'stop_loss_pct_sell', 'number'],
+    ['.ls-az-sl-buy', 'stop_loss_pct_buy', 'number'],
+    ['.ls-az-tp-sell', 'tp_pct_sell', 'number'],
+    ['.ls-az-tp-buy', 'tp_pct_buy', 'number'],
+    ['.ls-az-atr-stop-sell', 'atr_stop_mult_sell', 'number'],
+    ['.ls-az-atr-stop-buy', 'atr_stop_mult_buy', 'number'],
+    ['.ls-az-atr-target-sell', 'atr_target_mult_sell', 'number'],
+    ['.ls-az-atr-target-buy', 'atr_target_mult_buy', 'number'],
     ['.ls-az-atr-target', 'atr_target_mult', 'number'],
     ['.ls-az-progress', 'progress_bar', 'check'],
     ['.ls-az-qty', 'algo_qty', 'number'],
@@ -2590,8 +2603,8 @@
              : levelWords(first.sl, first.sl_money, digits)) +
            (first.stop_mode === 'ATR' || first.target_mode === 'ATR'
              ? ' <small>(ATR ' + fmt(first.entry_atr, digits) + ' at entry: ' +
-               (first.target_mode === 'ATR' ? 'TP ' + params.atr_target_mult + '\u00d7' : 'TP %') +
-               ', ' + (first.stop_mode === 'ATR' ? 'SL ' + params.atr_stop_mult + '\u00d7' : 'SL %') +
+               (first.target_mode === 'ATR' ? 'TP ' + (first.atr_target_mult || params.atr_target_mult) + '\u00d7' : 'TP %') +
+               ', ' + (first.stop_mode === 'ATR' ? 'SL ' + (first.atr_stop_mult || params.atr_stop_mult) + '\u00d7' : 'SL %') +
                ')</small>' : ''),
            '', 'compare with the CLOSING price: the Sell spread for a LONG, '
            + 'the Buy spread for a SHORT. In brackets: the net P&L of the '

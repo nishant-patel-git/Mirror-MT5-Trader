@@ -5604,3 +5604,35 @@ def test_each_end_of_the_re_entry_window_carries_its_own_price(page):
         publisher.algo = 'NONE'
         publisher.algo_block = None
         publisher.publish()
+
+
+def test_each_side_can_have_its_own_exits_and_blank_is_the_ladders(page):
+    """H to L and L to H each get an optional stop / target of their
+    own. A typed value is sent under the side's key; a blank one is not
+    sent at all - the ladder's own value stands, never a zero."""
+    open_ladder(page)
+    page.click('.ladder .ladder-cog')
+    page.wait_for_selector('.ladder .ladder-settings .ls-az-atr-stop-sell',
+                           timeout=WAIT)
+    page.locator('.ladder .ladder-settings .ls-az-atr-stop-sell') \
+        .scroll_into_view_if_needed()
+    if os.environ.get('SIDE_SHOT'):
+        page.screenshot(path=os.environ['SIDE_SHOT'])
+    page.evaluate(SPY_ON_PAIR_SAVE)
+    page.select_option('.ladder .ladder-settings .ls-az-stop-mode-sell',
+                       'ATR')
+    page.fill('.ladder .ladder-settings .ls-az-atr-stop-sell', '3')
+    page.fill('.ladder .ladder-settings .ls-az-tp-buy', '6')
+    page.click('.ladder .ladder-settings .ls-save')
+    page.wait_for_function("() => window.__sent !== null", timeout=WAIT)
+    params = page.evaluate('() => window.__sent')['algo_params']
+    page.evaluate('() => { window.fetch = window.__realFetch; }')
+    assert params['stop_mode_sell'] == 'ATR'
+    assert params['atr_stop_mult_sell'] == 3
+    assert params['tp_pct_buy'] == 6
+    # The CONTROL: the boxes left blank are not sent.
+    for key in ('stop_mode_buy', 'atr_stop_mult_buy', 'tp_pct_sell',
+                'stop_loss_pct_sell', 'target_mode_sell'):
+        assert key not in params, key
+    page.evaluate("() => document.getElementById('toasts').innerHTML = ''")
+    page.wait_for_selector('.ladder .grid tbody tr')
