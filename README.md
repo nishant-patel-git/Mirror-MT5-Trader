@@ -1,7 +1,7 @@
 # MT5-Trader
 
 A **spread price-ladder trading terminal for MetaTrader 5** — a manual tool,
-with an optional per-ladder **Algo**: in dry run it only signals; in LIVE,
+with an optional per-ladder **Algo**: in Signals mode it signals and you trade; in LIVE,
 switched on and confirmed by a person, it trades that ladder by its rules and
 the ladder takes no manual orders while it does. A human looks at a ladder
 of spread prices, clicks a price, and an order exists at that price.
@@ -165,8 +165,8 @@ empty cells rather than zeros where nothing was measured.
 
 ## The Algo — a signal, not a trader
 
-Per ladder, picked in the ladder's settings (**Algo: Off / Fair spread / Dry run /
-LIVE**). It is OFF after every restart. In dry run the ladder trades exactly
+Per ladder, picked in the ladder's settings (**Algo: Off / Fair spread / Signals /
+LIVE**). It is OFF after every restart. In Signals the ladder trades exactly
 as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
 
 - **The band.** Candles of the spread `B - beta x A` from the mid (15-minute,
@@ -179,7 +179,7 @@ as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
   them.
 - **Warm-up.** History fills the band at once, but no entry is taken until the
   Algo has watched `Warm-up (min)` of LIVE prices since it was turned on — 90 by
-  default, 0 = off. Time with no price does not count; dry-run time does, so a
+  default, 0 = off. Time with no price does not count; Signals time does, so a
   ladder can warm up in DRY and go LIVE without waiting again. Turning the Algo
   off starts it over. A restart does not: switched back on within 15 minutes of
   the last live price it watched (an update, a quick restart), it carries on
@@ -242,7 +242,7 @@ as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
 - **In position.** The window names it — `in BUY @ 59.11 — TP 59.31 · SL
   58.93` — and draws an SL ◄ entry ► TP bar with the closing price on it.
 - **The filters** (from the stat-arb system's algo), every one judged before an
-  entry in dry run and LIVE alike — and one that cannot be priced blocks:
+  entry in Signals and LIVE alike — and one that cannot be priced blocks:
   - *Edge*: expected capture (0.5 x |z| x sigma, in money) at least 1.5x the
     round-trip cost — the spread's bid-ask crossed both ways, commission both
     legs both ways, and the slippage budget.
@@ -262,7 +262,11 @@ as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
   Closing it turns the Algo off.
 - **Record.** Every signal goes to the audit trail; *Algo signals CSV* on the
   Fills tab exports them, with what an exit would have made after costs.
-- **Dry run or LIVE.** *Algo: Dry run* records signals and sends nothing.
+- **Signals or LIVE.** *Algo: Signals* records signals and sends nothing; you
+  trade. An entry it would take, and YOUR position ("YOUR SHORT" in its
+  window) reaching its target or stop, is told once: a toast that stays until
+  dismissed, a chime, the ladder flashing, and on Telegram. ENTRY / BE / TP /
+  SL are tagged on the ladder's prices.
   *Algo: LIVE* (confirmed every time) trades: MARKET both legs in, closes by
   ticket, through the same executor a click uses, at its own **Algo qty**
   (spreads; one spread = the ladder's Leg A / Leg B lots — 0.01 for testing).

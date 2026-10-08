@@ -107,6 +107,45 @@ class RecordingSink:
                 logging.error('could not record an Algo order: %s', e)
 
 
+def signal_alert(intent, positions, params, now, previous=None):
+    """What a trader in SIGNALS mode is told when the Algo signals.
+
+    An ENTER is the trade it would take: 'H to L — SELL 0.5 @ 13.805
+    (z +1.52)'. An EXIT is about THEIR position: 'Profit target — close
+    your SELL 0.5 at 12.727 (net +3.90)'. The id is unique - a restart
+    never re-uses one - so each is said once, wherever it is shown.
+    """
+    side = intent.get('side')
+    words = {'SELL': 'H to L', 'BUY': 'L to H'}.get(side, side)
+
+    def num(value, digits=4, signed=False):
+        if value is None:
+            return '—'
+        return f'{float(value):+.{digits}f}' if signed \
+            else f'{float(value):.{digits}f}'
+    if intent['action'] == 'ENTER':
+        text = (f"{words} — {side} {params['algo_qty']:g} @ "
+                f"{num(intent.get('spread'))} (z {num(intent.get('z'), 2, True)})")
+        kind, reason = 'ENTRY', None
+    else:
+        held = next((p for p in positions or ()
+                     if p.get('position_id') == intent.get('position_id')),
+                    {})
+        reason = intent.get('reason')
+        said = algo_module.EXIT_WORDS.get(reason, reason or 'exit')
+        net = intent.get('net_pnl')
+        text = (f"{said[:1].upper()}{said[1:]} — close your {side} "
+                f"{float(held.get('quantity') or 0):g} at "
+                f"{num(intent.get('spread'))}"
+                + (f" (net {float(net):+.2f})" if net is not None else ''))
+        kind = 'EXIT'
+    seq = int((previous or {}).get('seq') or 0) + 1
+    return {'id': f'{now:.3f}-{seq}', 'seq': seq, 'kind': kind,
+            'side': side, 'reason': reason, 'text': text, 'at': now,
+            'position_id': intent.get('position_id'),
+            'spread': intent.get('spread'), 'z': intent.get('z')}
+
+
 class _Run:
     """One ladder's Algo while it is on."""
 
@@ -143,6 +182,10 @@ class _Run:
         self.blocked_journal = None
         #: When the warm-up progress was last written down.
         self.warmup_saved_at = None
+        #: SIGNALS mode: the last thing a trader should act on - an entry
+        #: signal, or their position reaching an exit - with an id the
+        #: desk and Telegram each say once. None until there is one.
+        self.signal_alert = None
 
 
 class AlgoDesk:
@@ -266,7 +309,7 @@ class AlgoDesk:
             # the positions it had to close. The live tape it has
             # watched has still been watched: the warm-up carries too.
             for name in ('mode', 'mine', 'day', 'retry', 'entry_z',
-                         'blocked_journal',
+                         'blocked_journal', 'signal_alert',
                          'recent', 'last_blocked', 'live_sec', 'live_at',
                          'signal'):
                 setattr(run, name, getattr(was, name))
@@ -333,8 +376,13 @@ class AlgoDesk:
                 self.sink.outcome(pair.key, intent, answer)
                 recorded = dict(recorded, done=bool(answer.get('ok')),
                                 result=answer.get('reason'))
-            elif intent['action'] == 'ENTER':
-                run.day['trades'] += 1         # a dry run counts as one
+            else:
+                if intent['action'] == 'ENTER':
+                    run.day['trades'] += 1     # a signals run counts one
+                # SIGNALS: the Algo signals, the trader trades. Nothing is
+                # sent; this is what they are told to do.
+                run.signal_alert = signal_alert(intent, positions, params,
+                                                now, run.signal_alert)
             run.recent.appendleft(dict(recorded, at=now))
         body['halt'] = halt
         run.body = body
@@ -482,6 +530,8 @@ class AlgoDesk:
                     last_blocked=(dict(run.last_blocked)
                                   if run.last_blocked else None),
                     recent=list(run.recent), started_at=run.started_at,
+                    signal_alert=(dict(run.signal_alert)
+                                  if run.signal_alert else None),
                     timeframe_min=run.params['timeframe_min'],
                     length=run.params['length'])
         return body
