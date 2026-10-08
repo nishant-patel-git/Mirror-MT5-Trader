@@ -2513,9 +2513,13 @@
       var windowPct = params.reentry_window_pct === undefined ||
         params.reentry_window_pct === null ? 50 : params.reentry_window_pct;
       var outZ = inZ * (1 - windowPct / 100);
-      var level = (block.mean === null || block.mean === undefined ||
-                   !block.sigma) ? null
-        : block.mean + (sell ? 1 : -1) * inZ * block.sigma;
+      // Each end of the window as a PRICE, beside its own z.
+      var priced = !(block.mean === null || block.mean === undefined ||
+                     !block.sigma);
+      var level = priced ? block.mean + (sell ? 1 : -1) * inZ * block.sigma
+        : null;
+      var outLevel = priced
+        ? block.mean + (sell ? 1 : -1) * outZ * block.sigma : null;
       var armed = (block.armed || {})[sell ? 'SELL' : 'BUY'];
       return '<div class="aw-tile-entry" title="Armed when the stretch ' +
         'reaches ' + (sell ? '+' : '\u2212') + entryZ + '; entered on the ' +
@@ -2525,8 +2529,9 @@
         (armed ? '<b class="aw-armed">ARMED</b> ' : 'arm ' +
          (sell ? '\u2265 +' : '\u2264 \u2212') + entryZ + ' \u00b7 ') +
         (sell ? 'short' : 'long') + ' back at ' + (sell ? '+' : '\u2212') +
-        inZ.toFixed(2) + ' to ' + (sell ? '+' : '\u2212') + outZ.toFixed(2) +
-        ' (' + fmt(level, digits) + ')</div>';
+        inZ.toFixed(2) + ' (' + fmt(level, digits) + ') to ' +
+        (sell ? '+' : '\u2212') + outZ.toFixed(2) +
+        ' (' + fmt(outLevel, digits) + ')</div>';
     }
     var held = block.positions || [];
     var first = held[0] || null;

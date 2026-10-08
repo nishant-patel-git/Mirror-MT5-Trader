@@ -5578,3 +5578,29 @@ def test_a_held_working_order_is_the_mode_not_a_fault(page):
     publisher.broker_pendings = None
     publisher.pair_extra = {}
     publisher.publish()
+
+
+def test_each_end_of_the_re_entry_window_carries_its_own_price(page):
+    """'short back at +2.00 (59.08) to +1.00 (59.04)': the bracketed
+    price sat after the far end and read as ITS price; it was the near
+    end's. Each z now has its own, both sides."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+    block = _algo_block(state='WATCHING', signal=None)
+    block['params'].update(reentry_on=True, reentry_back=0.5,
+                           reentry_window_pct=50)
+    publisher.algo_block = block
+    try:
+        publisher.publish()
+        page.wait_for_function(
+            "() => (document.querySelector('.window.algowin .aw-signal')"
+            " || {textContent: ''}).textContent.includes('back at')",
+            timeout=WAIT)
+        text = page.text_content('.window.algowin .aw-signal')
+        assert '+2.00 (59.08) to +1.00 (59.04)' in text, text
+        assert '−2.00 (58.92) to −1.00 (58.96)' in text, text
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
