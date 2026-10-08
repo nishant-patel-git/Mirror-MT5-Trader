@@ -13,7 +13,7 @@ What it may do, and how:
   the log. The bot token lives in `.env` and nowhere else, and never in
   a log line: Telegram puts it in the URL, so no URL is ever logged.
 - **What.** A Dashboard (everything to watch, one screen), Settings
-  (per ladder, in sections: Algo mode Off / Dry run / LIVE, entry,
+  (per ladder, in sections: Algo mode Off / Signals / LIVE, entry,
   filters, exits, daily limits, costs and session), CLOSE ALL on a
   ladder, KILL ALL. Plain text, no icons. Every one of those asks
   Confirm / Cancel first, and LIVE asks twice. It can never place a NEW
@@ -208,7 +208,7 @@ UNITS = {
 }
 
 #: How a ladder's Algo mode is written.
-MODE_WORDS = {'OFF': 'Off', 'DRY': 'Dry run', 'LIVE': 'LIVE'}
+MODE_WORDS = {'OFF': 'Off', 'DRY': 'Signals', 'LIVE': 'LIVE'}
 
 
 def esc(value):
@@ -1079,7 +1079,7 @@ class Bot:
         filters_now = block.get('filters') or {}
         regime_now = filters_now.get('regime') or {}
         rows = [('Algo', 'Disabled' if mode == 'OFF' else 'Enabled'),
-                ('Mode', {'OFF': '—', 'DRY': 'Dry run',
+                ('Mode', {'OFF': '—', 'DRY': 'Signals',
                           'LIVE': 'Live'}[mode]),
                 ('Position', net_words(row)),
                 ('Z-score', plain(block.get('z_mid'), 4, True)),
@@ -1396,15 +1396,15 @@ class Bot:
                 f'<b>{self._pair_name(pairs, key)}</b>\n'
                 + table([('Current', MODE_WORDS[current]), None,
                          ('Off', 'nothing is watched or sent'),
-                         ('Dry run', 'collects data, warms up and '
-                                     'signals; sends nothing'),
+                         ('Signals', 'the Algo signals, you trade; '
+                                     'it sends nothing'),
                          ('LIVE', 'trades both accounts on this '
                                   'ladder; manual orders on it are off')]))
 
         def label(mode, word):
             return word + (' (current)' if current == mode else '')
         buttons = [[(label('OFF', 'Off'), 'algo_ask', (key, 'NONE')),
-                    (label('DRY', 'Dry run'), 'algo_ask', (key, 'ALGO')),
+                    (label('DRY', 'Signals'), 'algo_ask', (key, 'ALGO')),
                     (label('LIVE', 'LIVE'), 'algo_ask', (key, 'ALGO_LIVE'))],
                    [('Back', 'settings_pair', (key,)),
                     ('Main menu', 'main', ())]]
@@ -1416,8 +1416,8 @@ class Bot:
     def on_algo_ask(self, chat, message_id, key, choice):
         _, pairs = self._snapshot()
         name = self._pair_name(pairs, key)
-        words = {'NONE': 'Off', 'ALGO': 'Dry run (collects data and '
-                 'signals, sends nothing)', 'ALGO_LIVE': 'LIVE'}[choice]
+        words = {'NONE': 'Off', 'ALGO': 'Signals (the Algo signals, you '
+                 'trade; it sends nothing)', 'ALGO_LIVE': 'LIVE'}[choice]
         if choice == 'ALGO_LIVE':
             text = (f'<b>Switch {name} to LIVE?</b>\n\nThe Algo will send '
                     f'REAL orders to both accounts on this ladder: MARKET in '
@@ -1586,12 +1586,13 @@ class Bot:
             return self.send(chat, f'<b>Not changed.</b> {usage}')
         field = field.lower()
         if field == 'mode':
-            choice = {'off': 'NONE', 'dry': 'ALGO', 'dryrun': 'ALGO',
-                      'dry_run': 'ALGO', 'live': 'ALGO_LIVE'} \
+            choice = {'off': 'NONE', 'signals': 'ALGO', 'signal': 'ALGO',
+                      'dry': 'ALGO', 'dryrun': 'ALGO', 'dry_run': 'ALGO',
+                      'live': 'ALGO_LIVE'} \
                 .get(raw.lower())
             if choice is None:
                 return self.send(chat, '<b>Not changed.</b> mode is off, '
-                                       'dry or live.')
+                                       'signals or live.')
             return self.on_algo_ask(chat, None, key, choice)
         if field not in FIELD:
             return self.send(chat, f'<b>Not changed.</b> No setting '
@@ -1854,6 +1855,7 @@ class AlertWatch:
         self.errors = {}
         self.halts = {}
         self.live = {}              # pair -> is it LIVE
+        self.signals = {}           # pair -> the last signal alert's id
         self.positions = {}         # id -> pair key
         self.summary_sent = {}      # pair -> the day its summary went
 
@@ -1963,7 +1965,7 @@ class AlertWatch:
             self.halts[key] = halt
             # Into or out of LIVE - from the desk, the other Telegram
             # user, or a restart (LIVE is OFF after every restart).
-            # Dry run and off are not money, so not news.
+            # Signals and off are not money, so not news.
             live = mode_word(row) == 'LIVE'
             if key in self.live and live != self.live[key] and not first:
                 out.append(title('ALGO MODE', now) + '\n' + table([
@@ -1971,6 +1973,16 @@ class AlertWatch:
                     ('Mode', 'LIVE - the Algo sends orders' if live else
                      MODE_WORDS[mode_word(row)] + ' - LIVE is off')]))
             self.live[key] = live
+            # SIGNALS: the trade is the trader's to make - an entry the
+            # Algo would take, or their position at its exit. Said once,
+            # by its id; in LIVE the Algo trades it and TRADE ENTRY /
+            # EXIT says so.
+            alert = block.get('signal_alert') or {}
+            if alert.get('id') and alert['id'] != self.signals.get(key) \
+                    and mode_word(row) == 'DRY' and not first:
+                out.append(self._signal(name, alert, now))
+            if alert.get('id'):
+                self.signals[key] = alert['id']
 
         for event in new_events if not first else ():
             text = self._event(event, pairs, now)
@@ -1995,13 +2007,26 @@ class AlertWatch:
         return out
 
     @staticmethod
+    def _signal(name, alert, now):
+        entry = alert.get('kind') == 'ENTRY'
+        return (title('SIGNAL  ·  ' + ('ENTRY' if entry else
+                                       'EXIT YOUR POSITION'), now)
+                + '\n' + table([
+                    ('Ladder', name),
+                    ('Side', side_words(alert.get('side'))),
+                    ('Do', alert.get('text')),
+                    ('Spread', plain(alert.get('spread'), 4)),
+                    ('Z-score', plain(alert.get('z'), 2, True)), None,
+                    ('Sent', 'nothing - Signals mode, you trade')]))
+
+    @staticmethod
     def _event(event, pairs, now):
         kind = event.get('kind')
         detail = event.get('detail') or {}
         key = event.get('pair_key')
         name = (pairs.get(key) or {}).get('name') or key or ''
         # A signal is not news: in LIVE the TRADE ENTRY / EXIT says it,
-        # in a dry run nothing happened. The desk keeps every one.
+        # in Signals the SIGNAL alert says it. The desk keeps every one.
         if kind == 'algo_order':
             if detail.get('ok'):
                 return None          # the TRADE ENTRY / EXIT says it

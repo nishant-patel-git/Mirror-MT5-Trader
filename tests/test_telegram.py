@@ -204,7 +204,7 @@ def test_no_token_means_no_bot_and_it_says_so(caplog):
 # -- LIVE asks twice ------------------------------------------------------------
 
 
-def open_algo(bot, mode='Dry run'):
+def open_algo(bot, mode='Signals'):
     say(bot, '/start')
     press(bot, 'Settings')
     press(bot, 'Oil')
@@ -226,7 +226,7 @@ def test_LIVE_needs_two_confirms_and_only_then_is_sent(bot):
 def test_the_CONTROL_dry_run_takes_one_confirm(bot):
     bot.desk.snapshot['pairs'][KEY]['algo_on'] = False
     open_algo(bot, 'Off')
-    press(bot, 'Dry run')
+    press(bot, 'Signals')
     press(bot, 'Confirm')
     assert bot.desk.commands == [('set_algo', {
         'pair': KEY, 'algo': 'ALGO', 'mode': 'DRY_RUN'})]
@@ -522,6 +522,48 @@ def test_the_CONTROL_dry_run_and_off_are_not_news(bot):
     assert watch(bot) == []
     row.update(algo_on=False)
     assert watch(bot) == []
+
+
+def signal(alert_id, kind='ENTRY'):
+    return {'id': alert_id, 'seq': 1, 'kind': kind, 'side': 'SELL',
+            'reason': None if kind == 'ENTRY' else 'PROFIT_TARGET',
+            'text': ('H to L — SELL 1 @ 13.8050 (z +1.52)' if kind == 'ENTRY'
+                     else 'Profit target — close your SELL 1 at 12.7270'),
+            'at': 1.0, 'position_id': None, 'spread': 13.805, 'z': 1.523}
+
+
+def test_a_signal_in_signals_mode_is_told_once(bot):
+    row = bot.desk.snapshot['pairs'][KEY]
+    row.update(algo_on=True, algo_mode='DRY_RUN')
+    block = row['algo_block']
+    block['signal_alert'] = signal('S0')
+    assert watch(bot) == []                    # on first look: not replayed
+    assert watch(bot) == []
+    block['signal_alert'] = signal('S1')
+    [told] = watch(bot)
+    assert 'SIGNAL  ·  ENTRY' in told
+    assert 'H to L — SELL 1 @ 13.8050' in told
+    assert 'Z-score</b>  <code>+1.52' in told
+    assert watch(bot) == []                    # once, by its id
+    block['signal_alert'] = signal('S2', 'EXIT')
+    [told] = watch(bot)
+    assert 'EXIT YOUR POSITION' in told and 'close your SELL' in told
+
+
+def test_the_CONTROL_in_LIVE_a_signal_is_not_a_signal_alert(bot):
+    row = bot.desk.snapshot['pairs'][KEY]
+    row.update(algo_on=True, algo_mode='LIVE')
+    block = row['algo_block']
+    watch(bot)
+    block['signal_alert'] = signal('S1')
+    assert not [t for t in watch(bot) if 'SIGNAL' in t]
+
+
+def test_set_mode_signals_is_understood(bot):
+    say(bot, f'/set {KEY} mode signals')
+    press(bot, 'Confirm')
+    assert bot.desk.commands[-1] == ('set_algo', {
+        'pair': KEY, 'algo': 'ALGO', 'mode': 'DRY_RUN'})
 
 
 def test_the_daily_summary_is_sent_once_at_the_cutoff(bot):
@@ -919,7 +961,7 @@ def test_status_opens_each_ladder_with_w3s_rows(bot):
     say(bot, '/status')
     text = bot.api.texts()[-1]
     assert '<b>SYSTEM STATUS  ·  ' in text
-    in_order(text, ['Algo</b>  <code>Enabled', 'Mode</b>  <code>Dry run',
+    in_order(text, ['Algo</b>  <code>Enabled', 'Mode</b>  <code>Signals',
                     'Position</b>  <code>H to L 0.50',
                     'Z-score</b>  <code>+1.2345',
                     'Regime</b>  <code>mean reverting',
