@@ -4009,6 +4009,21 @@
       return money(value) +
         (measured < fills ? ' (' + measured + ' of ' + fills + ')' : '');
     }
+    // WHAT the totals cover: the whole journal, not one session - and
+    // whether the terminal's own clicks are in them.
+    function day(ms) {
+      return ms ? new Date(ms).toISOString().slice(0, 10) : DASH;
+    }
+    html += '<div class="hint">Totals: every fill in the journal, ' +
+      day(totals.first_ms) + ' to ' + day(totals.last_ms) +
+      ' (broker dates), ' + (state.fillsFilter.ours
+        ? "this desk's only" : "this desk's AND the terminal's own clicks") +
+      '.' + ((totals.by_account || []).length > 1
+        ? ' By account: ' + totals.by_account.map(function (a) {
+            return a.account + ' ' + money(a.profit) + ' (' + a.fills +
+              ' fills, ' + day(a.first_ms) + ' to ' + day(a.last_ms) + ')';
+          }).join(' · ')
+        : '') + '</div>';
     html += '<table><tbody><tr><td>' + (totals.fills || 0) + ' fills</td>' +
       '<td>' + fmt(totals.volume, 2) + ' lots</td>' +
       '<td>commission ' + brokerCharge(totals.commission,
@@ -4071,8 +4086,10 @@
     // Rendering it in the browser's zone would put every row hours away
     // from the same trade in the terminal.
     if (!fill.broker_time_ms) { return DASH; }
+    // WITH the date: a journal that spans days read as one session.
     var stamp = new Date(fill.broker_time_ms);
-    return stamp.toISOString().slice(11, 19) +
+    return stamp.toISOString().slice(0, 10) + ' ' +
+      stamp.toISOString().slice(11, 19) +
       (fill.server_offset_s === null || fill.server_offset_s === undefined
         ? '' : ' (broker)');
   }

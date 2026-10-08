@@ -441,15 +441,22 @@ class Store:
                 params).fetchall()
         return [dict(row) for row in rows]
 
-    def fill_totals(self, pair_key=None):
+    def fill_totals(self, pair_key=None, ours_only=False):
         """What the journal adds up to — from the BROKER's numbers.
 
         This is the honest counterweight to our own marks: commission
         and swap are the broker's, and profit on a closing deal is what
-        MT5 itself booked.
+        MT5 itself booked. Over the WHOLE journal - `first_ms` and
+        `last_ms` say which stretch that is - and, with `ours_only`,
+        over this desk's own fills, the same rows the table shows.
         """
-        clause = 'WHERE pair_key = ?' if pair_key else ''
-        params = (pair_key,) if pair_key else ()
+        where, params = [], []
+        if pair_key:
+            where.append('pair_key = ?')
+            params.append(pair_key)
+        if ours_only:
+            where.append('is_ours = 1')
+        clause = ('WHERE ' + ' AND '.join(where)) if where else ''
         with self._connect() as connection:
             row = connection.execute(
                 f"""SELECT COUNT(*) AS fills,
@@ -464,9 +471,20 @@ class Store:
                            COUNT(commission) AS commission_measured,
                            SUM(swap) AS swap,
                            COUNT(swap) AS swap_measured,
-                           COALESCE(SUM(profit), 0) AS profit
+                           COALESCE(SUM(profit), 0) AS profit,
+                           MIN(broker_time_ms) AS first_ms,
+                           MAX(broker_time_ms) AS last_ms
                     FROM fills {clause}""", params).fetchone()
-        return dict(row)
+            # ...and the same, account by account: a journal that has
+            # seen more than one pair of accounts adds them all up.
+            accounts = connection.execute(
+                f"""SELECT account, COUNT(*) AS fills,
+                           COALESCE(SUM(profit), 0) AS profit,
+                           MIN(broker_time_ms) AS first_ms,
+                           MAX(broker_time_ms) AS last_ms
+                    FROM fills {clause}
+                    GROUP BY account ORDER BY account""", params).fetchall()
+        return dict(row, by_account=[dict(a) for a in accounts])
 
     def fills_between(self, from_ms=None, to_ms=None, ours_only=True):
         """What the BROKER filled in a window, on the broker's stamps.
