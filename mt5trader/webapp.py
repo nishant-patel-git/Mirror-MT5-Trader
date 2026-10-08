@@ -26,7 +26,7 @@ from datetime import date
 
 from flask import Flask, jsonify, render_template, request
 
-from . import atomicfile, config as cfg, diagnostics, fairvalue, \
+from . import analysis, atomicfile, config as cfg, diagnostics, fairvalue, \
     hedgeratio, sizing, slippage
 from .commands import CommandLog
 from .legs import RemoteLeg
@@ -355,7 +355,8 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         fills = db.fills(pair_key=pair_key, account=account, ours_only=ours,
                          limit=limit)
         return jsonify({'ok': True, 'fills': fills,
-                        'totals': db.fill_totals(pair_key)})
+                        'totals': db.fill_totals(pair_key,
+                                                 ours_only=ours)})
 
     @app.get('/api/fills.csv')
     def api_fills_csv():
@@ -434,6 +435,45 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
             body['journal'] = None
         return body, None
 
+    # -- the Analysis tab ------------------------------------------------------
+
+    @app.get('/api/analysis')
+    def api_analysis():
+        """The Analysis tab, built from what is recorded: the positions
+        table (with each trade's extremes), the Algo's audit trail for
+        its z at both ends, the what-if shadows and the excursion
+        counters. Computes no price of its own.
+
+        `days`: trades OPENED in the last N days (0 = every one kept).
+        `pair`: one ladder, or all.
+        """
+        db = store()
+        if db is None:
+            return jsonify({'ok': False,
+                            'error': 'the database could not be opened'}), 503
+        try:
+            days = float(request.args.get('days', 7))
+        except ValueError:
+            days = 7.0
+        pair_key = request.args.get('pair') or None
+        now = time.time()
+        start = None if days <= 0 else now - days * 86400.0
+        positions = db.positions_between(start, None, pair_key=pair_key)
+        events = db.events_between(('algo_signal', 'algo_order'), start)
+        if pair_key:
+            events = [e for e in events if e.get('pair_key') == pair_key]
+        shadows = db.shadows(since=start, pair_key=pair_key)
+        excursions = db.excursions()
+        if pair_key:
+            excursions = {k: v for k, v in excursions.items()
+                          if k == pair_key}
+        raw = cfg.load_raw(config_path)
+        names = {key: (pair or {}).get('name') or key
+                 for key, pair in (raw.get('pairs') or {}).items()}
+        body = analysis.report(positions, events, shadows, excursions, now)
+        return jsonify(dict(body, ok=True, days=days, pair=pair_key,
+                            names=names))
+
     @app.get('/api/slippage')
     def api_slippage():
         body, error = slippage_report()
@@ -457,7 +497,11 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         columns = ['opened_at', 'closed_at', 'pair_key', 'side', 'quantity',
                    'order_type', 'entry_points', 'entry_money', 'exit_points',
                    'exit_money', 'round_trip_points', 'round_trip_money',
-                   'click_to_on_ms', 'realized_pnl', 'position_id']
+                   'click_to_on_ms', 'realized_pnl', 'position_id',
+                   # Which LEG slipped: its own price points against the
+                   # touch it was sent at, positive a cost.
+                   'symbol_a', 'entry_leg_a', 'exit_leg_a',
+                   'symbol_b', 'entry_leg_b', 'exit_leg_b']
         writer = csv.DictWriter(buffer, fieldnames=columns,
                                 extrasaction='ignore')
         writer.writeheader()
@@ -1051,6 +1095,26 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
             if problems:
                 return jsonify({'ok': False,
                                 'error': 'Algo: ' + '; '.join(problems)}), 400
+        # This ladder's hours: a time that will not parse is REFUSED with
+        # what was wrong, and a break needs both its ends.
+        from . import session as session_module
+        hours = {'session_open': 'Session open',
+                 'session_close': 'Session close',
+                 'break_start': 'Break start', 'break_end': 'Break end'}
+        for field, label in hours.items():
+            if field in payload:
+                try:
+                    session_module.parse_hhmm(payload[field])
+                except ValueError as e:
+                    return jsonify({'ok': False,
+                                    'error': f'{label}: {e}'}), 400
+                payload[field] = session_module.clean_hhmm(payload[field])
+        ends = [payload.get(f, pair.get(f)) for f in ('break_start',
+                                                       'break_end')]
+        if sum(1 for v in ends if v not in (None, '')) == 1:
+            return jsonify({'ok': False, 'error': (
+                'Break: give both a start and an end, or leave both '
+                'blank')}), 400
         resizing = ('clip_lots_a' in payload
                     and _changed(payload['clip_lots_a'],
                                  pair.get('clip_lots_a')))
@@ -1069,7 +1133,7 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                       'rows', 'clip_lots_a', 'clip_lots_b',
                       'contract_size_a', 'contract_size_b',
                       'max_quote_age_sec',
-                      'expiry', 'expiry_a', 'auto_route',
+                      'expiry', 'expiry_a',
                       'swap_a_long_per_lot', 'swap_a_short_per_lot',
                       'swap_b_long_per_lot', 'swap_b_short_per_lot',
                       # What a trade on THIS ladder costs, and therefore
@@ -1080,7 +1144,9 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                       'slippage_allowance', 'break_even_nights',
                       'tp_target_pct_of_margin',
                       'carry_rate_pct',
-                      'show_fair_window', 'algo_window', 'algo_params'):
+                      'show_fair_window', 'algo_window', 'algo_params',
+                      'session_open', 'session_close',
+                      'break_start', 'break_end'):
             if field in payload:
                 pair[field] = payload[field]
         # A date that will not parse is REPORTED and the old value kept:
@@ -1198,6 +1264,9 @@ def main():
                                '%(message)s',
                         handlers=[logging.StreamHandler()])
     logsetup.setup('web')
+    # The screen polls three times a second; a line for each poll buried
+    # every error in web.log. Button presses and failures still log.
+    logsetup.quiet_polling()
     app = create_app(args.status, args.commands, args.results, args.config,
                      args.db)
     app.run(host=args.host, port=args.port, threaded=True)

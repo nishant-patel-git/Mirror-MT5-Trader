@@ -150,13 +150,20 @@ def test_the_band_is_arithmetic_and_nothing_else():
     assert names & (ORDER_VERBS | {'broker', 'legs'}) == set()
 
 
+def test_the_entry_filters_are_arithmetic_and_nothing_else():
+    names, imports = _code_names('mt5trader/algofilters.py')
+    assert imports == {'math'}, imports
+    assert names & (ORDER_VERBS | {'broker', 'legs'}) == set()
+
+
 def test_the_algo_runtime_reads_history_and_cannot_place_an_order():
     """The seam execution will plug into is the SINK. Until then, the
     module that runs the Algo must not be able to reach an order by any
     route — checked as code, because the way this breaks is an edit
     that looks harmless."""
     names, imports = _code_names('mt5trader/algodesk.py')
-    assert imports <= {'logging', 'collections:deque', '.:algo', '.:bands'}, \
+    assert imports <= {'logging', 're', 'collections:deque', '.:algo',
+                       '.:bands', '.:algofilters'}, \
         imports
     assert names & ORDER_VERBS == set(), names & ORDER_VERBS
     # The control: the checker does see a verb when there is one.
@@ -215,3 +222,16 @@ def test_a_ladder_running_NONE_computes_nothing_at_all(config, pair, legs):
     coordinator.poll_once()
     block = coordinator.snapshot()['pairs'][pair.key]['algo_block']
     assert block['algo'] == 'FAIR_SPREAD' and 'fair' in block
+
+
+def test_the_live_sink_reaches_orders_ONLY_through_the_coordinator():
+    """The one Algo module that may trade does it through the two
+    coordinator methods a manual click's executor sits behind — never a
+    broker, a leg or the executor directly."""
+    names, imports = _code_names('mt5trader/algoexec.py')
+    assert imports == set(), imports
+    assert names & {'broker', 'legs', 'executor', 'order_send',
+                    'send_market_order', 'close_ticket', 'place_limit'} \
+        == set()
+    calls = {n for n in names if n.startswith('algo_')}
+    assert calls == {'algo_enter', 'algo_exit'}, calls

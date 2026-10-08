@@ -20,21 +20,23 @@ import threading
 import time
 from datetime import datetime
 
-from . import algo as algo_module, atomicfile, carry, \
+from . import algo as algo_module, analysis, atomicfile, carry, costs, \
     config as config_module, depth as depth_book, fairvalue, hedgeratio, \
     sizing, takeprofit
 from . import book as book_module
 from .algodesk import AlgoDesk
+from .algoexec import LiveSink
 from .book import Book
 from .database import Store
 from .executor import PairExecutor, mark_position
-from .models import (MAGIC_NUMBER, LegFill, OrderType, SpreadPosition,
-                     SpreadSide)
+from .models import (ALGO_SOURCE, MAGIC_NUMBER, MANUAL, LegFill, OrderType,
+                     SpreadPosition, SpreadSide)
 from .quoter import Quoter, quoting_leg
 from .reconcile import Reconciler
-from .session import SessionClock, day_orders, overnight_action
+from .session import (PairSession, SessionClock, day_orders,
+                      overnight_action)
 from .spread import (LevelSigma, QuoteAgeTracker, SpreadJumpTracker,
-                     compute_spread, stale_quote)
+                     compute_spread, executable_spread, stale_quote)
 
 
 #: Settings whose only consumer is a panel or a display rule, so a save
@@ -71,6 +73,10 @@ class Coordinator:
         # without this a LIMIT entry was recovered as NOTHING and a close
         # that filled on a resting order came back OPEN.
         self.quoter.on_change = self.remember
+        # A working order that reached its level and did not go on is
+        # journalled as a refusal, in the broker's words - so the desk
+        # and Telegram both say it.
+        self.quoter.on_refusal = self._working_order_refused
         self.reconciler = Reconciler(config, legs, self.book, self.executor,
                                      clock=clock, store=store)
         self._last_reconcile = None
@@ -83,6 +89,16 @@ class Coordinator:
         #: journal. None means run without one — the tests that do not
         #: care, and nothing else.
         self.store = store
+        #: The Analysis tab's live trackers (see `_track`): when each open
+        #: position's extremes were last saved, the open ids per ladder
+        #: last pass (a missing one has closed), the running what-if
+        #: shadows, and the z-score excursion counters.
+        self._extremes_saved = {}
+        self._open_ids = {}
+        self._shadows = None
+        self._shadow_saved = {}
+        self._excursions = {}
+        self._excursions_saved = {}
         #: What recovery found at startup, and what it could not claim.
         self.recovery = {'recovered': 0, 'unclaimed': [], 'complete': False}
         self._last_journal = None
@@ -145,10 +161,13 @@ class Coordinator:
         #: the snapshot so a broken pair is VISIBLE rather than absent
         #: (spec §17: never hide a broken row).
         self.errors = {}
-        #: Each ladder's Algo switch, OFF for every ladder at start. It
-        #: signals and records; it sends nothing (see `algodesk`).
+        #: Each ladder's Algo switch, OFF for every ladder at start.
+        #: DRY_RUN signals and records; LIVE also trades, through
+        #: `algo_enter` / `algo_exit` below (see `algodesk`, `algoexec`).
         self.algos = AlgoDesk(legs, store=store, clock=clock,
-                              offset_for=self._offset_of)
+                              offset_for=self._offset_of,
+                              live=LiveSink(self),
+                              result_of=self._realized_of)
 
     # -- startup ------------------------------------------------------------
 
@@ -550,7 +569,12 @@ class Coordinator:
                 self.config.get('MAX_SPREAD_JUMP_SIGMA'),
                 self.config.get('JUMP_SETTLE_SEC'))
             md['stale_reason'] = stale
-            if stale:
+            # A feed that is silent BECAUSE this ladder's market is shut
+            # - its break, or outside the hours set for it - is not a
+            # fault: no warning and no re-subscribe loop. Orders are
+            # still withheld on a stale price.
+            if stale and not PairSession(pair, self.config).quiet(
+                    self.session_clock.broker_now()):
                 self._log_stale(key, pair, md)
                 self._auto_refresh(key, md)
             md['jump_reason'] = jumped
@@ -560,17 +584,13 @@ class Coordinator:
             md['feed_badge'] = _badge(md, stale, jumped)
             self._observe_session(key, md, pair)
             self.market[key] = md
-            self._work_algo(pair, md)
+            body = self._work_algo(pair, md)
+            self._track(pair, md, body)
             # LIMIT-mode orders are worked on the SAME pass that priced
             # them: a peg re-priced off a snapshot older than the one on
             # screen is a peg holding a level nobody is showing.
             self.quoter.work(pair, md)
-            if any(e['action'] == 'auto_route_armed'
-                   for e in self.work_auto_route(pair, md)):
-                # A target armed on THIS pass rests on this pass. A poll
-                # later is a window where the trader believes there is a
-                # working order and there is not.
-                self.quoter.work(pair, md)
+            self.tidy_closing_orders(pair)
         return self.market
 
     def _read_ticks(self):
@@ -757,94 +777,34 @@ class Coordinator:
         body['kind_note'] = kind_note
         return body
 
-    def work_auto_route(self, pair, md):
-        """Arm — and keep honest — the closing orders AutoRouting rests.
+    def tidy_closing_orders(self, pair):
+        """Pull the closing orders that must not stay resting.
 
-        On a fill it rests a working order to close the position at its
-        take-profit, priced from the ACTUAL EXECUTED spread and not from
-        the quote the click was taken at. That anchor is the whole
-        point: levels anchored on the quote while P&L is measured from
-        the fill name a level the engine would not fire at.
-
-        It arms a TARGET AND NO STOP. The position runs until the
-        target, the overnight rule, or the trader.
-
-        On a restart it re-arms from the recovered position's frozen
-        levels, and SAYS SO. That deliberately differs from the rule
-        that nothing placing orders by itself may resume after a
-        restart: that rule exists because a replayed ENTRY creates risk
-        nobody chose. This places a CLOSING order on a position that
-        already exists — it reduces exposure — and the worse failure
-        here is silent: a trader who believes a target is armed when it
-        is not.
+        - **Whoever rested it**, a closing order whose POSITION has gone
+          is pulled: it would fill, and with nothing to close it would
+          OPEN a naked position.
+        - **AutoRouting's leftovers.** AutoRouting — rest a take-profit
+          on every fill — has been removed: the Algo is the one thing
+          that exits by itself now, and two would confuse the desk. A
+          target it armed before the upgrade, recovered at startup, is
+          pulled here and said so. ONLY those: a close the TRADER rested
+          by hand is theirs and is never touched.
         """
         events = []
-        # First, the housekeeping that must happen whether AutoRouting
-        # is on or off: an order armed against a position that has gone
-        # is pulled. It would fill, and with nothing to close it would
-        # OPEN a naked position.
         live = {p.position_id for p in self.book.positions(pair.key)}
         for order in self.book.orders(pair.key):
             if order.position_id and order.position_id not in live:
                 self.quoter.disarm(order.position_id,
                                    'its position is no longer open')
-                events.append({'pair': pair.key, 'action': 'auto_route_pulled',
+                events.append({'pair': pair.key, 'action': 'close_pulled',
                                'position': order.position_id})
-        # The master switch, and then the ladder's own. OFF at either
-        # level, nothing is armed — AND anything already resting is
-        # PULLED: standing automation down that leaves an order behind
-        # it has stood nothing down, and that order still fills.
-        on = (self.config.get('AUTO_ROUTE_ENABLED', False)
-              and pair.auto_route)
-        if not on:
-            for position in self.book.positions(pair.key):
-                # ONLY what AutoRouting armed. A close the trader
-                # clicked is not automation: sweeping it here left them
-                # believing they had an order working to get out, with
-                # nothing at the broker, because of a switch they never
-                # touched.
-                if self.book.auto_armed_for(position.position_id):
-                    self.quoter.disarm_auto(position.position_id,
-                                            'AutoRouting was turned off')
-                    position.tp_armed = False
-                    events.append({'pair': pair.key,
-                                   'action': 'auto_route_pulled',
-                                   'position': position.position_id})
-            if events:
-                self.session_events.extend(events)
-            return events
-        margin = (self.margin_detail(pair) or {}).get('money')
-        # This ladder's own numbers: a gold basis and an oil differential
-        # are charged differently and held for different lengths of time.
-        settings = pair.exit_settings(self.config.settings)
-        nights = float(settings.get('BREAK_EVEN_NIGHTS', 0.0) or 0.0)
         for position in self.book.positions(pair.key):
-            if getattr(position, 'tp_armed', False):
-                continue
-            if self.book.orders_for_position(position.position_id):
-                continue
-            exit_levels = takeprofit.for_position(
-                position, md, pair, settings, margin,
-                nights=nights,
-                carry_for=self.holding_carry(pair, position.side.value,
-                                             nights))
-            level = (exit_levels or {}).get('tp')
-            # Break-even is not a target. With no margin priced, or no
-            # percentage set, `tp` IS break-even — and resting an order
-            # there is a different instruction from the one the trader
-            # gave.
-            if level is None or not (exit_levels or {}).get('target_points'):
-                continue
-            order = self.quoter.arm(pair, position, level)
-            if order is None:
-                continue
-            position.tp_armed = True
-            events.append({'pair': pair.key, 'action': 'auto_route_armed',
-                           'position': position.position_id, 'level': level,
-                           'order': order.order_id,
-                           # Said out loud, because a target believed to
-                           # be armed when it is not is the worse fault.
-                           'recovered': bool(position.recovered)})
+            if self.book.auto_armed_for(position.position_id):
+                self.quoter.disarm_auto(position.position_id,
+                                        'AutoRouting has been removed')
+                events.append({'pair': pair.key,
+                               'action': 'auto_route_pulled',
+                               'position': position.position_id})
         if events:
             self.session_events.extend(events)
         return events
@@ -885,12 +845,21 @@ class Coordinator:
 
     # -- the Algo -------------------------------------------------------------
 
-    def set_algo(self, pair_key, choice):
+    def set_algo(self, pair_key, choice, mode=None, confirmed=False,
+                 off_action=None):
         """Pick what a ladder runs: NONE, FAIR_SPREAD or ALGO.
 
         ALGO is a switch on the RUNNING engine and is never saved —
-        every restart comes up with it off. The other two are the Fair
+        every restart comes up with it off. `mode` is DRY_RUN (signals
+        only, the default) or LIVE (it trades), and LIVE needs
+        `confirmed` every time. The other two choices are the Fair
         Spread window, which IS the pair's saved setting.
+
+        Algo or Manual, never both: LIVE is refused on a ladder with a
+        MANUAL position or a working order. Leaving LIVE while the Algo
+        holds a position needs `off_action` — 'close' it now, or hand it
+        to 'manual' — because a position nobody manages is the worst of
+        the three.
         """
         pair = self.config.pairs.get(pair_key)
         if pair is None:
@@ -900,27 +869,319 @@ class Coordinator:
             return {'ok': False, 'pair': pair_key,
                     'reason': f'{choice!r} is not an algo — choose one of '
                               + ', '.join(algo_module.ALGOS)}
+        mode = str(mode or algo_module.DRY_RUN).upper()
         with self.lock:
+            leaving_live = (self.algos.mode(pair_key) == algo_module.LIVE
+                            and not (chosen == algo_module.ALGO
+                                     and mode == algo_module.LIVE))
+            if leaving_live:
+                handed = self._hand_back(pair, off_action)
+                if not handed.get('ok'):
+                    return dict(handed, pair=pair_key, algo=None)
             if chosen == algo_module.ALGO:
-                answer = self.algos.turn_on(pair)
+                if mode == algo_module.LIVE:
+                    refusal = self._live_refusal(pair)
+                    if refusal:
+                        answer = {'ok': False, 'pair': pair_key,
+                                  'reason': refusal}
+                        self._record_switch(pair_key, chosen, mode, answer)
+                        return dict(answer, algo=None)
+                adopt = [p.position_id for p in self.book.positions(pair_key)
+                         if getattr(p, 'source', MANUAL) == ALGO_SOURCE]
+                answer = self.algos.turn_on(pair, mode, confirmed,
+                                            adopt=adopt
+                                            if mode == algo_module.LIVE
+                                            else ())
             else:
                 self.algos.turn_off(pair_key)
                 pair.algo = chosen
                 answer = {'ok': True, 'pair': pair_key, 'on': False}
-        if self.store is not None:
-            try:
-                self.store.event('algo_switch', pair_key, algo=chosen,
-                                 ok=answer.get('ok'),
-                                 reason=answer.get('reason'))
-            except Exception as e:
-                logging.error('could not record the Algo switch: %s', e)
+        self._record_switch(pair_key, chosen, mode, answer)
         return dict(answer, algo=chosen if answer.get('ok') else None)
+
+    def _record_switch(self, pair_key, chosen, mode, answer):
+        if self.store is None:
+            return
+        try:
+            self.store.event('algo_switch', pair_key, algo=chosen, mode=mode,
+                             ok=answer.get('ok'), reason=answer.get('reason'))
+        except Exception as e:
+            logging.error('could not record the Algo switch: %s', e)
+
+    def _live_refusal(self, pair):
+        """Why this ladder cannot go LIVE, in words, or None."""
+        manual = [p for p in self.book.positions(pair.key)
+                  if getattr(p, 'source', MANUAL) != ALGO_SOURCE]
+        if manual:
+            net = sum(p.quantity if p.side is SpreadSide.BUY else -p.quantity
+                      for p in manual)
+            return (f'{pair.key} has {len(manual)} manual position(s) open '
+                    f'({net:+g} spreads) — Algo or Manual, never both. Close '
+                    f'them first.')
+        working = self.book.orders(pair.key)
+        if working:
+            return (f'{pair.key} has {len(working)} working order(s) — '
+                    f'cancel them before the Algo trades this ladder.')
+        return None
+
+    def _hand_back(self, pair, off_action):
+        """The Algo is leaving LIVE: what happens to what it holds."""
+        owned = [self.book.position(pid)
+                 for pid in self.algos.owned(pair.key)]
+        owned = [p for p in owned if p is not None and p.is_open]
+        if not owned:
+            return {'ok': True}
+        action = str(off_action or '').lower()
+        if action == 'manual':
+            for position in owned:
+                position.source = MANUAL
+                self.remember(position)
+            return {'ok': True, 'handed': [p.position_id for p in owned]}
+        if action == 'close':
+            failed = []
+            for position in owned:
+                answer = self.algo_exit(pair, position.position_id,
+                                        'the Algo was turned off')
+                if not answer.get('ok'):
+                    failed.append(answer.get('reason') or 'refused')
+            if failed:
+                # Still ON, still managing: a position the close could
+                # not take off must not also lose its manager.
+                return {'ok': False,
+                        'reason': 'could not close the Algo\'s position — '
+                                  + '; '.join(failed) + '. The Algo stays on.'}
+            return {'ok': True}
+        return {'ok': False, 'choose': ['close', 'manual'],
+                'positions': [p.position_id for p in owned],
+                'reason': f'the Algo holds {len(owned)} position(s) on '
+                          f'{pair.key} — close it now, or hand it to manual'}
+
+    def algo_enter(self, pair, side, quantity):
+        """A LIVE Algo entry: MARKET both legs, through the executor a
+        manual MARKET click uses, with the price the decision was taken
+        at as the slippage guard. Tagged ALGO and remembered."""
+        with self.lock:
+            md = self.market.get(pair.key)
+            side = SpreadSide(getattr(side, 'value', side))
+            level = executable_spread(md, side) if md else None
+            result = self.executor.market_entry(pair, side, md, quantity,
+                                                level)
+            if result.ok and result.position:
+                result.position.source = ALGO_SOURCE
+                self.remember(self.book.add_position(result.position))
+                return {'ok': True,
+                        'position_id': result.position.position_id}
+            if self.store is not None and result.reason:
+                self.store.event('refused', pair.key, reason=result.reason,
+                                 side=side.value, level=level, algo=True,
+                                 naked=result.naked)
+            return {'ok': False, 'reason': result.reason or 'not filled'}
+
+    def algo_exit(self, pair, position_id, reason):
+        """A LIVE Algo exit: close one position, both legs, by TICKET."""
+        with self.lock:
+            position = self.book.position(position_id)
+            if position is None or not position.is_open:
+                return {'ok': True, 'reason': 'already closed'}
+            md = self.market.get(pair.key)
+            if reason == 'PROFIT_TARGET' and \
+                    self.config.get('RECHECK_TAKE_PROFIT', True):
+                # A TAKE-PROFIT, and only a take-profit, is confirmed on
+                # prices read NOW. Live, one poll showed oil's closing
+                # spread 0.16 past the target; the close filled 0.235
+                # back from it, and a +$3.90 target banked +$0.10. A
+                # stop, a cutoff, a kill and every manual close go out
+                # unconfirmed and at once - waiting there adds risk.
+                # Waiting here costs at most the opportunity: the stop
+                # still stands while the target is unconfirmed.
+                fresh, unconfirmed = self._confirm_take_profit(
+                    pair, position, md)
+                if unconfirmed:
+                    logging.info('[ALGO %s] take-profit on %s not sent: %s',
+                                 pair.key, position_id, unconfirmed)
+                    if self.store is not None:
+                        self.store.event('algo_tp_unconfirmed', pair.key,
+                                         position_id=position_id,
+                                         reason=unconfirmed)
+                    return {'ok': False, 'held': True,
+                            'reason': unconfirmed}
+                md = fresh
+            result = self.executor.close_position(
+                pair, position, md,
+                reason=f'Algo: {algo_module.EXIT_WORDS.get(reason, reason)}')
+            self.remember(position)
+            return {'ok': bool(result.get('ok')),
+                    'reason': result.get('reason') or result.get('error')}
+
+    def _confirm_take_profit(self, pair, position, md):
+        """(fresh market, None) when both legs, read again now, still
+        put the closing price at or past this position's take-profit;
+        (None, why) when they do not, or could not be read."""
+        rows = {r['position_id']: r for r in self._algo_positions(pair, md)
+                if md} if md else {}
+        tp = (rows.get(position.position_id) or {}).get('tp')
+        if tp is None:
+            return None, 'its take-profit could not be priced'
+        fresh, why = self.quoter._fresh_market(pair, md)
+        if fresh is None:
+            return None, f'the prices could not be read again ({why})'
+        closing = executable_spread(fresh, position.side, closing=True)
+        reached = closing is not None and (
+            closing >= tp - 1e-9 if position.side is SpreadSide.BUY
+            else closing <= tp + 1e-9)
+        if not reached:
+            return None, (f'the fresh closing price {closing:.4f} is short '
+                          f'of the take-profit {tp:.4f} - the poll that saw '
+                          f'it had a price that is not there now'
+                          if closing is not None else
+                          'the fresh prices make no closing price')
+        return fresh, None
+
+    def _realized_of(self, position_id):
+        position = self.book.position(position_id)
+        return None if position is None else position.realized_pnl
 
     def _offset_of(self, account):
         """One broker's measured offset from UTC, or None."""
         self.broker_offset()           # measures each account when due
         cached = self._offsets.get(account)
         return cached[1] if cached else None
+
+    # -- the Analysis tab's trackers ------------------------------------------
+
+    #: How often a moving extreme, shadow or counter is written. Each is
+    #: also written at once on anything that matters: a close, a
+    #: milestone, a touch.
+    ANALYSIS_SAVE_SEC = 10.0
+
+    def _track(self, pair, md, body):
+        """Feed the Analysis tab. Observes only — it never decides or
+        sends anything, and a failure here never stops the poll."""
+        try:
+            now = self.clock()
+            settings = pair.exit_settings(self.config.settings)
+            self._track_positions(pair, md, settings, now)
+            self._track_shadows(pair, md, now)
+            self._track_excursions(pair, md, body, now)
+        except Exception as e:
+            logging.exception('[ANALYSIS %s] skipped this pass: %s',
+                              pair.key, e)
+
+    def _track_positions(self, pair, md, settings, now):
+        open_ids = set()
+        for position in self.book.positions(pair.key):
+            open_ids.add(position.position_id)
+            _gross, net, _closing = mark_position(position, md, settings)
+            if analysis.observe_extremes(position, net, now):
+                last = self._extremes_saved.get(position.position_id)
+                if last is None or now - last >= self.ANALYSIS_SAVE_SEC:
+                    self._extremes_saved[position.position_id] = now
+                    self.remember(position)
+        before = self._open_ids.get(pair.key)
+        self._open_ids[pair.key] = open_ids
+        for position_id in (before or set()) - open_ids:
+            self._extremes_saved.pop(position_id, None)
+            position = self.book.position(position_id)
+            if position is None or position.is_open:
+                continue
+            self.remember(position)          # its final extremes
+            self._arm_shadow(pair, position, settings, now)
+
+    def _arm_shadow(self, pair, position, settings, now):
+        fees = costs.mark_fees(
+            position.leg_a.volume if position.leg_a else 0.0,
+            position.leg_b.volume if position.leg_b else 0.0, settings)
+        pct = settings.get('TP_TARGET_PCT_OF_MARGIN')
+        target = None
+        if pct and position.entry_margin:
+            target = (float(pct) / 100.0 * float(position.entry_margin)
+                      * float(position.quantity or 1.0))
+        watch = analysis.arm_shadow(position, fees, target, now)
+        if watch is None:
+            return
+        self._shadow_list().append(watch)
+        self._save_shadow(watch, now)
+
+    def _shadow_list(self):
+        if self._shadows is None:
+            self._shadows = []
+            if self.store is not None:
+                try:
+                    self._shadows = self.store.shadows(active_only=True)
+                except Exception as e:
+                    logging.error('could not read the shadows: %s', e)
+        return self._shadows
+
+    def _save_shadow(self, watch, now):
+        self._shadow_saved[watch['position_id']] = now
+        if self.store is not None:
+            try:
+                self.store.save_shadow(watch)
+            except Exception as e:
+                logging.error('could not save a shadow: %s', e)
+
+    def _track_shadows(self, pair, md, now):
+        watches = self._shadow_list()
+        for watch in list(watches):
+            if watch.get('pair_key') != pair.key:
+                continue
+            milestones = (watch['reverted_be'], watch['reverted_target'])
+            closing = executable_spread(md, SpreadSide(watch['side']),
+                                        closing=True) if md else None
+            if not analysis.update_shadow(watch, closing, now):
+                continue
+            last = self._shadow_saved.get(watch['position_id'])
+            if watch['done'] or milestones != (watch['reverted_be'],
+                                               watch['reverted_target']) \
+                    or last is None or now - last >= self.ANALYSIS_SAVE_SEC:
+                self._save_shadow(watch, now)
+            if watch['done']:
+                watches.remove(watch)
+                self._shadow_saved.pop(watch['position_id'], None)
+
+    def _excursion(self, key, now):
+        tracker = self._excursions.get(key)
+        if tracker is None:
+            saved = None
+            if self.store is not None:
+                try:
+                    saved = self.store.excursions().get(key)
+                except Exception as e:
+                    logging.error('could not read the excursions: %s', e)
+            tracker = self._excursions[key] = analysis.ZExcursions(saved, now)
+        return tracker
+
+    def _track_excursions(self, pair, md, body, now):
+        """z on the Algo's OWN band — so only while its Algo is on."""
+        if not body or not md or md.get('mid_spread') is None \
+                or md.get('jump_reason'):
+            return
+        mean, sigma = body.get('mean'), body.get('sigma')
+        if mean is None or not sigma:
+            return
+        tracker = self._excursion(pair.key, now)
+        what = tracker.tally((md['mid_spread'] - mean) / sigma, now)
+        last = self._excursions_saved.get(pair.key)
+        if what == 'event' or (what and (
+                last is None or now - last >= self.ANALYSIS_SAVE_SEC)):
+            self._save_excursions(pair.key, tracker, now)
+
+    def _save_excursions(self, key, tracker, now):
+        self._excursions_saved[key] = now
+        if self.store is not None:
+            try:
+                self.store.save_excursions(key, tracker.to_dict())
+            except Exception as e:
+                logging.error('could not save the excursions: %s', e)
+
+    def reset_excursions(self, pair_key=None):
+        """Zero the z-score excursion counters (one ladder, or all)."""
+        now = self.clock()
+        keys = [pair_key] if pair_key else list(self.config.pairs)
+        for key in keys:
+            tracker = self._excursions[key] = analysis.ZExcursions(None, now)
+            self._save_excursions(key, tracker, now)
+        return {'ok': True, 'reset': keys}
 
     def _work_algo(self, pair, md):
         """Feed this pass's market to the ladder's Algo, if it is on.
@@ -941,12 +1202,20 @@ class Coordinator:
     def _algo_positions(self, pair, md):
         """This ladder's open positions as the Algo reads them: each with
         the break-even and take-profit the Exit panel shows for it."""
-        settings = pair.exit_settings(self.config.settings)
-        nights = float(settings.get('BREAK_EVEN_NIGHTS', 0.0) or 0.0)
-        margin = (self.margin_detail(pair) or {}).get('money')
-        pct = settings.get('TP_TARGET_PCT_OF_MARGIN')
+        ladder_settings = pair.exit_settings(self.config.settings)
+        nights = float(ladder_settings.get('BREAK_EVEN_NIGHTS', 0.0) or 0.0)
+        ladder_params = algo_module.clean_params(pair.algo_params)
         rows = []
         for position in self.book.positions(pair.key):
+            # THIS position's side's exits: the ladder's, with the side's
+            # own values over them where it has any.
+            params = algo_module.for_side(ladder_params, position.side)
+            settings = ladder_settings
+            if params['tp_pct'] is not None:
+                settings = dict(ladder_settings,
+                                TP_TARGET_PCT_OF_MARGIN=params['tp_pct'])
+            pct = settings.get('TP_TARGET_PCT_OF_MARGIN')
+            margin = self.entry_margin(pair, position)
             levels = takeprofit.for_position(
                 position, md, pair, settings, margin, nights=nights,
                 carry_for=self.holding_carry(pair, position.side.value,
@@ -959,26 +1228,172 @@ class Coordinator:
                 tp = None
             _gross, net_pnl, _closing = mark_position(position, md, settings)
             be = levels.get('break_even')
-            stop = self._algo_stop_points(pair, position.quantity or 1.0,
-                                          position.spread_units, margin)
+            atr = None
+            if 'ATR' in (params['stop_mode'], params['target_mode']):
+                atr = self.entry_atr(pair, position)
+            stop = self._algo_stop_points(
+                pair, position.quantity or 1.0,
+                takeprofit.one_spread_units(position), margin, params=params)
+            if params['stop_mode'] == 'ATR':
+                # A multiple of the ATR at entry; unmeasured stays
+                # unmeasured - never a stop placed on nothing.
+                stop = (params['atr_stop_mult'] * atr
+                        if params['stop_loss_on'] and atr else None)
+            if params['target_mode'] == 'ATR':
+                tp = None if not atr or be is None else (
+                    be + params['atr_target_mult'] * atr
+                    if position.side is SpreadSide.BUY
+                    else be - params['atr_target_mult'] * atr)
             sl = None
             if stop is not None and be is not None:
                 sl = be - stop if position.side is SpreadSide.BUY \
                     else be + stop
+            # What each level is worth to the WHOLE position, net: break
+            # even is after every cost, so the distance from it times k
+            # is the net P&L closing there. Unpriced stays None.
+            units = position.spread_units
+            sign = 1.0 if position.side is SpreadSide.BUY else -1.0
+
+            def worth(level):
+                if level is None or be is None or not units:
+                    return None
+                return round(sign * (level - be) * units, 2)
             rows.append({'position_id': position.position_id,
                          'side': position.side.value,
+                         'source': getattr(position, 'source', MANUAL),
+                         'quantity': position.quantity,
                          'entry_spread': position.entry_spread,
                          'opened_at': position.opened_at,
+                         'age_sec': self.clock() - (position.opened_at
+                                                    or self.clock()),
                          'break_even': be, 'tp': tp, 'sl': sl,
-                         'net_pnl': net_pnl})
+                         'tp_money': worth(tp), 'sl_money': worth(sl),
+                         'net_pnl': net_pnl, 'entry_atr': atr,
+                         'stop_mode': params['stop_mode'],
+                         'target_mode': params['target_mode'],
+                         # THIS side's multiples, for the panel's note.
+                         'atr_stop_mult': params['atr_stop_mult'],
+                         'atr_target_mult': params['atr_target_mult'],
+                         **self._leg_marks(position, md)})
         return rows
 
-    def _algo_stop_points(self, pair, quantity, units, margin=None):
+    def entry_margin(self, pair, position):
+        """The margin per spread a position's TP and SL are a % of:
+        read from the terminals the first time it is priced, then
+        FROZEN on the position and saved, so the levels stay where they
+        were set. Until the terminals can price it, None — never a
+        guess."""
+        if position.entry_margin is None:
+            margin = (self.margin_detail(pair) or {}).get('money')
+            if margin:
+                position.entry_margin = float(margin)
+                self.remember(position)
+        return position.entry_margin
+
+    def entry_atr(self, pair, position):
+        """The ATR an open position's ATR stop and target are a multiple
+        of: read from the Algo's candles the first time it is priced,
+        then FROZEN on the position and saved. None until it can be
+        read - never a guess."""
+        if position.entry_atr is None:
+            params = algo_module.clean_params(pair.algo_params)
+            value = self.algos.atr(pair.key, params['atr_period'])
+            if value:
+                position.entry_atr = float(value)
+                self.remember(position)
+        return position.entry_atr
+
+    @staticmethod
+    def _leg_marks(position, md):
+        """Each leg's fill and the price it would CLOSE at now.
+
+        A leg bought closes on its bid, a leg sold on its offer — the
+        same opposite-touch rule the spread's own mark follows.
+        """
+        out = {}
+        for leg in ('a', 'b'):
+            fill = getattr(position, 'leg_' + leg, None)
+            entry = getattr(fill, 'price', None)
+            side = getattr(getattr(fill, 'side', None), 'value', None)
+            now = None
+            if md:
+                now = md.get(f'leg_{leg}_bid' if side == 'BUY'
+                             else f'leg_{leg}_ask')
+            out[f'leg_{leg}_side'] = side
+            out[f'leg_{leg}_entry'] = entry
+            out[f'leg_{leg}_now'] = now
+        return out
+
+    def algo_backtest(self, pair_key, days=5, compare=True):
+        """Replay `days` of MT5's own 15-minute bars through this
+        ladder's Algo, with its settings — and, beside it, the same run
+        with re-entry and the trend filter off, so what they change is
+        on the screen. Prices the trades exactly as the live Algo would:
+        today's bid-ask, the same costs, break-even, target and stop.
+        Sends nothing."""
+        from . import backtest
+        pair = self.config.pairs.get(pair_key)
+        if pair is None:
+            return {'ok': False, 'reason': f'no pair {pair_key}'}
+        days = max(1, min(int(days or 5), 30))
+        params = algo_module.clean_params(pair.algo_params)
+        rows, note = self.algos.history(pair, days)
+        if not rows:
+            return {'ok': False, 'reason': note or 'no history from MT5'}
+        md = self.market.get(pair_key)
+        if not md or md.get('long_spread') is None \
+                or md.get('short_spread') is None:
+            return {'ok': False, 'reason': 'no live price to measure the '
+                                           'bid-ask a trade would cross'}
+        width = md['long_spread'] - md['short_spread']
+        cost_in = self._algo_cost(pair)
+        k, qty = cost_in.get('k'), params['algo_qty']
+        settings = pair.exit_settings(self.config.settings)
+        margin = (self.margin_detail(pair) or {}).get('money')
+        terms = takeprofit.break_even_terms(pair, md, settings, qty, k, 0)
+        def target_for(pct):
+            if not pct:
+                return 0.0
+            if margin:
+                return takeprofit.points(
+                    float(pct) / 100.0 * float(margin) * float(qty), k, qty)
+            return None            # asked for, and cannot be priced
+        ladder_pct = settings.get('TP_TARGET_PCT_OF_MARGIN')
+        levels = {'fee_points': terms.get('added_points') or 0.0,
+                  'target_points': target_for(ladder_pct),
+                  'stop_points': self._algo_stop_points(pair, qty, k,
+                                                        margin)}
+        # Each side's own, where the side has its own exits.
+        levels['by_side'] = {}
+        for side in ('SELL', 'BUY'):
+            own = algo_module.for_side(params, side)
+            levels['by_side'][side] = {
+                'target_points': target_for(
+                    ladder_pct if own['tp_pct'] is None else own['tp_pct']),
+                'stop_points': self._algo_stop_points(pair, qty, k, margin,
+                                                      params=own)}
+        cutoff = PairSession(pair, self.config).cutoff
+        offset = self._offset_of(pair.account_a)
+        result = backtest.run(rows, params, width, cost_in, levels, offset,
+                              cutoff)
+        answer = {'ok': True, 'pair': pair_key, 'days': days,
+                  'width': width, 'levels': levels, **result}
+        if compare:
+            plain = dict(params, reentry_on=False, trend_on=False)
+            answer['without_protections'] = backtest.run(
+                rows, plain, width, cost_in, levels, offset,
+                cutoff)['summary']
+        return answer
+
+    def _algo_stop_points(self, pair, quantity, units, margin=None,
+                          params=None):
         """The stop loss's distance from break-even, in spread points:
         `stop_loss_pct` of the margin `quantity` spreads tie up, through
         the one `k`. None when the stop is off or cannot be priced —
-        never 0, which would put the stop AT break-even."""
-        params = algo_module.clean_params(pair.algo_params)
+        never 0, which would put the stop AT break-even. `params` are a
+        side's own (`algo.for_side`); None is the ladder's."""
+        if params is None:
+            params = algo_module.clean_params(pair.algo_params)
         if not params['stop_loss_on'] or not params['stop_loss_pct']:
             return None
         if margin is None:
@@ -992,15 +1407,91 @@ class Coordinator:
     def _algo_gates(self, pair, md):
         """What can hold an Algo ENTRY back on this pass."""
         health = (md or {}).get('guard_reason')
-        cutoff_min = None
         now = self.session_clock.broker_now()
-        if now is not None:
-            cutoff = now.replace(
-                hour=int(self.config.get('OVERNIGHT_CLOSE_HOUR', 16)),
-                minute=int(self.config.get('OVERNIGHT_CLOSE_MINUTE', 55)),
-                second=0, microsecond=0)
-            cutoff_min = (cutoff - now).total_seconds() / 60.0
-        return {'health': health, 'cutoff_min': cutoff_min}
+        # THIS ladder's hours: the minutes to its own next close, and -
+        # outside its session or in its break - why it may not enter.
+        hours = PairSession(pair, self.config)
+        cutoff_min = hours.minutes_to_close(now)
+        session = hours.entry_block(now)
+        # The day the Algo's limits are counted over: the broker's, as
+        # the session is; this machine's while that is unmeasured.
+        day = (now or datetime.now()).date().isoformat()
+        # The Algo's OWN size, sized exactly as its order would be. A
+        # size under either leg's minimum used to be found only when the
+        # order was sent — refused inside the program, every time, with
+        # nothing on the screen but an Algo that never traded.
+        size = None
+        if md is not None:
+            qty = algo_module.clean_params(pair.algo_params)['algo_qty']
+            size = (self.executor.size(pair, md, qty) or {}).get('reason')
+        return {'health': health, 'cutoff_min': cutoff_min, 'day': day,
+                'cost': self._algo_cost(pair), 'size': size,
+                'session': session, 'levels': self._levels_gate(pair, md)}
+
+    def _levels_gate(self, pair, md):
+        """The levels check for an entry, per SIDE when the sides have
+        their own exits: {'SELL': reason, 'BUY': reason}. One reason (or
+        None) when both sides would get the same answer."""
+        sell = self._levels_check(pair, md, 'SELL')
+        buy = self._levels_check(pair, md, 'BUY')
+        return sell if sell == buy else {'SELL': sell, 'BUY': buy}
+
+    def _levels_check(self, pair, md, side=None):
+        """Why the Algo's stop or target cannot be set for an entry NOW,
+        in words, or None.
+
+        An ATR level with no ATR yet is a level placed on nothing: the
+        entry waits. And a stop closer than the spread's own bid-ask is
+        one the trade opens already past - it is taken off at a loss the
+        moment it is on (2 October: in and stopped out in the same
+        second). Exits are never held by this. `side` reads that side's
+        own exits; None is the ladder's.
+        """
+        params = algo_module.clean_params(pair.algo_params)
+        if side is not None:
+            params = algo_module.for_side(params, side)
+        atr = None
+        if 'ATR' in (params['stop_mode'], params['target_mode']):
+            atr = self.algos.atr(pair.key, params['atr_period'])
+            if not atr:
+                return (f'levels: ATR({params["atr_period"]}) not measured '
+                        f'yet - it needs {params["atr_period"] + 1} closed '
+                        f'candles')
+        if not params['stop_loss_on'] or md is None:
+            return None
+        if params['stop_mode'] == 'ATR':
+            stop = params['atr_stop_mult'] * atr
+        else:
+            stop = self._algo_stop_points(
+                pair, params['algo_qty'],
+                sizing.spread_units(pair.clip_lots_b,
+                                    (pair.meta_b or {}).get('contract_size')),
+                params=params)
+        width = None
+        if md.get('long_spread') is not None and \
+                md.get('short_spread') is not None:
+            width = md['long_spread'] - md['short_spread']
+        if stop is not None and width is not None and stop <= width:
+            return (f'levels: the stop ({stop:.4f}) is inside the bid-ask '
+                    f'({width:.4f}) - the trade would open already stopped')
+        return None
+
+    def _algo_cost(self, pair):
+        """What one Algo trade costs besides the crossing, and `k`.
+
+        The same terms break-even uses: commission on both legs, both
+        ways, for the Algo's own qty, and the slippage budget. `k` is
+        money per 1.00 of spread for ONE spread; the crossing is priced
+        from the live touches by the filters themselves.
+        """
+        settings = pair.exit_settings(self.config.settings)
+        qty = algo_module.clean_params(pair.algo_params)['algo_qty']
+        allowance = settings.get('SLIPPAGE_ALLOWANCE')
+        return {'k': sizing.spread_units(
+                    pair.clip_lots_b, (pair.meta_b or {}).get('contract_size')),
+                'commission': takeprofit.commission(pair, settings, qty),
+                'slippage': (0.0 if allowance in (None, '')
+                             else float(allowance) * float(qty))}
 
     def holding_carry(self, pair, direction, nights):
         """What holding one spread `nights` nights costs, in money.
@@ -1276,9 +1767,9 @@ class Coordinator:
         pair = self.config.pairs.get(pair_key)
         if pair is None:
             return {'ok': False, 'reason': f'no pair {pair_key}'}
-        # Algo or Manual, never both — once the Algo can trade. Today it
-        # only signals and this is always None, so every click goes
-        # through exactly as it did before there was an Algo.
+        # Algo or Manual, never both: while this ladder's Algo is LIVE a
+        # NEW manual order is refused here, in words. Dry run and off
+        # refuse nothing. Closes do not come through this path.
         refusal = self.algos.manual_order_refusal(pair_key)
         if refusal:
             return self._refuse(pair_key, side, level, refusal)
@@ -1400,6 +1891,11 @@ class Coordinator:
         order = self.book.add_order(pair, side, level, quantity)
         self.quoter.group_for(pair, order)
         return {'ok': True, 'order': order.to_dict(), 'closed': closed}
+
+    def _working_order_refused(self, pair_key, reason, side, level):
+        if self.store is not None:
+            self.store.event('refused', pair_key, reason=reason, side=side,
+                             level=level)
 
     def _refuse(self, pair_key, side, level, reason, closed=()):
         if self.store is not None:
@@ -2159,7 +2655,7 @@ class Coordinator:
                             # the market is not a take-profit.
                             'exit': takeprofit.for_position(
                                 position, md, pair, settings,
-                                margin.get('money'),
+                                self.entry_margin(pair, position),
                                 nights=nights,
                                 carry_for=self.holding_carry(
                                     pair, position.side.value, nights))})
@@ -2214,33 +2710,28 @@ class Coordinator:
                 'exit_type': pair.exit_type.value,
                 'time_in_force': pair.time_in_force.value,
                 'overnight': pair.overnight.value,
-                # AutoRouting: on a fill, rest a working order to close
-                # at the take-profit, priced from the actual fill. A
-                # target and NO stop — the panel says so in words.
-                'auto_route': pair.auto_route,
-                # What the ladder's tick actually AMOUNTS to. The
-                # master switch is off by default, and a title bar
-                # reading AUTO off the pair's box alone said a fill
-                # would arm a target when nothing would.
-                'auto_route_on': bool(
-                    pair.auto_route
-                    and self.config.get('AUTO_ROUTE_ENABLED', False)),
-                'auto_route_master': bool(
-                    self.config.get('AUTO_ROUTE_ENABLED', False)),
+                # This ladder's own hours, and where in them it is now.
+                'session': PairSession(pair, self.config).describe(
+                    self.session_clock.broker_now()),
                 # The selected algo, and what it says. NONE publishes
                 # only its own name — a ladder running nothing costs
                 # nothing on the wire either.
                 'algo': (algo_module.ALGO if self.algos.is_on(key)
                          else pair.algo),
                 'algo_on': self.algos.is_on(key),
+                'algo_mode': self.algos.mode(key),
+                # ALGO positions nobody is managing: recovered after a
+                # restart, or left when the Algo went to dry run. Said
+                # on the screen until the Algo is LIVE again to adopt
+                # them, or the trader closes them.
+                'algo_unmanaged': [
+                    p.position_id for p in self.book.positions(key)
+                    if getattr(p, 'source', MANUAL) == ALGO_SOURCE
+                    and p.position_id not in self.algos.owned(key)],
                 'algo_params': algo_module.clean_params(pair.algo_params),
                 'algo_window': pair.algo_window,
                 'algo_block': self.algo_block(pair, md, row_exit),
                 'show_fair_window': pair.algo_window,   # the old name
-                'auto_route_armed': [
-                    {'position_id': o.position_id, 'level': o.level,
-                     'order_id': o.order_id, 'quantity': o.remaining}
-                    for o in self.book.orders(key) if o.position_id],
                 'default_quantity': pair.default_quantity,
                 # The largest Qty either broker will take, so the
                 # keypad can stop offering a size that is a guaranteed
@@ -2347,6 +2838,14 @@ class Coordinator:
                 'resting_closes': sum(
                     1 for order in self.book.orders(key)
                     if order.position_id),
+                # ...and the same for an ENTRY held here and crossed at
+                # its level (WORKING_ORDERS = TRIGGER, the default).
+                'held_entries': sum(
+                    1 for quote in self.quoter.snapshot(key)
+                    if quote.get('held')
+                    for _ in quote.get('orders') or ()),
+                'working_orders': 'TRIGGER' if self.quoter.triggers()
+                                  else 'QUOTE',
                 'positions': positions,
                 'net_position': net, 'avg_entry': avg_entry,
                 'open_pnl': open_pnl if positions else None,
@@ -2468,7 +2967,8 @@ class Coordinator:
         """
         events = []
         for key, pair in self.config.pairs.items():
-            if not self.session_clock.due(key):
+            hours = PairSession(pair, self.config)
+            if not self.session_clock.due(key, hours.cutoff):
                 continue
             self.session_clock.mark(key)
             # COUNT WHAT WAS ACTUALLY CANCELLED, not what was asked.
@@ -2505,10 +3005,15 @@ class Coordinator:
                 # actually in profit.
                 _gross, net_pnl, _closing = mark_position(
                     position, md, pair.exit_settings(self.config.settings))
+                # On the BROKER's clock - the one the cutoff fired on.
+                # This read this machine's own, so on a box hours behind
+                # the broker the cutoff fired and the overnight rule then
+                # found it "not yet", every day: EXIT_ALWAYS closed
+                # nothing.
                 verdict = overnight_action(
-                    pair.overnight, net_pnl, self.session_clock.now(),
-                    self.config.get('OVERNIGHT_CLOSE_HOUR'),
-                    self.config.get('OVERNIGHT_CLOSE_MINUTE'))
+                    pair.overnight, net_pnl,
+                    self.session_clock.broker_now() or
+                    self.session_clock.now(), *hours.cutoff)
                 if verdict is None:
                     continue
                 # Urgent: market, by ticket, never resting. And no guard

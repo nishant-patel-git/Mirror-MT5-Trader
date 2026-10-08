@@ -132,6 +132,34 @@ CREATE INDEX IF NOT EXISTS events_at ON events (at);
 -- band from nothing. Keyed by the beta they were built with: a spread
 -- of B - 0.98 x A is a different series from B - 1.00 x A, and mixing
 -- the two draws a band around neither.
+-- The Algo's live warm-up, per ladder: seconds of live prices watched,
+-- and when the last one counted. Read back when the Algo is switched on
+-- again soon after a restart, so an update does not cost 90 minutes.
+CREATE TABLE IF NOT EXISTS algo_warmup (
+    pair_key        TEXT PRIMARY KEY,
+    live_sec        REAL NOT NULL,
+    at              REAL NOT NULL
+);
+
+-- The Analysis tab's what-if-held shadows: a closed position marked on
+-- its own entry for an hour more. One JSON row per watch, so a restart
+-- picks up the ones still running.
+CREATE TABLE IF NOT EXISTS shadow_watches (
+    position_id     TEXT PRIMARY KEY,
+    pair_key        TEXT,
+    armed_at        REAL NOT NULL,
+    done            INTEGER NOT NULL DEFAULT 0,
+    data            TEXT NOT NULL
+);
+
+-- The Analysis tab's z-score excursion counters, per ladder, since the
+-- last reset.
+CREATE TABLE IF NOT EXISTS z_excursions (
+    pair_key        TEXT PRIMARY KEY,
+    at              REAL NOT NULL,
+    data            TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS algo_candles (
     pair_key        TEXT NOT NULL,
     timeframe_sec   REAL NOT NULL,
@@ -186,6 +214,17 @@ class Store:
         # MANUAL or ALGO. NULL on a row written before it existed, which
         # reads back as MANUAL: nothing traded by itself then either.
         ('positions', 'source', 'TEXT'),
+        # The margin per spread frozen when the position was first
+        # priced; NULL on older rows, which freeze on their next read.
+        ('positions', 'entry_margin', 'REAL'),
+        # The trade's best and worst net P&L while open (MFE / MAE),
+        # and the minute each was reached. NULL before they were kept.
+        ('positions', 'peak_pnl', 'REAL'),
+        ('positions', 'peak_min', 'REAL'),
+        ('positions', 'trough_pnl', 'REAL'),
+        ('positions', 'trough_min', 'REAL'),
+        # The ATR frozen when the position was first priced.
+        ('positions', 'entry_atr', 'REAL'),
     )
 
     def _add_missing_columns(self, connection):
@@ -214,8 +253,9 @@ class Store:
                     exit_spread, spread_units, order_type, opened_at,
                     closed_at, close_reason, realized_pnl, entry_slippage,
                     exit_slippage, click_to_on_ms, naked_ms, leg_a, leg_b,
-                    source)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    source, entry_margin, peak_pnl, peak_min, trough_pnl,
+                    trough_min, entry_atr)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (row['position_id'], row['pair_key'], row['side'],
                  row['quantity'], row['entry_spread'], row['exit_spread'],
                  row['spread_units'], row['order_type'], row['opened_at'],
@@ -223,7 +263,10 @@ class Store:
                  row['entry_slippage'], row['exit_slippage'],
                  row['click_to_on_ms'], row.get('naked_ms'),
                  json.dumps(row['leg_a']), json.dumps(row['leg_b']),
-                 row.get('source')))
+                 row.get('source'), row.get('entry_margin'),
+                 row.get('peak_pnl'), row.get('peak_min'),
+                 row.get('trough_pnl'), row.get('trough_min'),
+                 row.get('entry_atr')))
         return position
 
     def remember_tickets(self, rows):
@@ -372,15 +415,22 @@ class Store:
                 params).fetchall()
         return [dict(row) for row in rows]
 
-    def fill_totals(self, pair_key=None):
+    def fill_totals(self, pair_key=None, ours_only=False):
         """What the journal adds up to — from the BROKER's numbers.
 
         This is the honest counterweight to our own marks: commission
         and swap are the broker's, and profit on a closing deal is what
-        MT5 itself booked.
+        MT5 itself booked. Over the WHOLE journal - `first_ms` and
+        `last_ms` say which stretch that is - and, with `ours_only`,
+        over this desk's own fills, the same rows the table shows.
         """
-        clause = 'WHERE pair_key = ?' if pair_key else ''
-        params = (pair_key,) if pair_key else ()
+        where, params = [], []
+        if pair_key:
+            where.append('pair_key = ?')
+            params.append(pair_key)
+        if ours_only:
+            where.append('is_ours = 1')
+        clause = ('WHERE ' + ' AND '.join(where)) if where else ''
         with self._connect() as connection:
             row = connection.execute(
                 f"""SELECT COUNT(*) AS fills,
@@ -395,9 +445,20 @@ class Store:
                            COUNT(commission) AS commission_measured,
                            SUM(swap) AS swap,
                            COUNT(swap) AS swap_measured,
-                           COALESCE(SUM(profit), 0) AS profit
+                           COALESCE(SUM(profit), 0) AS profit,
+                           MIN(broker_time_ms) AS first_ms,
+                           MAX(broker_time_ms) AS last_ms
                     FROM fills {clause}""", params).fetchone()
-        return dict(row)
+            # ...and the same, account by account: a journal that has
+            # seen more than one pair of accounts adds them all up.
+            accounts = connection.execute(
+                f"""SELECT account, COUNT(*) AS fills,
+                           COALESCE(SUM(profit), 0) AS profit,
+                           MIN(broker_time_ms) AS first_ms,
+                           MAX(broker_time_ms) AS last_ms
+                    FROM fills {clause}
+                    GROUP BY account ORDER BY account""", params).fetchall()
+        return dict(row, by_account=[dict(a) for a in accounts])
 
     def fills_between(self, from_ms=None, to_ms=None, ours_only=True):
         """What the BROKER filled in a window, on the broker's stamps.
@@ -466,6 +527,25 @@ class Store:
                 f'bucket, close, source) VALUES (?,?,?,?,?,?)', rows)
         return len(rows)
 
+    def save_warmup(self, pair_key, live_sec, at):
+        with self._connect() as connection:
+            connection.execute(
+                'INSERT OR REPLACE INTO algo_warmup (pair_key, live_sec, at) '
+                'VALUES (?,?,?)', (pair_key, float(live_sec), float(at)))
+
+    def warmup(self, pair_key):
+        """(live_sec, at) last saved for this ladder, or None."""
+        with self._connect() as connection:
+            row = connection.execute(
+                'SELECT live_sec, at FROM algo_warmup WHERE pair_key = ?',
+                (pair_key,)).fetchone()
+        return None if row is None else (row['live_sec'], row['at'])
+
+    def clear_warmup(self, pair_key):
+        with self._connect() as connection:
+            connection.execute('DELETE FROM algo_warmup WHERE pair_key = ?',
+                               (pair_key,))
+
     def candles(self, pair_key, timeframe_sec, beta, limit=500):
         """The newest `limit` closed candles, oldest first."""
         with self._connect() as connection:
@@ -475,6 +555,65 @@ class Store:
                 'LIMIT ?', (pair_key, float(timeframe_sec), float(beta),
                             int(limit))).fetchall()
         return [(row['bucket'], row['close']) for row in reversed(rows)]
+
+    # -- the Analysis tab ------------------------------------------------------
+
+    def save_shadow(self, watch):
+        with self._connect() as connection:
+            connection.execute(
+                'INSERT OR REPLACE INTO shadow_watches '
+                '(position_id, pair_key, armed_at, done, data) '
+                'VALUES (?,?,?,?,?)',
+                (watch['position_id'], watch.get('pair_key'),
+                 watch['armed_at'], 1 if watch.get('done') else 0,
+                 json.dumps(watch, default=str)))
+
+    def shadows(self, active_only=False, since=None, pair_key=None,
+                limit=500):
+        where, params = [], []
+        if active_only:
+            where.append('done = 0')
+        if since is not None:
+            where.append('armed_at >= ?')
+            params.append(since)
+        if pair_key:
+            where.append('pair_key = ?')
+            params.append(pair_key)
+        clause = ('WHERE ' + ' AND '.join(where)) if where else ''
+        with self._connect() as connection:
+            rows = connection.execute(
+                f'SELECT data FROM shadow_watches {clause} '
+                'ORDER BY armed_at DESC LIMIT ?', params + [limit]).fetchall()
+        return [json.loads(row['data']) for row in rows]
+
+    def save_excursions(self, pair_key, data):
+        with self._connect() as connection:
+            connection.execute(
+                'INSERT OR REPLACE INTO z_excursions (pair_key, at, data) '
+                'VALUES (?,?,?)', (pair_key, self.clock(), json.dumps(data)))
+
+    def excursions(self):
+        with self._connect() as connection:
+            rows = connection.execute(
+                'SELECT pair_key, data FROM z_excursions').fetchall()
+        return {row['pair_key']: json.loads(row['data']) for row in rows}
+
+    def events_between(self, kinds, start=None, end=None):
+        """Audit-trail rows of these kinds, oldest first."""
+        where = ['kind IN (%s)' % ','.join('?' * len(kinds))]
+        params = list(kinds)
+        if start is not None:
+            where.append('at >= ?')
+            params.append(start)
+        if end is not None:
+            where.append('at <= ?')
+            params.append(end)
+        with self._connect() as connection:
+            rows = connection.execute(
+                'SELECT * FROM events WHERE ' + ' AND '.join(where) +
+                ' ORDER BY at', params).fetchall()
+        return [dict(row, detail=json.loads(row['detail'] or '{}'))
+                for row in rows]
 
     def events(self, kind=None, limit=200):
         clause = 'WHERE kind = ?' if kind else ''

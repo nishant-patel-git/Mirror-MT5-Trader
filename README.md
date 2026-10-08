@@ -1,8 +1,9 @@
 # MT5-Trader
 
 A **spread price-ladder trading terminal for MetaTrader 5** — a manual tool,
-with an optional per-ladder **Algo signal** beside it. No automatic entries or
-exits: the signal says what it would do, and the trader decides. A human looks at a ladder
+with an optional per-ladder **Algo**: in Signals mode it signals and you trade; in LIVE,
+switched on and confirmed by a person, it trades that ladder by its rules and
+the ladder takes no manual orders while it does. A human looks at a ladder
 of spread prices, clicks a price, and an order exists at that price.
 
 Each ladder trades one pair of instruments across **two MT5 accounts** (Leg A on
@@ -31,7 +32,7 @@ The spec's build order, in order. Steps 1-8 are in:
 | `mt5trader/executor.py` | MARKET entry both legs, the 2.0s escalation, unwind by ticket, ticket-based closes |
 | `mt5trader/book.py` | Synthetic orders one-per-click, positions, net and average |
 | `mt5trader/coordinator.py` | The poll loop, the guards, the sweeps, one status snapshot for every panel |
-| `mt5trader/quoter.py` | The synthetic LIMIT path: quote one leg, re-peg off the OTHER leg by MODIFY, cross on fill |
+| `mt5trader/quoter.py` | Working orders: held here and crossed on both legs when the spread reaches the level (default); the old one-leg quote behind `WORKING_ORDERS = QUOTE`; resting closes |
 | `mt5trader/reconcile.py` | Orphans and ghosts, three strikes, contract-size-correct P&L |
 | `mt5trader/session.py` | The one cutoff: DAY orders die, each ladder's overnight rule decides |
 | `mt5trader/slippage.py` | The session window on the broker's clock, and the slippage report over it |
@@ -90,6 +91,17 @@ clock, measured from the terminal rather than configured, and the page
 shows the broker's time and its offset from the machine. Unmeasured is
 not zero: with no measurement the cutoff does not fire, and says so.
 
+**Each ladder keeps its own hours** (ladder Settings: *Session open*,
+*Session close*, *Break start*, *Break end*, all HH:MM broker time). The
+close is that ladder's cutoff - DAY orders cancelled, the Overnight rule,
+the Algo's last entry, the backtest and the END OF DAY message. Outside
+the session and in the break the Algo takes no new entry (exits are never
+held), and a silent feed is expected rather than warned about or
+re-subscribed. Blank close is the desk-wide `OVERNIGHT_CLOSE_HOUR:MINUTE`
+(16:55); blank open is any time before the close; an open after the close
+is a session over midnight; the break takes both ends or neither. A
+ladder with nothing set behaves exactly as before.
+
 **Accounts** is the fifth monitor tab: equity, balance, credit, open
 P&L, margin used and free, margin level against the broker's own call
 and stop-out levels, and this system's own lots and units on each
@@ -97,6 +109,44 @@ account. With two brokers there is no combined margin — each posts its
 own and the pair can only be carried by the **weaker** of the two, so
 that account is named rather than averaged into a total that reads
 comfortable.
+
+**Working orders (LIMIT) are held by the desk.** A LIMIT click - or a
+MARKET click away from the touch - puts NOTHING at the broker. The desk
+holds the level, and when the EXECUTABLE spread reaches it (the Sell
+spread at or over a SELL, the Buy spread at or under a BUY) both legs
+cross at market together, through the same path a market click takes.
+It fills when the SPREAD gets there. It used to be a real limit on one
+leg with the other crossed on the fill; on two legs that move together
+(spot gold against the gold future) that limit filled on a move in gold,
+not in the spread, and the leg crossed after had moved the same way -
+live, a SELL at 28.30 went on at 26.84, every fill the same direction.
+Just before sending, both legs' prices are read AGAIN, fresh, and the
+order goes only if the spread is still at the level - a level the poll
+saw for an instant and the market has already left is not traded, and
+the order keeps working (`RECHECK_BEFORE_SEND`, on; the Working orders
+panel counts the flickers it skipped). A held order costs both legs' bid-ask and works only while the desk is
+running (as the old one did - our pendings are swept at shutdown). A
+stale or jumping price holds it; one that reaches its level and is
+refused ends there, in the broker's words, and is journalled. The old
+quote is still behind the desk setting `WORKING_ORDERS = QUOTE` for a
+pair whose legs genuinely move apart.
+
+**Each side can have its own exits.** Under the ATR settings, a "Per
+side" block gives H to L and L to H their own SL by / TP by (% or ATR),
+SL %, TP % and ATR multiples. Blank is the ladder's own value - never a
+zero - and a trade keeps the levels it was given when it opened. The
+entry check (a stop inside the bid-ask, an ATR not yet measured) is made
+per side, so one side being held never holds the other; the backtest
+sizes each trade from its own side.
+
+**The Algo's take-profit is confirmed before it is sent.** Both legs are
+read again and the close goes only if the fresh closing price still
+reaches the target, and on those prices - one poll's bad print once
+"reached" oil's target 0.16 past it and the close filled 0.235 back,
+banking $0.10 of a $3.90 target. Held, it is tried again in 5 s while
+the Algo still sees the target; the stop stands throughout. The stop
+loss, the cutoff, a kill and every manual close are never re-checked
+(`RECHECK_TAKE_PROFIT`, on).
 
 **Slippage — the report over a real session.** The sixth monitor tab
 reports the session you are in, cut at the cutoff on the **broker's**
@@ -115,9 +165,9 @@ empty cells rather than zeros where nothing was measured.
 
 ## The Algo — a signal, not a trader
 
-Per ladder, picked in the ladder's settings (**Window: None / Fair spread /
-Algo**). It is OFF after every restart, and while it is on the ladder trades
-exactly as before — it adds a reading, not a lock.
+Per ladder, picked in the ladder's settings (**Algo: Off / Fair spread / Signals /
+LIVE**). It is OFF after every restart. In Signals the ladder trades exactly
+as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
 
 - **The band.** Candles of the spread `B - beta x A` from the mid (15-minute,
   N = 20 by default). Middle = EMA(N), Pine-style; sigma = population stdev of
@@ -127,6 +177,46 @@ exactly as before — it adds a reading, not a lock.
   terminals will not give history, candles are built from the live price and
   the window says `candles 7/20`. Closed candles are saved, so a restart keeps
   them.
+- **Warm-up.** History fills the band at once, but no entry is taken until the
+  Algo has watched `Warm-up (min)` of LIVE prices since it was turned on — 90 by
+  default, 0 = off. Time with no price does not count; Signals time does, so a
+  ladder can warm up in DRY and go LIVE without waiting again. Turning the Algo
+  off starts it over. A restart does not: switched back on within 15 minutes of
+  the last live price it watched (an update, a quick restart), it carries on
+  where it was; after a longer gap it starts again. The window shows `Live ... warming up 23/90 min`.
+- **Staying out of a trend.** A mean-reversion Algo that sells every touch of
+  the upper band is run over by a spread climbing along it. Two protections,
+  on by default, each switchable per ladder:
+  - *Re-entry* — a side is ARMED when its stretch reaches Entry z and enters
+    only when the spread comes back inside by `Re-entry back by` (2.0 armed,
+    1.5 enters). A spread riding the band never comes back, so it gives no
+    entry. The entry window ends `Re-entry window %` of the way back to the
+    mean (50: between 1.50 and 0.75); past that the side disarms, so a
+    spread armed hours ago is never an "entry" sitting on the mean. 100 is
+    the old window, all the way to the mean.
+  - *Trend filter* — if the band's middle moved more than `Trend filter (σ)`
+    over `Trend lookback (min)` (1σ over 120 min), no entry against it: no
+    H to L while it rises, no L to H while it falls. The panel's Trend badge
+    shows ↑ / ↓ / –.
+- **Backtest.** *Run backtest* in the Algo window replays the last 3–10 days of
+  MT5's own 15-minute bars through this ladder's Algo — the same decision
+  code, filters, costs, break-even, target and stop — and lists what it would
+  have traded, beside the same run without re-entry and the trend filter. It
+  sends nothing. It sees one price per candle (its close) and today's bid-ask.
+- **Analysis tab** (Trading Monitor → *Analysis*), for trades opened in the
+  last day / 7 / 30 days or the whole record, one ladder or all:
+  summary (trades, net P&L, win rate); drawdown and each trade's MAE / MFE
+  (its worst and best net P&L while open, and when); take / hold calibration
+  (where trades peaked, a suggested take near the 65th percentile and a
+  max-hold at the median minute winners peaked); a *what-if-held* shadow that
+  keeps marking a position for an hour after any exit that was not its target
+  (did it come back to break-even? to the target?); the Algo's backtest for
+  the chosen ladder; z-score excursions on the Algo's band (touches of ±2σ and
+  ±3σ, and 2σ stretches that came back to the mean); and the trade journal
+  with the Algo's z at both ends. Built from what is recorded — it sends
+  nothing. Best/worst points and shadows are kept from this version on.
+- **Direction.** Both (default), H to L only, or L to H only — entries only;
+  an open position is always managed to its exit.
 - **Entry.** SELL when the z of the bid-side spread is >= +2.5, BUY when the z
   of the offer-side spread is <= -2.5, held for 3 fresh quotes, only on a flat
   ladder. Held back — and the reason shown — by a stale or jumping price, too
@@ -138,17 +228,58 @@ exactly as before — it adds a reading, not a lock.
   less 2% of margin (on by default, per ladder). Optional and OFF by default: a
   z-stop, back to the mean in profit, and a time stop in candles. No gate ever
   holds an exit.
+- **Stop and target sized by ATR** (Algo settings: *Stop sized by*, *Target
+  sized by*: % of margin or ATR; *ATR period*, default 14; *Stop x ATR*, 2.0;
+  *Target x ATR*, 1.5). ATR is the spread's average true range, close to
+  close with Wilder's smoothing, on the Algo's own closed candles - a spread
+  candle has no honest high or low, the legs make theirs at different
+  moments. Measured from break-even and frozen when the trade opens (saved,
+  so a restart keeps it). In ATR mode no entry is taken until the ATR is
+  measured (period + 1 closed candles), and in either mode an entry whose
+  stop would sit inside the spread's bid-ask - a trade that opens already
+  stopped - is refused, with the reason. The Statistics panel shows the
+  ATR; the backtest sizes each simulated trade from the ATR at its entry.
 - **In position.** The window names it — `in BUY @ 59.11 — TP 59.31 · SL
   58.93` — and draws an SL ◄ entry ► TP bar with the closing price on it.
-- **Display.** In the Fair Spread window's own slots: the B/S rows carry z and
-  the band level, the hint line says what the Algo says. No new window.
+- **The filters** (from the stat-arb system's algo), every one judged before an
+  entry in Signals and LIVE alike — and one that cannot be priced blocks:
+  - *Edge*: expected capture (0.5 x |z| x sigma, in money) at least 1.5x the
+    round-trip cost — the spread's bid-ask crossed both ways, commission both
+    legs both ways, and the slippage budget.
+  - *Regime*: no entry while the spread is TRENDING (Kaufman efficiency ratio
+    >= 0.6 and <= 4 crossings of its mean).
+  - *Half-life band*: off until bounds (minutes) are typed.
+  - *Ready*: collecting candles, or a warm-up not yet done, always blocks.
+- **The switch** is on each ladder's title bar — ALGO OFF / ALGO DRY / ALGO
+  LIVE; click it for the menu. LIVE still asks to confirm.
+- **The Algo window** opens while the Algo is on, with the stat-arb dashboard's
+  three panels: *Signal & Position* (sell/buy spread tiles with their z and
+  entry line, FLAT/LONG/SHORT, and in a position the entry, each leg's fill and
+  close-now price, BE/TP/SL and the SL-entry-TP bar), *Statistics* (EMA mean,
+  sigma, half-life, regime, candles, band, data progress) and *Filters* (Edge /
+  Regime / Ready badges, capture / cost against the requirement, round
+  trip, the day's counts, and the last signal blocked and why).
+  Closing it turns the Algo off.
 - **Record.** Every signal goes to the audit trail; *Algo signals CSV* on the
   Fills tab exports them, with what an exit would have made after costs.
-- **Execution later.** What the Algo decides leaves as an intent to a sink.
-  Today's sink records it and sends nothing (DRY_RUN is the only mode).
-  Execution is a second sink behind the same seam, plus the order-path lock
-  (`AlgoDesk.manual_order_refusal`) — positions already carry a MANUAL/ALGO
-  source tag for it.
+- **Signals or LIVE.** *Algo: Signals* records signals and sends nothing; you
+  trade. An entry it would take, and YOUR position ("YOUR SHORT" in its
+  window) reaching its target or stop, is told once: a toast that stays until
+  dismissed, a chime, the ladder flashing, and on Telegram. ENTRY / BE / TP /
+  SL are tagged on the ladder's prices.
+  *Algo: LIVE* (confirmed every time) trades: MARKET both legs in, closes by
+  ticket, through the same executor a click uses, at its own **Algo qty**
+  (spreads; one spread = the ladder's Leg A / Leg B lots — 0.01 for testing).
+  One position at a time.
+- **Algo or Manual, never both.** While a ladder is LIVE a new manual order on
+  it is refused on the engine, in words; CLOSE ALL and the positions list still
+  close. LIVE is refused while the ladder holds a manual position or a working
+  order. Turning LIVE off with a position asks: close it now, or hand it to
+  manual. A restart comes back OFF; the Algo's position is shown as not
+  managed until LIVE adopts it again.
+- **The day's limits** stop entries (never exits) for the rest of the day: max
+  trades (10), losses in a row (3), and a daily loss limit (off until set). A
+  refused entry waits out the cooldown; a failed exit is retried every 5s.
 
 ## One click is one order
 
@@ -288,6 +419,26 @@ python run_leg.py --config config.json --account leg_a
 python run_leg.py --config config.json --account leg_b
 python run_coordinator.py --config config.json
 ```
+
+## Logs, and "why did the Algo not trade?"
+
+Every process writes to `logs/` beside `config.json`: `coordinator.log`,
+`web.log`, `leg-<account>.log`, `launcher.log`. Each also has a
+**`<name>.problems.log`** with warnings and errors only — open that one
+first. The screen's own polling is not logged (it was a line three times a
+second); button presses and failed requests still are.
+
+For the Algo, the journal answers it directly:
+
+```
+python tools/algo_report.py              # the last 24 hours
+python tools/algo_report.py --hours 72
+```
+
+Per ladder: when it was switched, every signal it acted on and what became
+of the order (done, or refused in the refusal's own words), and every
+signal it held back with a count per reason — the cutoff, the warm-up, a
+filter, an Algo qty the broker cannot trade.
 
 ## Tests
 

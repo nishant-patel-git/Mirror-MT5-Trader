@@ -237,6 +237,35 @@ DEFAULT_SETTINGS = {
     #: Ladder row height in pixels. 17 is the reference screen's; a
     #: bigger target is a faster, safer click on a large monitor.
     'ROW_HEIGHT_PX': 17,
+    #: What backs a WORKING ORDER (a LIMIT click, or a MARKET click
+    #: away from the touch) until it fills.
+    #:
+    #: TRIGGER (the default): NOTHING at the broker. The level is held
+    #: here and, when the EXECUTABLE spread reaches it - the Sell
+    #: spread at or over a SELL, the Buy spread at or under a BUY -
+    #: both legs cross at MARKET together, through the same path a
+    #: market click takes. It fills when the SPREAD gets there.
+    #:
+    #: QUOTE: the old way - a real limit on one leg, the other crossed
+    #: when it fills. It earns one leg's bid-ask, but on two legs that
+    #: move together (spot gold against the gold future) the limit
+    #: fills on a move in GOLD, not in the spread, and the leg crossed
+    #: afterwards has moved the same way: live, a SELL at 28.30 went
+    #: on at 26.84, every fill the same direction. Kept for a pair
+    #: whose legs really are independent; not on the screen.
+    'WORKING_ORDERS': 'TRIGGER',
+    #: Before a held working order is sent, read BOTH legs' prices
+    #: again, fresh, and send only if the spread is STILL at the level.
+    #: The poll that saw the level can be up to a poll old; a spread
+    #: that only flickered there has gone back by the time the orders
+    #: land, and that fill is the bad one. Costs one tick read per leg,
+    #: only at the moment of sending. Off sends on the poll's prices.
+    'RECHECK_BEFORE_SEND': True,
+    #: The same for the Algo's TAKE-PROFIT, and only that exit: both
+    #: legs read again, and the close goes only if the fresh closing
+    #: price still reaches the target. A stop, the cutoff, a kill and
+    #: every manual close are never re-checked - nothing waits there.
+    'RECHECK_TAKE_PROFIT': True,
     #: Re-peg dead band, in ladder increments. Every MODIFY loses queue
     #: position, so re-pricing three times a second guarantees you are
     #: never at the front of a queue — which defeats quoting entirely
@@ -312,12 +341,6 @@ DEFAULT_SETTINGS = {
     #: on the screen and one wrong sign in a swap field is all it takes
     #: to display a licence to print money.
     'CARRY_RATE_PCT': None,
-    #: The master switch for AutoRouting. OFF, no ladder arms a target
-    #: however its own box is ticked — the one place a desk can stand
-    #: every automatic order down before a session without going round
-    #: the ladders one at a time. It is deliberately not per pair: a
-    #: switch you have to find twice is a switch that gets missed once.
-    'AUTO_ROUTE_ENABLED': False,
 
     # --- housekeeping -------------------------------------------------
     'RECONCILE_INTERVAL_SEC': 20.0,
@@ -391,12 +414,13 @@ class PairConfig:
                  expiry=None, expiry_a=None,
                  swap_a_long_per_lot=None, swap_a_short_per_lot=None,
                  swap_b_long_per_lot=None, swap_b_short_per_lot=None,
-                 auto_route=False, commission_per_lot_a=None,
+                 commission_per_lot_a=None,
                  commission_per_lot_b=None, slippage_allowance=None,
                  break_even_nights=None, tp_target_pct_of_margin=None,
                  carry_rate_pct=None,
                  show_fair_window=False, algo=None, algo_window=None,
-                 algo_params=None):
+                 algo_params=None, session_open=None, session_close=None,
+                 break_start=None, break_end=None):
         self.key = key
         self.name = name or key
         self.leg_a = dict(leg_a or {})      # {'account': ..., 'symbol': ...}
@@ -496,10 +520,6 @@ class PairConfig:
         self.swap_a_short_per_lot = _blank_to_none(swap_a_short_per_lot)
         self.swap_b_long_per_lot = _blank_to_none(swap_b_long_per_lot)
         self.swap_b_short_per_lot = _blank_to_none(swap_b_short_per_lot)
-        #: AutoRouting: on a fill, rest a working order to CLOSE at the
-        #: take-profit level, priced from the actual executed spread.
-        #: Default OFF (spec section 5.4).
-        self.auto_route = bool(auto_route)
         #: What a trade on THIS ladder costs, and where it therefore
         #: gets out. Per ladder, not per system: a gold basis and a
         #: WTI/Brent differential are charged different commissions,
@@ -528,6 +548,16 @@ class PairConfig:
         #: `algo.clean_params`. Whether the Algo is ON is not here: that
         #: is held by the running engine and is off after every restart.
         self.algo_params = _clean_algo_params(algo_params)
+        #: THIS ladder's trading hours, 'HH:MM' on the BROKER's clock
+        #: (see `session.PairSession`). Blank close is the desk-wide
+        #: OVERNIGHT_CLOSE; blank open is "any time before the close";
+        #: the break takes both ends or neither. An oil future and a
+        #: gold CFD do not keep the same day.
+        from .session import clean_hhmm
+        self.session_open = clean_hhmm(session_open)
+        self.session_close = clean_hhmm(session_close)
+        self.break_start = clean_hhmm(break_start)
+        self.break_end = clean_hhmm(break_end)
         #: Cached MT5 metadata per leg, refreshed by the coordinator.
         self.meta_a = {}
         self.meta_b = {}
@@ -662,7 +692,7 @@ class PairConfig:
     #: Blocking these behind a restart is what put "an assets change
     #: requires a restart" ten lines above a live trade while the values
     #: sat saved and correct.
-    HOT_FIELDS = (('expiry', 'expiry_a', 'auto_route',
+    HOT_FIELDS = (('expiry', 'expiry_a',
                    'swap_a_long_per_lot', 'swap_a_short_per_lot',
                    'swap_b_long_per_lot', 'swap_b_short_per_lot',
                    'order_type', 'exit_type',
@@ -674,7 +704,9 @@ class PairConfig:
                    'contract_size_a', 'contract_size_b',
                    'max_quote_age_sec',
                    'algo_window', 'show_fair_window', 'pair_type',
-                   'algo_params')
+                   'algo_params',
+                   'session_open', 'session_close',
+                   'break_start', 'break_end')
                   + tuple(EXIT_FIELDS))
 
     def apply_hot(self, raw):
@@ -691,13 +723,17 @@ class PairConfig:
             if field in self.EXIT_FIELDS or (
                     field.startswith('swap_') and field.endswith('_per_lot')):
                 value = _blank_to_none(value)
-            elif field in ('auto_route', 'algo_window', 'show_fair_window'):
+            elif field in ('algo_window', 'show_fair_window'):
                 field = 'algo_window' if field == 'show_fair_window' else field
                 value = bool(value)
             elif field == 'pair_type':
                 value = pair_type_name(value)
             elif field == 'algo_params':
                 value = _clean_algo_params(value)
+            elif field in ('session_open', 'session_close', 'break_start',
+                           'break_end'):
+                from .session import clean_hhmm
+                value = clean_hhmm(value)
             elif field == 'order_type':
                 value = _choice(OrderType, value, self.order_type.value,
                                 self.key, field)
@@ -756,7 +792,6 @@ class PairConfig:
             'swap_a_short_per_lot': self.swap_a_short_per_lot,
             'swap_b_long_per_lot': self.swap_b_long_per_lot,
             'swap_b_short_per_lot': self.swap_b_short_per_lot,
-            'auto_route': self.auto_route,
             'commission_per_lot_a': self.commission_per_lot_a,
             'commission_per_lot_b': self.commission_per_lot_b,
             'slippage_allowance': self.slippage_allowance,
@@ -765,6 +800,9 @@ class PairConfig:
             'carry_rate_pct': self.carry_rate_pct,
             'algo': self.algo, 'algo_window': self.algo_window,
             'algo_params': dict(self.algo_params),
+            'session_open': self.session_open,
+            'session_close': self.session_close,
+            'break_start': self.break_start, 'break_end': self.break_end,
         }
 
     @classmethod
