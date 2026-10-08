@@ -69,6 +69,11 @@ PROBLEM_SETTLE_SEC = 20.0
 DIRECTIONS = [('BOTH', 'Both'), ('H_TO_L', 'H to L only'),
               ('L_TO_H', 'L to H only')]
 LEVEL_MODES = [('MARGIN', '% of margin'), ('ATR', 'ATR')]
+#: A side's own sizing: SAME is "the ladder's own", saved as blank.
+SIDE_MODES = [('SAME', 'Same as ladder'), ('MARGIN', '% of margin'),
+              ('ATR', 'ATR')]
+#: The words that clear a side's own number back to the ladder's.
+SAME_WORDS = ('', 'same', 'none', 'clear', 'off', '-')
 OVERNIGHT = [('ALLOW', 'Hold overnight'),
              ('EXIT_IF_PROFIT', 'Exit if in profit'),
              ('EXIT_ALWAYS', 'Exit anyway')]
@@ -125,6 +130,20 @@ FIELDS = [
     ('session_close', 'Session close', 'pair', 'time'),
     ('break', 'Daily break', 'pair', 'range'),
 ]
+# Each side's own exits: blank (SAME) is the ladder's own value.
+for _suffix, _side in (('sell', 'H to L'), ('buy', 'L to H')):
+    FIELDS += [
+        (f'stop_mode_{_suffix}', f'{_side}: stop sized by', 'algo',
+         SIDE_MODES),
+        (f'target_mode_{_suffix}', f'{_side}: target sized by', 'algo',
+         SIDE_MODES),
+        (f'stop_loss_pct_{_suffix}', f'{_side}: stop loss (% margin)',
+         'algo', 'side'),
+        (f'tp_pct_{_suffix}', f'{_side}: take profit (% margin)', 'algo',
+         'side'),
+        (f'atr_stop_mult_{_suffix}', f'{_side}: stop x ATR', 'algo', 'side'),
+        (f'atr_target_mult_{_suffix}', f'{_side}: target x ATR', 'algo',
+         'side')]
 FIELD = {f[0]: f for f in FIELDS}
 
 #: The settings screen's sections, in order, and what is in each.
@@ -140,6 +159,10 @@ SECTIONS = {
                         'stop_loss_pct', 'stop_mode', 'target_mode',
                         'atr_period', 'atr_stop_mult', 'atr_target_mult', 'reversion_on', 'stop_z_on',
                         'stop_z', 'time_stop_on', 'time_stop_candles']),
+    'sides': ('Exits per side', [
+        f'{key}_{suffix}' for suffix in ('sell', 'buy')
+        for key in ('stop_mode', 'target_mode', 'stop_loss_pct', 'tp_pct',
+                    'atr_stop_mult', 'atr_target_mult')]),
     'limits': ('Daily limits', ['max_trades_day', 'max_losses_row',
                                 'daily_loss_limit']),
     'costs': ('Session and costs', ['session_open', 'session_close',
@@ -1656,6 +1679,9 @@ class Bot:
     @staticmethod
     def _shown(field, value):
         kind = FIELD[field][3]
+        if (kind == 'side' or kind is SIDE_MODES) and \
+                value in (None, 'SAME'):
+            return 'same as ladder'
         if kind == 'bool':
             return 'ON' if value else 'OFF'
         if isinstance(kind, list):
@@ -1677,7 +1703,9 @@ class Bot:
             options = kind
         else:
             self._waiting[chat] = (self.clock() + INPUT_TTL_SEC, key, field)
-            how = {'time': 'Send HH:MM, broker time - or "none" to clear.',
+            how = {'side': 'Send the new value - or "same" for the '
+                            'ladder\'s own.',
+                   'time': 'Send HH:MM, broker time - or "none" to clear.',
                    'range': 'Send HH:MM-HH:MM, broker time - or "none".'} \
                 .get(kind, 'Send the new value as a message.')
             return self.show(chat, message_id,
@@ -1712,6 +1740,8 @@ class Bot:
             except ValueError as e:
                 return self.send(chat, f'<b>Not changed.</b> {esc(e)}.')
             return self.on_set_ask(chat, None, key, field, value)
+        if kind == 'side' and text.strip().lower() in SAME_WORDS:
+            return self.on_set_ask(chat, None, key, field, None)
         try:
             value = float(text.replace(',', '.'))
         except ValueError:
@@ -1745,7 +1775,8 @@ class Bot:
         where = FIELD[field][2]
         if where == 'algo':
             typed = dict(self.desk.config_pair(key).get('algo_params') or {})
-            typed[field] = value
+            # SAME is the ladder's own: saved as blank, never a value.
+            typed[field] = None if value == 'SAME' else value
             payload = {'algo_params': typed}
         elif field == 'break':
             start, end = (value.split('-', 1) if value else (None, None))

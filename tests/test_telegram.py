@@ -988,3 +988,38 @@ def test_a_trade_exit_falls_back_to_each_legs_own_close_price(bot):
     [told] = watch(bot)
     assert 'Leg A Exit</b>  <code>$88.9500' in told
     assert 'Leg B Exit</b>  <code>$101.7500' in told
+
+
+# -- each side's own exits ------------------------------------------------------------
+
+
+def test_set_a_sides_own_stop_and_clear_it_back(bot):
+    say(bot, '/set atr_stop_mult_sell 3')
+    press(bot, 'Confirm')
+    assert bot.desk.saves[-1][1]['algo_params']['atr_stop_mult_sell'] == 3
+    say(bot, '/set atr_stop_mult_sell same')            # back to the ladder's
+    press(bot, 'Confirm')
+    assert bot.desk.saves[-1][1]['algo_params']['atr_stop_mult_sell'] is None
+
+
+def test_set_a_sides_own_sizing_mode(bot):
+    say(bot, '/set stop_mode_buy atr')
+    press(bot, 'Confirm')
+    assert bot.desk.saves[-1][1]['algo_params']['stop_mode_buy'] == 'ATR'
+    say(bot, '/set stop_mode_buy same')
+    press(bot, 'Confirm')
+    assert bot.desk.saves[-1][1]['algo_params']['stop_mode_buy'] is None
+
+
+def test_a_sides_zero_is_refused_not_saved_as_zero(bot):
+    say(bot, '/set tp_pct_buy 0')
+    assert 'must be above 0' in bot.api.texts()[-1]
+    assert bot.desk.saves == []
+
+
+def test_the_settings_list_has_the_exits_per_side(bot):
+    say(bot, '/settings')
+    listing = '\n'.join(bot.api.texts()[-3:])
+    assert 'EXITS PER SIDE' in listing.upper()
+    assert 'stop_mode_sell' in listing and 'tp_pct_buy' in listing
+    assert 'same as ladder' in listing
