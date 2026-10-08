@@ -355,7 +355,8 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         fills = db.fills(pair_key=pair_key, account=account, ours_only=ours,
                          limit=limit)
         return jsonify({'ok': True, 'fills': fills,
-                        'totals': db.fill_totals(pair_key)})
+                        'totals': db.fill_totals(pair_key,
+                                                 ours_only=ours)})
 
     @app.get('/api/fills.csv')
     def api_fills_csv():

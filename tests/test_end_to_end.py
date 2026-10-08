@@ -412,6 +412,10 @@ def test_the_journal_records_what_the_broker_reported(desk, browser_page):
     text = page.text_content('.monitor .pane')
     assert 'commission' in text
     assert 'Export CSV' in text
+    # Each row carries its DATE, and the totals say what they cover.
+    import re
+    assert re.search(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', text), text
+    assert 'every fill in the journal' in text
 
 
 def test_a_manual_trade_in_the_terminal_is_journalled_but_not_ours(
