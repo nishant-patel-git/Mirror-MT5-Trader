@@ -308,6 +308,32 @@ class Store:
                 'ORDER BY opened_at').fetchall()
         return [_position_row(row) for row in rows]
 
+    def position(self, position_id):
+        """One position by id, open or closed, or None."""
+        with self._connect() as connection:
+            row = connection.execute(
+                'SELECT * FROM positions WHERE position_id = ?',
+                (position_id,)).fetchone()
+        return None if row is None else _position_row(row)
+
+    def closing_price(self, account, tickets):
+        """The volume-weighted price the broker CLOSED these position
+        tickets at, from the journal; None when it has no closing deal."""
+        tickets = [str(t) for t in tickets or ()]
+        if not account or not tickets:
+            return None
+        with self._connect() as connection:
+            rows = connection.execute(
+                'SELECT volume, price FROM fills WHERE account = ? AND '
+                "entry = 'close' AND position_ticket IN (%s)"
+                % ','.join('?' * len(tickets)),
+                [str(account)] + tickets).fetchall()
+        volume = sum(float(r['volume'] or 0) for r in rows)
+        if not volume:
+            return None
+        return sum(float(r['volume'] or 0) * float(r['price'] or 0)
+                   for r in rows) / volume
+
     def closed_positions(self, limit=200):
         with self._connect() as connection:
             rows = connection.execute(
