@@ -466,6 +466,23 @@ def notional(position):
     return total
 
 
+def pnl_shares(pnl, position):
+    """Net P&L as a share of the NOTIONAL (both legs' face value) and of
+    the MARGIN it tied up - the base the TP % and SL % are set on, so a
+    target hit reads as about its TP %. An unmeasured base is '—'."""
+    if pnl is None:
+        return ''
+    face = notional(position)
+    margin = position.get('entry_margin')
+    if margin:
+        margin = float(margin) * float(position.get('quantity') or 1.0)
+
+    def share(base, digits):
+        return f'{pnl / base * 100:+.{digits}f}%' if base else '—'
+    return (f'  ({share(face, 4)} of notional \u00b7 '
+            f'{share(margin, 2)} of margin)')
+
+
 def margin_text(position):
     margin = position.get('entry_margin')
     if not margin:
@@ -566,7 +583,6 @@ def trade_exit_text(record, ladder):
         (exit_ - entry) * _sign(position.get('side'))
     gross = level_money(position, exit_) if exit_ is not None else None
     fees = None if gross is None or pnl is None else gross - pnl
-    face = notional(position)
     rows = [('Reason', position.get('close_reason')),
             ('Duration', duration(held)),
             ('Exit Time', utc(closed)), None]
@@ -592,8 +608,7 @@ def trade_exit_text(record, ladder):
              ('Gross PnL', w3(gross, 4)),
              ('Est. Fees', f'{w3fee(fees, 4)}  (commission, both legs)'
               if fees is not None else '—'),
-             ('Net PnL', w3(pnl, 4) + (f'  ({pnl / face * 100:+.4f}%)'
-                                       if pnl is not None and face else '')),
+             ('Net PnL', w3(pnl, 4) + pnl_shares(pnl, position)),
              ('Slippage', f'in {plain(position.get("entry_slippage"), 4, True)}'
                           f' / out '
                           f'{plain(position.get("exit_slippage"), 4, True)}')]
@@ -682,7 +697,8 @@ def position_rows(position, row, levels=None, now=None):
              ('Spread Chg', plain(delta, 4, True) + (
                  '' if good is None else
                  ('  (with)' if good >= 0 else '  (against)'))),
-             ('Net PnL', w3(position.get('net_pnl')))]
+             ('Net PnL', w3(position.get('net_pnl'))
+              + pnl_shares(position.get('net_pnl'), position))]
     if levels:
         for label, key in (('Break-even', 'break_even'),
                            ('Take Profit', 'tp'), ('Stop Loss', 'sl')):

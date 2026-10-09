@@ -703,10 +703,25 @@ def test_a_position_that_closes_is_a_trade_exit_with_its_analysis(bot):
                     'Orders at', 'Filled at', 'Latency',
                     'Gross PnL</b>  <code>$+3.8500',
                     'Est. Fees</b>  <code>-$0.0000',
-                    'Net PnL</b>  <code>$+3.8500',
+                    'Net PnL</b>  <code>$+3.8500  (+0.0402% of notional '
+                    '\u00b7 +4.02% of margin)',
                     'ANALYSIS', 'TARGET HIT', 'Peak/Trough',
                     'Capture</b>  <code>$+3.85 of $+4.10 best (+94%)',
                     'Z path</b>  <code>+1.4900 -&gt; -0.4000'])
+
+
+def test_the_result_reads_against_the_tp_percent_of_margin():
+    """A 2% target on 95.75 of margin nets 1.915: +2.00% of margin,
+    and 0.0200% of the 9,567.80 the two legs are worth."""
+    text = tg.pnl_shares(1.915, POSITION)
+    assert text == '  (+0.0200% of notional \u00b7 +2.00% of margin)'
+
+
+def test_an_unmeasured_margin_is_a_dash_not_zero():
+    position = dict(POSITION, entry_margin=None)
+    assert tg.pnl_shares(-8.45, position) == \
+        '  (-0.0883% of notional \u00b7 — of margin)'
+    assert tg.pnl_shares(None, POSITION) == ''
 
 
 def test_the_CONTROL_positions_open_at_start_are_not_news(bot):
