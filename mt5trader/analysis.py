@@ -173,14 +173,26 @@ class ZExcursions:
         self.min_z = data.get('min_z')
         self.since = data.get('since') or now
         self.events = list(data.get('events') or [])
-        self._prev = None
-        self._arm = {'2u': True, '3u': True, '2d': True, '3d': True}
-        self._open_up = self._open_down = False
+        #: WHERE IT HAD GOT TO, restored - not reset.
+        #:
+        #: These four used to live only in memory. Every restart
+        #: therefore re-armed all four bands, and a spread parked
+        #: beyond +2 sigma logged a fresh touch on the first poll
+        #: after it: six restarts, six touches, one stretch. The
+        #: counts were saved and the reason they were safe to add to
+        #: was not.
+        self._prev = data.get('prev')
+        self._arm = dict({'2u': True, '3u': True, '2d': True, '3d': True},
+                         **(data.get('arm') or {}))
+        self._open_up = bool(data.get('open_up'))
+        self._open_down = bool(data.get('open_down'))
 
     def to_dict(self):
         return {'counts': dict(self.counts), 'max_z': self.max_z,
                 'min_z': self.min_z, 'since': self.since,
-                'events': self.events[-self.MAX_EVENTS:]}
+                'events': self.events[-self.MAX_EVENTS:],
+                'prev': self._prev, 'arm': dict(self._arm),
+                'open_up': self._open_up, 'open_down': self._open_down}
 
     def _event(self, kind, z, at):
         self.counts[kind] += 1
