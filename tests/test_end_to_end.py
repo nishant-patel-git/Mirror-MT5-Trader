@@ -635,6 +635,84 @@ def test_the_analysis_tab_is_on_the_screen(desk, browser_page, round_turn):
     assert page.errors == []
 
 
+def test_the_sigma_zone_table_is_on_the_screen_with_its_range(desk,
+                                                               browser_page):
+    """The zone track renders: its own date range, its columns, and the
+    hypothetical prices frozen onto each row."""
+    from mt5trader import zones
+    from mt5trader.database import Store
+    store = Store(desk.paths['db'])
+    now = time.time()
+    day = 86400.0
+    for age, z, previous in ((0.2, 2.6, 'MEAN'), (0.3, 0.4, '-2'),
+                             (9.0, 3.2, '+2')):
+        store.save_zone_event(zones.event_row(
+            'XAUUSD_|GC1226', now - age * day, z, zones.zone_of(z), previous,
+            13.0, 0.1, {'entry_z': 2.5, 'max_entry_z': 3.5, 'stop_z': 4.0,
+                        'length': 20},
+            prices={'entry': 13.25, 'break_even': 13.05, 'tp': 12.55,
+                    'sl': 13.55},
+            edge={'ratio': 2.1, 'capture': 42.0, 'cost': 20.0,
+                  'required': 1.5, 'ok': True},
+            filters={'ready': True}, timeframe_sec=900.0,
+            algo_mode='OFF', step=0.01))
+
+    page = browser_page
+    page.evaluate("""() => {
+        window.MT5Trader.state.open = ['monitor:'];
+        window.MT5Trader.state.monitorTab = 'analysis';
+        window.MT5Trader.state.analysis = null;
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_function(
+        "() => document.querySelector('.monitor .pane').textContent"
+        ".includes('\u03c3 zone changes')", timeout=8000)
+
+    # The range dropdown, with a day selected by default.
+    select = page.locator('.monitor .an-zone-days')
+    assert select.count() == 1
+    assert select.input_value() == '1'
+    assert [o.strip() for o in select.locator('option').all_text_contents()] \
+        == ['last 1 day', 'last 7 days', 'last 30 days', 'all records']
+
+    text = page.text_content('.monitor .pane')
+    for column in ('Zone', 'From', 'Side', 'Edge', 'Status', 'Entry',
+                   'Take profit', 'Stop loss'):
+        assert column in text, column
+    # A day shows the two recent rows and not the nine-day-old one.
+    assert '+2\u03c3' in text and '2.10x' in text
+    assert '13.2500' in text and '12.5500' in text and '13.5500' in text
+
+    # Widening the range reaches the older row.
+    select.select_option('30')
+    page.wait_for_function(
+        "() => document.querySelector('.monitor .pane').textContent"
+        ".includes('+3\u03c3')", timeout=8000)
+    assert page.errors == []
+
+
+def test_the_zone_table_says_so_when_the_range_holds_nothing(desk,
+                                                             browser_page):
+    """CONTROL: an empty range is said in words, not shown as a table of
+    zeros."""
+    page = browser_page
+    # A ladder with no zone rows at all, so the range genuinely holds
+    # nothing rather than depending on what another test wrote.
+    page.evaluate("""() => {
+        window.MT5Trader.state.open = ['monitor:'];
+        window.MT5Trader.state.monitorTab = 'analysis';
+        window.MT5Trader.state.analysis = null;
+        window.MT5Trader.state.zoneDays = 1;
+        window.MT5Trader.state.analysisPair = 'NOTHING|TRADED';
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_function(
+        "() => document.querySelector('.monitor .pane').textContent"
+        ".includes('no \u03c3 zone change in this range')", timeout=8000)
+    assert page.errors == []
+    page.evaluate("() => { window.MT5Trader.state.analysisPair = ''; }")
+
+
 def test_a_session_with_nothing_traded_is_not_a_slippage_of_zero(desk,
                                                                   tmp_path):
     """The report opens on an account that has done nothing, and says

@@ -235,3 +235,13 @@ def test_the_live_sink_reaches_orders_ONLY_through_the_coordinator():
         == set()
     calls = {n for n in names if n.startswith('algo_')}
     assert calls == {'algo_enter', 'algo_exit'}, calls
+
+
+def test_the_sigma_zones_are_arithmetic_and_nothing_else():
+    """The zone track is a READING. It records what the spread did and
+    what the Algo would have made of it; it must not be able to reach
+    an order by any route — the same rule `bands` and `algofilters`
+    are held to, and for the same reason."""
+    names, imports = _code_names('mt5trader/zones.py')
+    assert imports == {'math'}, imports
+    assert names & (ORDER_VERBS | {'broker', 'legs'}) == set()

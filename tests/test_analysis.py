@@ -255,14 +255,40 @@ def test_excursions_are_counted_on_the_algos_band_and_reset(config, pair, legs,
     coordinator, store, clock = engine(config, legs, tmp_path)
     md = dict(coordinator.market[pair.key])
     mean = md['mid_spread']
-    coordinator._track_excursions(pair, md, {'mean': mean - 0.25,
-                                             'sigma': 0.1}, clock.now)
+    reading = {'z': (md['mid_spread'] - (mean - 0.25)) / 0.1,
+               'mean': mean - 0.25, 'sigma': 0.1}
+    coordinator._track_excursions(pair, md, reading, clock.now)
     saved = store.excursions()[pair.key]
     assert saved['counts']['touch_2_up'] == 1
-    # No band (the Algo off): nothing is counted.
+    # Nothing MEASURED counts nothing - which is NOT the same as the
+    # Algo being off. The counters are fed from the analysis band now
+    # (see `_band_reading`), so they count with its Algo on or off.
     coordinator._track_excursions(pair, md, None, clock.now)
+    coordinator._track_excursions(pair, md, {'z': None}, clock.now)
+    assert store.excursions()[pair.key]['counts']['touch_2_up'] == 1
     coordinator.reset_excursions(pair.key)
     assert store.excursions()[pair.key]['counts']['touch_2_up'] == 0
+
+
+def test_the_counters_survive_a_restart_through_the_engine(config, pair, legs,
+                                                           tmp_path):
+    """The engine-level control on the arming fix: the tracker is
+    dropped and rebuilt from the database exactly as `_excursion` does
+    at first use, and the parked spread is still one touch."""
+    coordinator, store, clock = engine(config, legs, tmp_path)
+    md = dict(coordinator.market[pair.key])
+    mean = md['mid_spread'] - 0.25
+    reading = {'z': 2.5, 'mean': mean, 'sigma': 0.1}
+    for _ in range(4):
+        coordinator._excursions.clear()
+        coordinator._excursions_saved.clear()
+        coordinator._track_excursions(pair, md, reading, clock.now)
+    assert store.excursions()[pair.key]['counts']['touch_2_up'] == 1
+    # CONTROL: a genuine new stretch, after a return to the mean, counts.
+    coordinator._track_excursions(pair, md, {'z': 0.2, 'mean': mean,
+                                             'sigma': 0.1}, clock.now)
+    coordinator._track_excursions(pair, md, reading, clock.now)
+    assert store.excursions()[pair.key]['counts']['touch_2_up'] == 2
 
 
 def test_the_analysis_cannot_reach_an_order():
