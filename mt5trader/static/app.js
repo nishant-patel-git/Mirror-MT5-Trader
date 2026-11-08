@@ -45,7 +45,7 @@
     analysis: null, analysisAt: 0, analysisDays: 7, analysisPair: '',
     // The SIGMA ZONE track's own range. A day by default: the rows are
     // a tick-by-tick record, and a day of them is the usual read.
-    zoneDays: 1,
+    zoneDays: 1, zoneDate: '',
     analysisBt: null, analysisBtDays: 5,
     // What the Reconciler tab's adopt form has selected. IN STATE, not
     // in the DOM: that pane is re-rendered from innerHTML on every
@@ -3703,6 +3703,11 @@
         }
         if (e.target.classList.contains('an-zone-days')) {
           state.zoneDays = Number(e.target.value);
+          state.zoneDate = '';          // a range and a day are exclusive
+          loadAnalysis(true);
+        }
+        if (e.target.classList.contains('an-zone-date')) {
+          state.zoneDate = e.target.value || '';
           loadAnalysis(true);
         }
         if (e.target.classList.contains('an-bt-days')) {
@@ -4374,6 +4379,7 @@
     state.analysisAt = now;
     fetch('/api/analysis?days=' + state.analysisDays +
           '&zone_days=' + state.zoneDays +
+          (state.zoneDate ? '&date=' + encodeURIComponent(state.zoneDate) : '') +
           (state.analysisPair ? '&pair=' +
            encodeURIComponent(state.analysisPair) : ''))
       .then(function (r) { return r.json(); })
@@ -4550,16 +4556,114 @@
   //: would be worse than no range at all.
   function zoneRangeBar(a) {
     var total = zoneTotal(a);
+    var dated = !!state.zoneDate;
+    var days = (a.signal_days || []);
+    // A day and a rolling range answer different questions, so only
+    // one of them is in force: picking a date greys the range out,
+    // and clearing the date gives it back.
     return '<div class="an-bar">Showing the ' +
-      '<select class="an-zone-days">' +
+      '<select class="an-zone-days"' + (dated ? ' disabled' : '') + '>' +
       [[1, 'last 1 day'], [7, 'last 7 days'], [30, 'last 30 days'],
        [0, 'all records']].map(function (o) {
         return '<option value="' + o[0] + '"' +
           (state.zoneDays === o[0] ? ' selected' : '') + '>' + o[1] +
           '</option>';
       }).join('') + '</select>' +
-      (total ? ' <span class="hint">' + (a.zones || []).length + ' of ' +
-        total + ' σ zone changes kept</span>' : '') + '</div>';
+      ' or one day <input type="date" class="an-zone-date" value="' +
+      escapeHtml(state.zoneDate) + '"' +
+      (days.length ? ' max="' + escapeHtml(days[0].day) + '"' : '') + '>' +
+      (dated ? ' <span class="hint">the broker’s ' +
+        escapeHtml(state.zoneDate) + ', not the last 24 hours</span>' : '') +
+      (total && !dated ? ' <span class="hint">' + (a.zones || []).length +
+        ' of ' + total + ' σ zone changes kept</span>' : '') +
+      '</div>';
+  }
+
+  var SIGNAL_OUTCOME = {
+    TP: ['took profit', 'up'], SL: ['stopped out', 'down'],
+    EXPIRED: ['neither', ''], NO_ENTRY: ['never entered', '']
+  };
+
+  //: The three numbers the page exists to answer: how often these
+  //: settings would have signalled, how many of those would have paid,
+  //: and how many would have lost. One set of tiles — a fixed ±2σ/±3σ
+  //: study sat beside them for a while and was taken back out, because
+  //: two sets of counts made the one that mattered harder to read.
+  function signalTiles(a) {
+    var t = a.signal_tally || {};
+    if (!t.armed) { return ''; }
+    return '<div class="an-tiles">' +
+      anTile('Signals', t.armed, '', 'stretches that reached the ' +
+             'ladder\u2019s entry z \u2014 a second poke at the band ' +
+             'while still armed is NOT a second signal') +
+      anTile('Traded', t.entered, '', t.no_entry + ' armed and never came ' +
+             'back inside the window, so they were never entered') +
+      anTile('Would have WON', t.tp, 'up', 'reached the take-profit ' +
+             'before the stop') +
+      anTile('Would have LOST', t.sl, 'down', 'reached the stop first') +
+      anTile('Win rate', t.win_rate === null ? DASH : anPct(t.win_rate),
+             t.win_rate === null ? '' : (t.win_rate >= 50 ? 'up' : 'down'),
+             t.settled + ' settled; signals still running are not counted ' +
+             'as losses') +
+      anTile('Came back', t.revert_rate === null ? DASH :
+             anPct(t.revert_rate), '',
+             t.reverted + ' of ' + t.settled + ' crossed the mean \u2014 a ' +
+             'different question from whether it paid') +
+      '</div>';
+  }
+
+  function signalTable(a) {
+    var rows = a.signals || [];
+    // `name` in `analysisPane` is local to it; this is module level,
+    // so it resolves the ladder's name itself rather than reaching for
+    // a helper that is not in scope.
+    var names = a.names || {};
+    var label = function (key) {
+      return escapeHtml(names[key] || key || DASH);
+    };
+    var html = '<h4>Signals <small>— on the ladder’s own ' +
+      'settings, with its Algo on or off: how often it would have ' +
+      'traded, and how that would have gone</small></h4>';
+    html += zoneRangeBar(a);
+    html += signalTiles(a);
+    html += '<table class="an-table"><thead><tr><th>Signalled</th>' +
+      '<th class="l">Pair</th><th class="l">Side</th>' +
+      '<th>z in</th><th>Entered</th><th>Entry</th><th>Take profit</th>' +
+      '<th>Stop loss</th><th class="l">Outcome</th><th class="l">Back to ' +
+      'mean</th><th>Best</th><th>Worst</th><th>Held</th>' +
+      '</tr></thead><tbody>';
+    if (!rows.length) {
+      html += '<tr><td colspan="13" class="hint">no signal in this ' +
+        'range</td></tr>';
+    }
+    rows.forEach(function (r) {
+      var out = SIGNAL_OUTCOME[r.outcome] ||
+        [r.state === 'OPEN' ? 'running' : 'armed', ''];
+      html += '<tr><td>' + anClock(r.armed_at) + '</td>' +
+        '<td class="l">' + label(r.pair_key) + '</td>' +
+        '<td class="l">' + anSide(r.side) + '</td>' +
+        '<td>' + fmt(r.armed_z, 2) + '</td>' +
+        '<td>' + (r.entered_at ? anClock(r.entered_at) : DASH) + '</td>' +
+        '<td>' + fmt(r.entry, 4) + '</td>' +
+        '<td>' + fmt(r.tp, 4) + '</td>' +
+        '<td>' + fmt(r.sl, 4) + '</td>' +
+        '<td class="l ' + out[1] + '">' + out[0] + '</td>' +
+        '<td class="l">' + (r.entered_at === null ? DASH :
+          (r.reverted ? 'yes, ' + anMin(r.revert_min) : 'no')) + '</td>' +
+        '<td class="' + anSign(r.peak_net) + '">' + money(r.peak_net) +
+        '</td><td class="' + anSign(r.trough_net) + '">' +
+        money(r.trough_net) + '</td>' +
+        '<td>' + (r.held_min === null ? DASH : anMin(r.held_min)) +
+        '</td></tr>';
+    });
+    html += '</tbody></table>' +
+      '<div class="note">Hypothetical, and measured forward from the ' +
+      'moment each signal armed — on the settings in force then, ' +
+      'with the Algo on or off. The stop is checked before the target, ' +
+      'so a poll where both look reached is booked as the stop. ' +
+      '“Came back” is the spread crossing its mean, which is a ' +
+      'different question from whether the trade paid.</div>';
+    return html;
   }
 
   function zoneTable(a) {
@@ -4753,47 +4857,8 @@
       (bt ? bt.html : 'The ladder\u2019s Algo must be on (Signals is fine).') +
       '</div>';
 
-    // 6. Z-score excursions.
-    var ex = a.z_excursions || {};
-    var keys = Object.keys(ex);
-    html += '<h4>Z-score excursions <small>\u2014 on the Algo\u2019s own ' +
-      'band, with its Algo on or off</small> ' +
-      '<button class="btn an-reset">Reset</button></h4>';
-    html += zoneRangeBar(a);
-    if (!keys.length) {
-      html += '<p class="hint">nothing counted yet \u2014 counting starts ' +
-        'as soon as a ladder\u2019s band has its candles</p>';
-    }
-    keys.forEach(function (key) {
-      var e = ex[key];
-      var peak = (e.max_z === null || e.min_z === null) ? null :
-        Math.max(Math.abs(e.max_z), Math.abs(e.min_z));
-      html += '<div class="an-sub">' + name(key) + ' <small class="hint">since ' +
-        anClock(e.since) + '</small></div><div class="an-tiles">' +
-        anTile('Touched \u00b12\u03c3', e.touch_2_total, '',
-             '\u2191 ' + e.touch_2_up + '  \u2193 ' + e.touch_2_down) +
-        anTile('Touched \u00b13\u03c3', e.touch_3_total, '',
-             '\u2191 ' + e.touch_3_up + '  \u2193 ' + e.touch_3_down) +
-        anTile('Back to the mean', e.reversions, 'up',
-             'a 2\u03c3 stretch that came all the way back through 0') +
-        anTile('Peak |z|', peak === null ? DASH : peak.toFixed(2), '',
-             'max ' + fmt(e.max_z, 2) + ' / min ' + fmt(e.min_z, 2)) +
-        '</div>';
-      var events = (e.events || []).filter(function (ev) {
-        return !zoneSince() || (ev.at || 0) >= zoneSince();
-      }).slice(0, 15);
-      if (events.length) {
-        html += '<table class="an-table"><tbody>' + events.map(function (ev) {
-          var label = {touch_2_up: 'touched +2\u03c3', touch_2_down:
-            'touched \u22122\u03c3', touch_3_up: 'touched +3\u03c3',
-            touch_3_down: 'touched \u22123\u03c3',
-            reversions: 'back to the mean'}[ev.type] || ev.type;
-          return '<tr><td>' + anClock(ev.at) + '</td><td class="l">' + label +
-            '</td><td>' + fmt(ev.z, 2) + '</td></tr>';
-        }).join('') + '</tbody></table>';
-      }
-    });
-
+    // 6. Signals, and the zone path they were read off.
+    html += signalTable(a);
     html += zoneTable(a);
 
     // 7. The journal.
@@ -5055,16 +5120,6 @@
     if (!button) { return; }
     if (button.classList.contains('an-bt-run')) {
       return runAnalysisBacktest();
-    }
-    if (button.classList.contains('an-reset')) {
-      return ask('Reset the excursion counters?',
-        'This zeroes the \u00b12\u03c3 / \u00b13\u03c3 touch and ' +
-        'reversion counts' + (state.analysisPair ? ' for this ladder' :
-        ' on every ladder') + '. Trades and the journal are not touched.',
-        'Reset', function () {
-          send('reset_excursions', {pair: state.analysisPair || null},
-               function () { loadAnalysis(true); });
-        });
     }
     var row = button.closest('tr');
     if (button.classList.contains('close-unclaimed')) {

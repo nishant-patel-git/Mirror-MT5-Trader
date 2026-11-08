@@ -425,3 +425,133 @@ def test_the_algo_decides_before_the_analysis_observes(config, pair, legs,
     source = inspect.getsource(Coordinator._poll_once)
     assert '_work_algo' in source and 'self._track(' in source
     assert source.index('_work_algo') < source.index('self._track(')
+
+
+# -- signals: armed, entered, and what became of them ------------------------
+
+def signal_drive(coordinator, pair, clock, zs, settings=None):
+    """Feed the signal track a series of z readings, as `_band_reading`
+    would build them."""
+    settings = settings or pair.exit_settings(coordinator.config.settings)
+    md = dict(coordinator.market[pair.key])
+    candles = coordinator._band(pair)
+    for z in zs:
+        clock.now += 60.0
+        coordinator._track_signals(
+            pair, md, None,
+            {'z': z, 'mean': 13.0, 'sigma': 0.1, 'stats': candles.stats(),
+             'source': 'analysis', 'candles': candles},
+            settings, clock.now)
+    return coordinator.store.signals(pair.key)
+
+
+def test_a_second_poke_at_the_band_is_not_a_second_signal(config, pair,
+                                                          legs, tmp_path):
+    """The complaint this track was rewritten for: 2.6 -> 2.55 -> 2.9
+    has stretched ONCE. It never came back inside, so there is nothing
+    new to act on."""
+    coordinator, store, clock = engine(config, legs, tmp_path)
+    fill_the_band(coordinator, pair, clock)
+    rows = signal_drive(coordinator, pair, clock,
+                        [2.6, 2.55, 2.9, 2.7, 3.1])
+    assert len(rows) == 1
+
+
+def test_control_a_stretch_that_came_back_signals_again(config, pair, legs,
+                                                        tmp_path):
+    """Back through the window's floor and out again IS a second
+    signal."""
+    coordinator, store, clock = engine(config, legs, tmp_path)
+    fill_the_band(coordinator, pair, clock)
+    rows = signal_drive(coordinator, pair, clock, [2.6, 0.5, 2.7])
+    assert len(rows) == 2
+
+
+def test_only_the_ladders_own_threshold_is_tracked(config, pair, legs,
+                                                   tmp_path):
+    """The fixed +-2 / +-3 sigma study was taken back out: two sets of
+    counts on one page made the one that mattered harder to read. A
+    stretch under `entry_z` is no longer a signal of any kind."""
+    coordinator, store, clock = engine(config, legs, tmp_path)
+    fill_the_band(coordinator, pair, clock)
+    rows = signal_drive(coordinator, pair, clock, [2.1, 2.3, 2.4])
+    assert rows == []
+    # CONTROL: past entry_z (2.5) it signals.
+    rows = signal_drive(coordinator, pair, clock, [2.6])
+    assert len(rows) == 1 and rows[0]['basis'] == 'ALGO'
+
+
+def test_a_signal_carries_its_hypothetical_trade(config, pair, legs,
+                                                 tmp_path):
+    """Priced when it ENTERS, not when it arms: until the pull-back
+    there is no trade to price."""
+    coordinator, store, clock = engine(config, legs, tmp_path)
+    fill_the_band(coordinator, pair, clock)
+    signal_drive(coordinator, pair, clock, [2.6])
+    [row] = store.signals(pair.key)
+    assert row['entry'] is None            # armed only
+    signal_drive(coordinator, pair, clock, [1.8])
+    [row] = store.signals(pair.key)
+    assert row['side'] == 'SELL'
+    assert row['entry'] is not None and row['break_even'] is not None
+    assert row['units']
+    # A sell's target is BELOW break-even and its stop ABOVE.
+    if row['tp'] is not None and row['sl'] is not None:
+        assert row['tp'] < row['break_even'] < row['sl']
+
+
+def test_the_algo_basis_arms_first_and_enters_on_the_way_back(config, pair,
+                                                              legs, tmp_path):
+    """Exactly the Algo's own machine: armed at entry_z, entered on the
+    pull-back into the window."""
+    coordinator, store, clock = engine(config, legs, tmp_path)
+    fill_the_band(coordinator, pair, clock)
+    signal_drive(coordinator, pair, clock, [2.6])
+    [algo] = [r for r in store.signals(pair.key) if r['basis'] == 'ALGO']
+    assert algo['state'] == 'ARMED' and algo['entered_at'] is None
+    signal_drive(coordinator, pair, clock, [1.8])
+    [algo] = [r for r in store.signals(pair.key) if r['basis'] == 'ALGO']
+    assert algo['entered_at'] is not None
+    assert algo['entered_z'] == 1.8
+
+
+def test_a_trend_that_never_comes_back_is_recorded_as_never_entered(
+        config, pair, legs, tmp_path):
+    coordinator, store, clock = engine(config, legs, tmp_path)
+    fill_the_band(coordinator, pair, clock)
+    signal_drive(coordinator, pair, clock, [2.6, 3.1, 3.6, 4.2, 0.4])
+    algo = [r for r in store.signals(pair.key) if r['basis'] == 'ALGO']
+    assert algo and algo[-1]['outcome'] == 'NO_ENTRY'
+
+
+def test_the_signals_are_recorded_with_the_algo_off(config, pair, legs,
+                                                    tmp_path):
+    """The whole point: answer 'is this worth switching on?' BEFORE
+    switching it on."""
+    coordinator, store, clock = engine(config, legs, tmp_path)
+    assert not coordinator.algos.is_on(pair.key)
+    fill_the_band(coordinator, pair, clock)
+    rows = signal_drive(coordinator, pair, clock, [2.6])
+    assert rows and all(r['algo_mode'] == 'OFF' for r in rows)
+
+
+def test_the_arming_is_not_lost_on_a_restart(config, pair, legs, tmp_path):
+    """Arming that lives only in memory re-arms on every restart, and a
+    spread that has not moved then signals again."""
+    coordinator, store, clock = engine(config, legs, tmp_path)
+    fill_the_band(coordinator, pair, clock)
+    signal_drive(coordinator, pair, clock, [2.6])
+    for _ in range(3):
+        coordinator._signals = None          # a restart
+        coordinator._arming_live = {}
+        signal_drive(coordinator, pair, clock, [2.6])
+    assert len(store.signals(pair.key)) == 1
+
+
+def test_every_row_is_filed_under_the_brokers_day(config, pair, legs,
+                                                  tmp_path):
+    coordinator, store, clock = engine(config, legs, tmp_path)
+    fill_the_band(coordinator, pair, clock)
+    rows = signal_drive(coordinator, pair, clock, [2.6])
+    day = coordinator.broker_day()
+    assert day is None or all(r['broker_day'] == day for r in rows)

@@ -276,7 +276,7 @@ def _unpriced(reason, filters=None):
 def event_row(pair_key, at, z, zone, previous, mean, sigma, params,
               prices=None, edge=None, filters=None, block_reason=None,
               warmup_done=True, timeframe_sec=None, signalled=False,
-              entered=False, algo_mode=None, step=None):
+              entered=False, algo_mode=None, step=None, broker_day=None):
     """One recorded zone change, with everything it is judged on frozen
     into it. What goes to the database and what the table renders."""
     prices = dict(prices or {})
@@ -285,6 +285,9 @@ def event_row(pair_key, at, z, zone, previous, mean, sigma, params,
     return {
         'pair_key': pair_key,
         'at': float(at),
+        #: The BROKER's calendar day, so a date picker asks for the
+        #: same day the Algo counts its trades over.
+        'broker_day': broker_day,
         'timeframe_sec': timeframe_sec,
         'zone': zone,
         'prev_zone': previous,

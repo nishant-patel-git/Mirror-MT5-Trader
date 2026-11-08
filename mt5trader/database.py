@@ -213,6 +213,66 @@ CREATE TABLE IF NOT EXISTS z_zone_state (
     PRIMARY KEY (pair_key, timeframe_sec)
 );
 
+-- SIGNALS: every stretch that armed, whether it entered, and what
+-- became of it if it did. Append-only beside `z_zone_events`, which
+-- stays the raw record of what the spread did — a signal row is the
+-- reading built ON that path, and the path is what makes it auditable.
+--
+-- Three bases live in one table and disagree on purpose: SIGMA2 and
+-- SIGMA3 are a fixed statistical study, ALGO is the ladder's own
+-- entry_z with its re-entry machine. See `signals.py`.
+CREATE TABLE IF NOT EXISTS signal_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    pair_key        TEXT NOT NULL,
+    basis           TEXT NOT NULL,      -- SIGMA2, SIGMA3 or ALGO
+    side            TEXT,               -- the side it would be traded
+    broker_day      TEXT,               -- YYYY-MM-DD on the BROKER's clock
+    threshold       REAL,
+    state           TEXT NOT NULL,      -- ARMED, OPEN or CLOSED
+    outcome         TEXT,               -- TP, SL, EXPIRED or NO_ENTRY
+    armed_at        REAL NOT NULL,
+    armed_z         REAL,
+    entered_at      REAL,
+    entered_z       REAL,
+    entry           REAL,               -- the hypothetical, frozen
+    break_even      REAL,
+    tp              REAL,
+    sl              REAL,
+    units           REAL,
+    closed_at       REAL,
+    closed_z        REAL,
+    peak_net        REAL,
+    trough_net      REAL,
+    reverted        INTEGER,            -- did it come back through the mean
+    revert_min      REAL,
+    held_min        REAL,
+    entry_z         REAL,               -- the settings in force, stamped on
+    max_entry_z     REAL,
+    reentry_back    REAL,
+    reentry_window_pct REAL,
+    algo_mode       TEXT
+);
+
+-- Asking for one day of one ladder is the common read, so it is an
+-- index and not a scan.
+CREATE INDEX IF NOT EXISTS signal_events_day
+    ON signal_events (pair_key, broker_day);
+CREATE INDEX IF NOT EXISTS signal_events_at
+    ON signal_events (armed_at DESC);
+-- The forward watch reopens whatever is still running after a restart.
+CREATE INDEX IF NOT EXISTS signal_events_open
+    ON signal_events (state);
+
+-- Where each ladder's arming had got to. Held in the database for the
+-- same reason the excursion counters' arming now is: arming that lives
+-- only in memory re-arms on every restart, and a spread that has not
+-- moved then logs a fresh signal on the next poll.
+CREATE TABLE IF NOT EXISTS signal_arming (
+    pair_key        TEXT PRIMARY KEY,
+    at              REAL NOT NULL,
+    data            TEXT NOT NULL
+);
+
 -- The ANALYSIS band's own candles, kept apart from `algo_candles` on
 -- purpose. The analysis band runs whether a ladder's Algo is on or
 -- off, so it would otherwise be writing into the table the Algo seeds
@@ -279,6 +339,11 @@ class Store:
     #: renames or re-types anything, so an older build reading the same
     #: file still works.
     LATER_COLUMNS = (
+        # The BROKER's calendar day a zone change fell on, so "5 Nov"
+        # on the screen means the same day the Algo counts its trades
+        # over. NULL on rows written before it existed; those answer a
+        # date filter with nothing rather than with the wrong day.
+        ('z_zone_events', 'broker_day', 'TEXT'),
         ('positions', 'naked_ms', 'REAL'),
         # MANUAL or ALGO. NULL on a row written before it existed, which
         # reads back as MANUAL: nothing traded by itself then either.
@@ -742,7 +807,7 @@ class Store:
                     'break_even', 'tp', 'sl', 'edge_ratio', 'edge_capture',
                     'edge_cost', 'edge_required', 'edge_ok', 'status',
                     'algo_mode', 'entry_z', 'max_entry_z', 'stop_z',
-                    'length', 'increment')
+                    'length', 'increment', 'broker_day')
 
     def save_zone_event(self, row):
         """Append one sigma-zone change. Never updates: the history is
@@ -760,18 +825,24 @@ class Store:
                    ','.join('?' * len(self.ZONE_COLUMNS))), values)
         return True
 
-    def zone_events(self, pair_key=None, since=None, limit=2000):
+    def zone_events(self, pair_key=None, since=None, broker_day=None,
+                    limit=2000):
         """Zone changes, newest first, FILTERED IN THE QUERY.
 
-        `since` is a UTC second, and the index on (pair_key, at) serves
-        it — the date range must never become "read every row ever
-        written and throw most of them away in the browser".
+        `since` is a UTC second and the index on (pair_key, at) serves
+        it; `broker_day` is one calendar day on the BROKER's clock and
+        wins where both are given. Either way the range must never
+        become "read every row ever written and throw most of them
+        away in the browser".
         """
         where, params = [], []
         if pair_key:
             where.append('pair_key = ?')
             params.append(pair_key)
-        if since is not None:
+        if broker_day:
+            where.append('broker_day = ?')
+            params.append(str(broker_day))
+        elif since is not None:
             where.append('at >= ?')
             params.append(float(since))
         clause = ('WHERE ' + ' AND '.join(where)) if where else ''
@@ -805,6 +876,116 @@ class Store:
         return {row['pair_key']: {'first_at': row['first_at'],
                                   'last_at': row['last_at'],
                                   'rows': row['rows']} for row in rows}
+
+    #: One signal row, in the order it is written.
+    SIGNAL_COLUMNS = ('pair_key', 'basis', 'side', 'broker_day', 'threshold',
+                      'state', 'outcome', 'armed_at', 'armed_z',
+                      'entered_at', 'entered_z', 'entry', 'break_even',
+                      'tp', 'sl', 'units', 'closed_at', 'closed_z',
+                      'peak_net', 'trough_net', 'reverted', 'revert_min',
+                      'held_min', 'entry_z', 'max_entry_z', 'reentry_back',
+                      'reentry_window_pct', 'algo_mode')
+
+    def save_signal(self, row):
+        """Write a signal, or update the one `row['id']` names.
+
+        A signal is the one record here that legitimately CHANGES after
+        it is written: it arms, then enters, then settles, over hours.
+        The zone rows beside it never change, which is why they are a
+        separate table rather than a status column on this one.
+        """
+        values = []
+        for name in self.SIGNAL_COLUMNS:
+            value = row.get(name)
+            if name == 'reverted' and value is not None:
+                value = 1 if value else 0
+            values.append(value)
+        with self._connect() as connection:
+            if row.get('id'):
+                connection.execute(
+                    'UPDATE signal_events SET %s WHERE id = ?'
+                    % ','.join(f'{n} = ?' for n in self.SIGNAL_COLUMNS),
+                    values + [row['id']])
+                return row['id']
+            cursor = connection.execute(
+                'INSERT INTO signal_events (%s) VALUES (%s)'
+                % (','.join(self.SIGNAL_COLUMNS),
+                   ','.join('?' * len(self.SIGNAL_COLUMNS))), values)
+            return cursor.lastrowid
+
+    def _signal_rows(self, rows):
+        out = []
+        for row in rows:
+            body = {name: row[name] for name in self.SIGNAL_COLUMNS}
+            body['id'] = row['id']
+            body['reverted'] = bool(body['reverted'])
+            out.append(body)
+        return out
+
+    def signals(self, pair_key=None, since=None, broker_day=None,
+                limit=2000):
+        """Signals, newest armed first, filtered IN THE QUERY.
+
+        `broker_day` is one calendar day on the BROKER's clock and is
+        matched exactly — the date picker must not become "read every
+        row and compare timestamps in the browser".
+        """
+        where, params = [], []
+        if pair_key:
+            where.append('pair_key = ?')
+            params.append(pair_key)
+        if broker_day:
+            where.append('broker_day = ?')
+            params.append(str(broker_day))
+        elif since is not None:
+            where.append('armed_at >= ?')
+            params.append(float(since))
+        clause = ('WHERE ' + ' AND '.join(where)) if where else ''
+        params.append(int(limit))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f'SELECT * FROM signal_events {clause} '
+                f'ORDER BY armed_at DESC, id DESC LIMIT ?', params).fetchall()
+        return self._signal_rows(rows)
+
+    def open_signals(self):
+        """Everything still arming or running, so a restart picks the
+        forward watch back up instead of losing it."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM signal_events WHERE state IN ('ARMED','OPEN') "
+                "ORDER BY armed_at").fetchall()
+        return self._signal_rows(rows)
+
+    def signal_days(self, pair_key=None):
+        """Which broker days have signals, and how many — what fills
+        the date picker, so it offers days that exist."""
+        where, params = [], []
+        if pair_key:
+            where.append('pair_key = ?')
+            params.append(pair_key)
+        where.append('broker_day IS NOT NULL')
+        clause = 'WHERE ' + ' AND '.join(where)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f'SELECT broker_day, COUNT(*) AS rows FROM signal_events '
+                f'{clause} GROUP BY broker_day ORDER BY broker_day DESC '
+                f'LIMIT 400', params).fetchall()
+        return [{'day': row['broker_day'], 'rows': row['rows']}
+                for row in rows]
+
+    def save_signal_arming(self, pair_key, data):
+        with self._connect() as connection:
+            connection.execute(
+                'INSERT OR REPLACE INTO signal_arming (pair_key, at, data) '
+                'VALUES (?,?,?)',
+                (pair_key, self.clock(), json.dumps(data)))
+
+    def signal_arming(self):
+        with self._connect() as connection:
+            rows = connection.execute(
+                'SELECT pair_key, data FROM signal_arming').fetchall()
+        return {row['pair_key']: json.loads(row['data']) for row in rows}
 
     def save_zone_state(self, pair_key, timeframe_sec, zone, at=None):
         """Remember the zone last RECORDED, so a restart does not record

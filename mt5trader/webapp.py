@@ -28,7 +28,7 @@ from datetime import date
 from flask import Flask, jsonify, render_template, request
 
 from . import analysis, atomicfile, config as cfg, diagnostics, fairvalue, \
-    hedgeratio, sizing, slippage, zones
+    hedgeratio, signals, sizing, slippage, zones
 from .commands import CommandLog
 from .legs import RemoteLeg
 
@@ -491,18 +491,35 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         except ValueError:
             zone_days = 1.0
         zone_since = None if zone_days <= 0 else now - zone_days * 86400.0
+        # ONE DAY, on the BROKER's clock, beats the rolling window when
+        # it is given: "5 Nov" is a question about a day, not about the
+        # last 24 hours, and the two are different near a boundary.
+        zone_date = (request.args.get('date') or '').strip() or None
+        if zone_date and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', zone_date):
+            return jsonify({'ok': False,
+                            'error': f'{zone_date} is not a date — '
+                                     f'YYYY-MM-DD'}), 400
         try:
-            zone_rows = db.zone_events(pair_key, since=zone_since)
+            zone_rows = db.zone_events(pair_key, since=zone_since,
+                                       broker_day=zone_date)
             zone_span = db.zone_span(pair_key)
+            signal_rows = db.signals(pair_key, since=zone_since,
+                                     broker_day=zone_date)
+            signal_days = db.signal_days(pair_key)
         except Exception as e:
             # A tab that cannot read one section still shows the rest:
             # the zone track is a reading, not the money.
             logging.error('the zone track could not be read: %s', e)
             zone_rows, zone_span = [], {}
+            signal_rows, signal_days = [], []
         return jsonify(dict(body, ok=True, days=days, pair=pair_key,
                             names=names, zones=zone_rows,
                             zone_days=zone_days, zone_span=zone_span,
-                            zone_statuses=list(zones.STATUSES)))
+                            zone_statuses=list(zones.STATUSES),
+                            date=zone_date,
+                            signals=signal_rows,
+                            signal_days=signal_days,
+                            signal_tally=signals.tally(signal_rows)))
 
     @app.get('/api/position/<position_id>')
     def api_position(position_id):

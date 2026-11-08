@@ -12,6 +12,9 @@
 
 :root {
   --chrome: #d4d0c8;          /* the button/input furniture grey */
+  --analysis-bg: #eef2f7;     /* the Analysis page's own ground */
+  --analysis-tile: #ffffff;
+  --analysis-line: #c8d2de;
   --chrome-dark: #a9a9a9;
   --panel: #f0f0f0;
   --grid-line: #808080;
@@ -1111,7 +1114,17 @@ table.legbook tr.spread .c-width { color: #7a4b00; }
 
 /* -- the Analysis tab ------------------------------------------------- */
 
-.monitor .analysis { padding: 4px 8px 8px; font: 11px var(--font); }
+.monitor .analysis {
+  padding: 4px 8px 8px;
+  font: 11px var(--font);
+  /* ITS OWN GROUND. With no background of its own the pane showed
+   * whatever was behind it, which on a desktop of stacked windows is
+   * a flat mid-grey the tables disappear into. A reading page is read
+   * for minutes at a time; it gets a light, slightly cool ground of
+   * its own and white tiles on it. */
+  background: var(--analysis-bg);
+  color: var(--text);
+}
 .monitor .analysis h4 {
   margin: 12px 0 4px;
   font: 600 12px var(--font);
@@ -1125,8 +1138,8 @@ table.legbook tr.spread .c-width { color: #7a4b00; }
 .monitor .an-tiles { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0; }
 .monitor .an-tile {
   flex: 1 1 110px;
-  background: #fafafa;
-  border: 1px solid #d5d5d5;
+  background: var(--analysis-tile);
+  border: 1px solid var(--analysis-line);
   padding: 4px 6px;
   text-align: center;
 }
