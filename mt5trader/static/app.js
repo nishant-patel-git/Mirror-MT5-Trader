@@ -45,7 +45,7 @@
     analysis: null, analysisAt: 0, analysisDays: 7, analysisPair: '',
     // The SIGMA ZONE track's own range. A day by default: the rows are
     // a tick-by-tick record, and a day of them is the usual read.
-    zoneDays: 1, zoneDate: '',
+    zoneDays: 1, zoneDate: '', deriving: false, deriveNote: null,
     analysisBt: null, analysisBtDays: 5,
     // What the Reconciler tab's adopt form has selected. IN STATE, not
     // in the DOM: that pane is re-rendered from innerHTML on every
@@ -4589,6 +4589,65 @@
   //: and how many would have lost. One set of tiles — a fixed ±2σ/±3σ
   //: study sat beside them for a while and was taken back out, because
   //: two sets of counts made the one that mattered harder to read.
+  //: Ask the engine to DERIVE the last 30 days from MT5's bars.
+  //: Long-running, so it goes through the command log like the
+  //: backtest and is polled for its answer.
+  function deriveSignals() {
+    if (state.deriving) { return; }
+    state.deriving = true;
+    state.deriveNote = {html: 'reading MT5\u2019s bars\u2026', cls: 'hint'};
+    render();
+    function done(html, cls) {
+      state.deriving = false;
+      state.deriveNote = {html: html, cls: cls || ''};
+      loadAnalysis(true);
+      render();
+    }
+    fetch('/api/command', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({kind: 'backfill_signals',
+                            payload: {pair: state.analysisPair || null,
+                                      days: 30}})
+    }).then(function (r) { return r.json(); }).then(function (sent) {
+      if (!sent.ok) {
+        return done(escapeHtml(sent.error || 'refused'), 'down');
+      }
+      var tries = 0;
+      (function poll() {
+        fetch('/api/result/' + sent.id).then(function (r) { return r.json(); })
+          .then(function (result) {
+            if (result && result.pending) {
+              if (++tries > 240) {
+                return done('no answer from the engine yet \u2014 try again',
+                            'down');
+              }
+              return window.setTimeout(poll, 500);
+            }
+            var data = (result && result.data) || {};
+            if (!result || result.ok === false || data.ok === false) {
+              return done('could not derive: ' +
+                          escapeHtml(data.reason || result.error ||
+                                     'refused'), 'down');
+            }
+            var parts = Object.keys(data.pairs || {}).map(function (key) {
+              var one = data.pairs[key];
+              return escapeHtml(key) + ': ' + (one.ok ?
+                one.derived + ' derived' +
+                (one.replaced ? ', ' + one.replaced + ' replaced' : '') :
+                escapeHtml(one.reason || 'no history'));
+            });
+            done('derived ' + data.written + ' signal(s) over ' + data.days +
+                 ' days \u2014 ' + parts.join(' \u00b7 '),
+                 data.written ? 'up' : 'hint');
+          }).catch(function (error) {
+            done('could not derive: ' + escapeHtml(error.message), 'down');
+          });
+      }());
+    }).catch(function (error) {
+      done('could not derive: ' + escapeHtml(error.message), 'down');
+    });
+  }
+
   function signalTiles(a) {
     var t = a.signal_tally || {};
     if (!t.armed) { return ''; }
@@ -4609,7 +4668,14 @@
              anPct(t.revert_rate), '',
              t.reverted + ' of ' + t.settled + ' crossed the mean \u2014 a ' +
              'different question from whether it paid') +
-      '</div>';
+      anTile('Net', money(t.net_pnl), anSign(t.net_pnl),
+             t.priced + ' of ' + t.settled + ' settled signals carried a ' +
+             'measurable P&L') +
+      '</div>' +
+      '<div class="hint">' + t.live + ' measured forward, ' + t.replayed +
+      ' derived from MT5\u2019s bars. A derived row sees one look per ' +
+      'candle: a stop touched and recovered inside one is not seen, and ' +
+      'the bid-ask is today\u2019s width held constant.</div>';
   }
 
   function signalTable(a) {
@@ -4623,17 +4689,26 @@
     };
     var html = '<h4>Signals <small>— on the ladder’s own ' +
       'settings, with its Algo on or off: how often it would have ' +
-      'traded, and how that would have gone</small></h4>';
+      'traded, and how that would have gone</small>' +
+      '<button class="btn an-derive"' +
+      (state.deriving ? ' disabled' : '') + '>' +
+      (state.deriving ? 'deriving…' : 'Derive 30 days') +
+      '</button></h4>';
+    if (state.deriveNote) {
+      html += '<div class="an-bt-out ' + (state.deriveNote.cls || '') +
+        '">' + state.deriveNote.html + '</div>';
+    }
     html += zoneRangeBar(a);
     html += signalTiles(a);
     html += '<table class="an-table"><thead><tr><th>Signalled</th>' +
-      '<th class="l">Pair</th><th class="l">Side</th>' +
+      '<th class="l">Pair</th><th class="l">From</th>' +
+      '<th class="l">Side</th>' +
       '<th>z in</th><th>Entered</th><th>Entry</th><th>Take profit</th>' +
       '<th>Stop loss</th><th class="l">Outcome</th><th class="l">Back to ' +
       'mean</th><th>Best</th><th>Worst</th><th>Held</th>' +
       '</tr></thead><tbody>';
     if (!rows.length) {
-      html += '<tr><td colspan="13" class="hint">no signal in this ' +
+      html += '<tr><td colspan="15" class="hint">no signal in this ' +
         'range</td></tr>';
     }
     rows.forEach(function (r) {
@@ -4641,6 +4716,12 @@
         [r.state === 'OPEN' ? 'running' : 'armed', ''];
       html += '<tr><td>' + anClock(r.armed_at) + '</td>' +
         '<td class="l">' + label(r.pair_key) + '</td>' +
+        '<td class="l' + (r.source === 'REPLAY' ? ' hint' : '') +
+        '" title="' + (r.source === 'REPLAY' ?
+          'derived afterwards from MT5\u2019s bars \u2014 one look per ' +
+          'candle, so a stop touched and recovered inside one is not seen' :
+          'measured forward, tick by tick, as it happened') + '">' +
+        (r.source === 'REPLAY' ? 'derived' : 'measured') + '</td>' +
         '<td class="l">' + anSide(r.side) + '</td>' +
         '<td>' + fmt(r.armed_z, 2) + '</td>' +
         '<td>' + (r.entered_at ? anClock(r.entered_at) : DASH) + '</td>' +
@@ -4648,6 +4729,8 @@
         '<td>' + fmt(r.tp, 4) + '</td>' +
         '<td>' + fmt(r.sl, 4) + '</td>' +
         '<td class="l ' + out[1] + '">' + out[0] + '</td>' +
+        '<td class="' + anSign(r.net_pnl) + '">' + money(r.net_pnl) +
+        '</td>' +
         '<td class="l">' + (r.entered_at === null ? DASH :
           (r.reverted ? 'yes, ' + anMin(r.revert_min) : 'no')) + '</td>' +
         '<td class="' + anSign(r.peak_net) + '">' + money(r.peak_net) +
@@ -5118,6 +5201,10 @@
   function onMonitorClick(e) {
     var button = e.target.closest('button');
     if (!button) { return; }
+    if (button.classList.contains('an-derive')) {
+      deriveSignals();
+      return;
+    }
     if (button.classList.contains('an-bt-run')) {
       return runAnalysisBacktest();
     }

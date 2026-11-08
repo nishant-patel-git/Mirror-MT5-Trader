@@ -344,6 +344,14 @@ class Store:
         # over. NULL on rows written before it existed; those answer a
         # date filter with nothing rather than with the wrong day.
         ('z_zone_events', 'broker_day', 'TEXT'),
+        # Where a signal row came from: LIVE, measured forward as it
+        # happened, or REPLAY, derived afterwards from MT5's bars. NULL
+        # on rows written before the two could be told apart, which
+        # read back as LIVE - which is what they were.
+        ('signal_events', 'source', 'TEXT'),
+        ('signal_events', 'exit_reason', 'TEXT'),
+        # What the trade would have MADE at its close.
+        ('signal_events', 'net_pnl', 'REAL'),
         ('positions', 'naked_ms', 'REAL'),
         # MANUAL or ALGO. NULL on a row written before it existed, which
         # reads back as MANUAL: nothing traded by itself then either.
@@ -884,7 +892,8 @@ class Store:
                       'tp', 'sl', 'units', 'closed_at', 'closed_z',
                       'peak_net', 'trough_net', 'reverted', 'revert_min',
                       'held_min', 'entry_z', 'max_entry_z', 'reentry_back',
-                      'reentry_window_pct', 'algo_mode')
+                      'reentry_window_pct', 'algo_mode', 'source',
+                      'exit_reason', 'net_pnl')
 
     def save_signal(self, row):
         """Write a signal, or update the one `row['id']` names.
@@ -919,6 +928,7 @@ class Store:
             body = {name: row[name] for name in self.SIGNAL_COLUMNS}
             body['id'] = row['id']
             body['reverted'] = bool(body['reverted'])
+            body['source'] = body['source'] or 'LIVE'
             out.append(body)
         return out
 
@@ -948,12 +958,38 @@ class Store:
                 f'ORDER BY armed_at DESC, id DESC LIMIT ?', params).fetchall()
         return self._signal_rows(rows)
 
+    def drop_replayed(self, pair_key=None, since=None):
+        """Remove DERIVED rows before deriving them again.
+
+        A replay is a function of the candles and the settings, so
+        running it twice must not leave two of every trade. Live rows
+        are never touched: they were measured, and nothing re-derives
+        a measurement.
+        """
+        where = ["source = 'REPLAY'"]
+        params = []
+        if pair_key:
+            where.append('pair_key = ?')
+            params.append(pair_key)
+        if since is not None:
+            where.append('armed_at >= ?')
+            params.append(float(since))
+        with self._connect() as connection:
+            cursor = connection.execute(
+                'DELETE FROM signal_events WHERE ' + ' AND '.join(where),
+                params)
+            return cursor.rowcount
+
     def open_signals(self):
         """Everything still arming or running, so a restart picks the
         forward watch back up instead of losing it."""
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM signal_events WHERE state IN ('ARMED','OPEN') "
+                "SELECT * FROM signal_events "
+                "WHERE state IN ('ARMED','OPEN') "
+                # A REPLAY row that ran out of candles is not something
+                # the live watch can carry on marking.
+                "AND (source IS NULL OR source != 'REPLAY') "
                 "ORDER BY armed_at").fetchall()
         return self._signal_rows(rows)
 
