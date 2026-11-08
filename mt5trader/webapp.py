@@ -28,7 +28,7 @@ from datetime import date
 from flask import Flask, jsonify, render_template, request
 
 from . import analysis, atomicfile, config as cfg, diagnostics, fairvalue, \
-    hedgeratio, sizing, slippage
+    hedgeratio, sizing, slippage, zones
 from .commands import CommandLog
 from .legs import RemoteLeg
 
@@ -454,6 +454,12 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         counters. Computes no price of its own.
 
         `days`: trades OPENED in the last N days (0 = every one kept).
+        `zone_days`: the SIGMA ZONE track's own range, which is a
+            different question and has its own dropdown — the zone rows
+            are a tick-by-tick record and a day of them is the usual
+            read, where a day of trades is usually none. Filtered in
+            the query (see `Store.zone_events`), never by handing the
+            browser everything and throwing most of it away.
         `pair`: one ladder, or all.
         """
         db = store()
@@ -480,8 +486,23 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         names = {key: (pair or {}).get('name') or key
                  for key, pair in (raw.get('pairs') or {}).items()}
         body = analysis.report(positions, events, shadows, excursions, now)
+        try:
+            zone_days = float(request.args.get('zone_days', 1))
+        except ValueError:
+            zone_days = 1.0
+        zone_since = None if zone_days <= 0 else now - zone_days * 86400.0
+        try:
+            zone_rows = db.zone_events(pair_key, since=zone_since)
+            zone_span = db.zone_span(pair_key)
+        except Exception as e:
+            # A tab that cannot read one section still shows the rest:
+            # the zone track is a reading, not the money.
+            logging.error('the zone track could not be read: %s', e)
+            zone_rows, zone_span = [], {}
         return jsonify(dict(body, ok=True, days=days, pair=pair_key,
-                            names=names))
+                            names=names, zones=zone_rows,
+                            zone_days=zone_days, zone_span=zone_span,
+                            zone_statuses=list(zones.STATUSES)))
 
     @app.get('/api/position/<position_id>')
     def api_position(position_id):

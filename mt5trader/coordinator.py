@@ -20,11 +20,11 @@ import threading
 import time
 from datetime import datetime
 
-from . import algo as algo_module, analysis, atomicfile, carry, costs, \
-    config as config_module, depth as depth_book, fairvalue, hedgeratio, \
-    sizing, takeprofit
+from . import algo as algo_module, algofilters, analysis, atomicfile, \
+    bands, carry, costs, config as config_module, depth as depth_book, \
+    fairvalue, hedgeratio, sizing, takeprofit, zones
 from . import book as book_module
-from .algodesk import AlgoDesk
+from .algodesk import AlgoDesk, judge_filters
 from .algoexec import LiveSink
 from .book import Book
 from .database import Store
@@ -99,6 +99,26 @@ class Coordinator:
         self._shadow_saved = {}
         self._excursions = {}
         self._excursions_saved = {}
+        #: The ANALYSIS band, one per ladder: the same candles and the
+        #: same arithmetic the Algo's band uses, kept whether its Algo
+        #: is on, off, dry or live.
+        #:
+        #: It exists because the z track used to be fed from the Algo's
+        #: own body, and `_work_algo` returns None for a ladder whose
+        #: Algo is off — which is EVERY ladder after every restart,
+        #: since LIVE is off at every start. So the tab that is meant
+        #: to tell a trader whether the Algo is worth switching on
+        #: recorded nothing until they had switched it on.
+        #:
+        #: It measures and it is read by the Analysis tab. It cannot
+        #: reach an order: `_track` is the only caller, and nothing in
+        #: it returns a signal (`tests/test_algo.py` fails the build if
+        #: anything but `algoexec` sends).
+        self._bands = {}
+        #: The zone last RECORDED per (ladder, timeframe), read back
+        #: from the database at first use so a restart does not record
+        #: the zone the spread is already sitting in.
+        self._zone_last = None
         #: What recovery found at startup, and what it could not claim.
         self.recovery = {'recovered': 0, 'unclaimed': [], 'complete': False}
         self._last_journal = None
@@ -1062,7 +1082,13 @@ class Coordinator:
             settings = pair.exit_settings(self.config.settings)
             self._track_positions(pair, md, settings, now)
             self._track_shadows(pair, md, now)
-            self._track_excursions(pair, md, body, now)
+            # ONE band reading per pass, shared by the counters and the
+            # zone track, so the two can never disagree about what z
+            # was. The Algo's own numbers when its Algo is on; the
+            # analysis band's when it is off.
+            reading = self._band_reading(pair, md, body, now)
+            self._track_excursions(pair, md, reading, now)
+            self._track_zones(pair, md, body, reading, settings, now)
         except Exception as e:
             logging.exception('[ANALYSIS %s] skipped this pass: %s',
                               pair.key, e)
@@ -1151,16 +1177,83 @@ class Coordinator:
             tracker = self._excursions[key] = analysis.ZExcursions(saved, now)
         return tracker
 
-    def _track_excursions(self, pair, md, body, now):
-        """z on the Algo's OWN band — so only while its Algo is on."""
-        if not body or not md or md.get('mid_spread') is None \
-                or md.get('jump_reason'):
-            return
-        mean, sigma = body.get('mean'), body.get('sigma')
+    def _band(self, pair):
+        """This ladder's ANALYSIS band: the Algo's candles and the Algo's
+        arithmetic, kept whether or not its Algo is on.
+
+        Seeded from the saved candles — the same table the Algo fills,
+        keyed the same way — so after a restart it measures at once
+        instead of waiting `length` candles for a band it already had.
+        A new timeframe, length or beta is a different series and starts
+        again, exactly as the Algo's does.
+        """
+        signature = AlgoDesk._signature(pair)
+        held = self._bands.get(pair.key)
+        if held is not None and held[0] == signature:
+            return held[1]
+        params = algo_module.clean_params(getattr(pair, 'algo_params', None))
+        anchor = bands.round_offset(self._offset_of(pair.account_a)) or 0.0
+        candles = bands.SpreadCandles(params['timeframe_min'] * 60.0,
+                                      params['length'], anchor)
+        if self.store is not None:
+            try:
+                candles.seed(self.store.analysis_candles(
+                    pair.key, params['timeframe_min'] * 60.0,
+                    pair.hedge_ratio or 1.0,
+                    limit=params['length'] * bands.KEEP_MULTIPLE))
+            except Exception as e:
+                logging.error('[ANALYSIS %s] saved candles unreadable: %s',
+                              pair.key, e)
+        self._bands[pair.key] = (signature, candles)
+        return candles
+
+    def _band_reading(self, pair, md, body, now):
+        """One z for this pass, and where it came from.
+
+        The Algo's own mean and sigma when its Algo is on, so the tab
+        and the desk can never quote different numbers for the same
+        moment; the analysis band's when it is off — which is every
+        ladder after every restart, LIVE being off at every start.
+
+        None when there is nothing to measure: no price, a print the
+        jump guard is holding back (one bad close moves sigma for N
+        candles), or a band that is not full yet.
+        """
+        if not md or md.get('mid_spread') is None or md.get('jump_reason'):
+            return None
+        candles = self._band(pair)
+        closed = candles.observe(now, md['mid_spread'])
+        if closed is not None and self.store is not None:
+            try:
+                # ITS OWN TABLE, never `algo_candles` — see
+                # `Store.save_analysis_candles`. A reading must not be
+                # able to change what the Algo decides.
+                self.store.save_analysis_candles(
+                    pair.key, candles.timeframe_sec,
+                    pair.hedge_ratio or 1.0, [closed])
+            except Exception as e:
+                logging.error('[ANALYSIS %s] could not save a candle: %s',
+                              pair.key, e)
+        stats = candles.stats()
+        mean, sigma, source = None, None, 'analysis'
+        if body and body.get('mean') is not None and body.get('sigma'):
+            mean, sigma, source = body['mean'], body['sigma'], 'algo'
+        elif stats.get('ready'):
+            mean, sigma = stats['mean'], stats['sigma']
         if mean is None or not sigma:
+            return {'z': None, 'mean': mean, 'sigma': sigma, 'stats': stats,
+                    'source': source, 'candles': candles}
+        return {'z': (md['mid_spread'] - mean) / sigma, 'mean': mean,
+                'sigma': sigma, 'stats': stats, 'source': source,
+                'candles': candles}
+
+    def _track_excursions(self, pair, md, reading, now):
+        """The ±2 / ±3 sigma counters. Fed from the shared reading, so
+        they count with the Algo off as well as on."""
+        if not reading or reading.get('z') is None:
             return
         tracker = self._excursion(pair.key, now)
-        what = tracker.tally((md['mid_spread'] - mean) / sigma, now)
+        what = tracker.tally(reading['z'], now)
         last = self._excursions_saved.get(pair.key)
         if what == 'event' or (what and (
                 last is None or now - last >= self.ANALYSIS_SAVE_SEC)):
@@ -1173,6 +1266,151 @@ class Coordinator:
                 self.store.save_excursions(key, tracker.to_dict())
             except Exception as e:
                 logging.error('could not save the excursions: %s', e)
+
+    def _zone_state(self):
+        """The zone last RECORDED per (ladder, timeframe), read once.
+
+        From the database, so a restart does not record the zone the
+        spread is already sitting in — which is the whole of the
+        duplicate problem: the counters' arming lived in memory, and
+        every restart logged a fresh touch for a spread that had not
+        moved.
+        """
+        if self._zone_last is None:
+            self._zone_last = {}
+            if self.store is not None:
+                try:
+                    self._zone_last = self.store.zone_state()
+                except Exception as e:
+                    logging.error('could not read the zone state: %s', e)
+        return self._zone_last
+
+    def _track_zones(self, pair, md, body, reading, settings, now):
+        """Record a row when this ladder's SIGMA ZONE changes, and
+        nothing at all while it sits in one.
+
+        Runs whatever the Algo's mode is. It writes one database row
+        and returns; it cannot place, modify or cancel anything.
+        """
+        if not reading or reading.get('z') is None:
+            return None
+        z = reading['z']
+        zone = zones.zone_of(z)
+        candles = reading['candles']
+        key = (pair.key, float(candles.timeframe_sec))
+        state = self._zone_state()
+        previous = state.get(key)
+        if not zones.changed(previous, zone):
+            return None
+        params = algo_module.clean_params(getattr(pair, 'algo_params', None))
+        row = zones.event_row(
+            pair.key, now, z, zone, previous, reading['mean'],
+            reading['sigma'], params,
+            timeframe_sec=candles.timeframe_sec,
+            algo_mode=self.algos.mode(pair.key) or 'OFF',
+            step=pair.effective_increment(),
+            **self._zone_judgement(pair, md, body, reading, params, settings))
+        state[key] = zone
+        if self.store is not None:
+            try:
+                self.store.save_zone_event(row)
+                self.store.save_zone_state(pair.key, candles.timeframe_sec,
+                                           zone, now)
+            except Exception as e:
+                logging.error('could not record the zone change: %s', e)
+        return row
+
+    def _zone_judgement(self, pair, md, body, reading, params, settings):
+        """What the Algo would have made of this moment: its filters,
+        its edge, and the prices it would have used.
+
+        Every one of them FROZEN into the row, because a row whose
+        numbers move when the ladder is edited tomorrow is not a record
+        of what happened. Unpriceable stays None — a stop of 0.00 reads
+        as "get out at break-even", which is a different instruction.
+        """
+        z = reading['z']
+        side = zones.entry_side(z)
+        filters, block_reason = {'ready': False}, None
+        if body and body.get('filters'):
+            # ITS OWN READING. The Algo is running and has already
+            # judged this pass on its own band; re-judging it here
+            # against the analysis band's sigma would put two different
+            # verdicts on one moment.
+            filters = body['filters']
+            block_reason = body.get('blocked')
+        else:
+            cost_in = self._algo_cost(pair)
+            try:
+                filters, check = judge_filters(
+                    params, md, reading['stats'],
+                    reading['candles'].closes(), cost_in)
+                block_reason = None if side is None else check(side, z)
+            except Exception as e:
+                logging.error('[ANALYSIS %s] the filters would not price '
+                              'this zone: %s', pair.key, e)
+                filters, block_reason = {'ready': False}, None
+        warmup = ((body or {}).get('filters') or {}).get('warmup') or {}
+        qty = params['algo_qty']
+        # The edge AT THIS EVENT'S z, not the panel's preview.
+        #
+        # `judge_filters` prices its `edge` at the z an entry would be
+        # taken at (`entry_z` less the re-entry give-back) so the panel
+        # has a real number before z ever gets there. That is the right
+        # figure for a panel and the wrong one for a row: this row is a
+        # record of one moment, and capture scales with |z|, so the
+        # preview reads a different number from the one the filter
+        # actually judged here.
+        cost = (filters.get('cost') or {}).get('total')
+        edge = dict(algofilters.edge(z, reading['sigma'], filters.get('k'),
+                                     qty, cost, params['edge_capture_frac'],
+                                     params['edge_multiple']),
+                    on=params['edge_on'])
+        units = cost_in.get('k')            # `k` for ONE spread
+        terms = takeprofit.break_even_terms(
+            pair, md, settings, qty, units,
+            nights=float(settings.get('BREAK_EVEN_NIGHTS', 0.0) or 0.0),
+            carry_for=self.holding_carry(
+                pair, side or 'BUY',
+                float(settings.get('BREAK_EVEN_NIGHTS', 0.0) or 0.0)))
+        margin = (self.margin_detail(pair) or {}).get('money')
+        atr = None
+        if 'ATR' in (params['stop_mode'], params['target_mode']):
+            atr = algofilters.atr(
+                [reading['candles'].closed[b]
+                 for b in sorted(reading['candles'].closed)],
+                params['atr_period'])
+        target_points = self._zone_target_points(params, settings, margin,
+                                                 qty, units, atr)
+        stop_points = None
+        if params['stop_mode'] == 'ATR':
+            stop_points = (params['atr_stop_mult'] * atr
+                           if params['stop_loss_on'] and atr else None)
+        else:
+            stop_points = self._algo_stop_points(pair, qty, units, margin,
+                                                 params=params)
+        entry = None if side is None else executable_spread(
+            md, SpreadSide(side))
+        return {
+            'prices': zones.levels(side, entry, terms.get('added_points'),
+                                   target_points, stop_points,
+                                   pair.effective_increment()),
+            'edge': edge,
+            'filters': filters,
+            'block_reason': block_reason,
+            'warmup_done': bool(warmup.get('done', True)),
+        }
+
+    @staticmethod
+    def _zone_target_points(params, settings, margin, qty, units, atr):
+        """The take-profit's distance from break-even, in spread points."""
+        if params['target_mode'] == 'ATR':
+            return params['atr_target_mult'] * atr if atr else None
+        pct = params.get('tp_pct') or settings.get('TP_TARGET_PCT_OF_MARGIN')
+        if not pct or not margin:
+            return None
+        return takeprofit.points(
+            float(pct) / 100.0 * float(margin) * float(qty), units, qty)
 
     def reset_excursions(self, pair_key=None):
         """Zero the z-score excursion counters (one ladder, or all)."""

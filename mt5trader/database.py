@@ -160,6 +160,75 @@ CREATE TABLE IF NOT EXISTS z_excursions (
     data            TEXT NOT NULL
 );
 
+-- The Analysis tab's SIGMA ZONE track: one row per zone CHANGE, kept
+-- for good. The `z_excursions` blob above is a set of live counters
+-- that is overwritten on every save and holds 200 events at most, so
+-- it can answer "how many since the reset?" and nothing about last
+-- week. This is the history: append-only, indexed by time, and every
+-- number on a row frozen as it was judged AT THE EVENT so editing a
+-- ladder tomorrow cannot rewrite what yesterday said.
+CREATE TABLE IF NOT EXISTS z_zone_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    pair_key        TEXT NOT NULL,
+    at              REAL NOT NULL,      -- UTC seconds
+    timeframe_sec   REAL,
+    zone            TEXT NOT NULL,      -- MEAN, +1, +2, +3, -1, -2, -3
+    prev_zone       TEXT,
+    direction       TEXT,               -- OUT, IN, CROSS
+    z               REAL,
+    mean            REAL,
+    sigma           REAL,
+    side            TEXT,               -- the side the Algo would take
+    entry           REAL,               -- hypothetical, frozen
+    break_even      REAL,
+    tp              REAL,
+    sl              REAL,
+    edge_ratio      REAL,
+    edge_capture    REAL,
+    edge_cost       REAL,
+    edge_required   REAL,
+    edge_ok         INTEGER,            -- NULL = could not be priced
+    status          TEXT,
+    algo_mode       TEXT,               -- OFF, DRY_RUN or LIVE at the time
+    entry_z         REAL,               -- the settings in force, stamped on
+    max_entry_z     REAL,
+    stop_z          REAL,
+    length          INTEGER,
+    increment       REAL
+);
+
+-- The date-range dropdown filters on this, so it is an index and not a
+-- scan of every row ever written.
+CREATE INDEX IF NOT EXISTS z_zone_events_at
+    ON z_zone_events (pair_key, at DESC);
+
+-- The last zone RECORDED per ladder and timeframe, so a restart does
+-- not record the zone the spread is already sitting in. Losing this is
+-- what made a parked spread log a fresh touch per restart.
+CREATE TABLE IF NOT EXISTS z_zone_state (
+    pair_key        TEXT NOT NULL,
+    timeframe_sec   REAL NOT NULL,
+    zone            TEXT,
+    at              REAL NOT NULL,
+    PRIMARY KEY (pair_key, timeframe_sec)
+);
+
+-- The ANALYSIS band's own candles, kept apart from `algo_candles` on
+-- purpose. The analysis band runs whether a ladder's Algo is on or
+-- off, so it would otherwise be writing into the table the Algo seeds
+-- its band from — and a reading must never be able to change what the
+-- Algo decides, however identical the two closes look. It READS
+-- `algo_candles` to start warm; it writes only here.
+CREATE TABLE IF NOT EXISTS analysis_candles (
+    pair_key        TEXT NOT NULL,
+    timeframe_sec   REAL NOT NULL,
+    beta            REAL NOT NULL,
+    bucket          REAL NOT NULL,      -- candle start, UTC seconds
+    close           REAL NOT NULL,
+    source          TEXT,
+    PRIMARY KEY (pair_key, timeframe_sec, beta, bucket)
+);
+
 CREATE TABLE IF NOT EXISTS algo_candles (
     pair_key        TEXT NOT NULL,
     timeframe_sec   REAL NOT NULL,
@@ -582,6 +651,49 @@ class Store:
                             int(limit))).fetchall()
         return [(row['bucket'], row['close']) for row in reversed(rows)]
 
+    def save_analysis_candles(self, pair_key, timeframe_sec, beta, rows):
+        """Closed candles the ANALYSIS band watched, in its own table.
+
+        Never `algo_candles`: the analysis band runs with a ladder's
+        Algo off as well as on, and a reading that writes into the
+        table the Algo seeds from could change what the Algo decides
+        on a later run. Separate tables make that impossible rather
+        than merely unlikely.
+        """
+        rows = [(pair_key, float(timeframe_sec), float(beta), float(b),
+                 float(c), 'live') for b, c in rows or () if c is not None]
+        if not rows:
+            return 0
+        with self._connect() as connection:
+            connection.executemany(
+                'INSERT OR REPLACE INTO analysis_candles (pair_key, '
+                'timeframe_sec, beta, bucket, close, source) '
+                'VALUES (?,?,?,?,?,?)', rows)
+        return len(rows)
+
+    def analysis_candles(self, pair_key, timeframe_sec, beta, limit=500):
+        """The analysis band's own candles, and the Algo's where it has
+        none of its own for that bucket.
+
+        Reading `algo_candles` is safe in the direction that matters:
+        it lets the band start warm from whatever the Algo already
+        collected, without the analysis side ever writing there.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                'SELECT bucket, close FROM ('
+                '  SELECT bucket, close, 0 AS rank FROM analysis_candles '
+                '    WHERE pair_key = ? AND timeframe_sec = ? AND beta = ? '
+                '  UNION ALL '
+                '  SELECT bucket, close, 1 AS rank FROM algo_candles '
+                '    WHERE pair_key = ? AND timeframe_sec = ? AND beta = ?'
+                ') GROUP BY bucket HAVING rank = MIN(rank) '
+                'ORDER BY bucket DESC LIMIT ?',
+                (pair_key, float(timeframe_sec), float(beta),
+                 pair_key, float(timeframe_sec), float(beta),
+                 int(limit))).fetchall()
+        return [(row['bucket'], row['close']) for row in reversed(rows)]
+
     # -- the Analysis tab ------------------------------------------------------
 
     def save_shadow(self, watch):
@@ -623,6 +735,95 @@ class Store:
             rows = connection.execute(
                 'SELECT pair_key, data FROM z_excursions').fetchall()
         return {row['pair_key']: json.loads(row['data']) for row in rows}
+
+    #: The columns of one zone row, in the order they are written.
+    ZONE_COLUMNS = ('pair_key', 'at', 'timeframe_sec', 'zone', 'prev_zone',
+                    'direction', 'z', 'mean', 'sigma', 'side', 'entry',
+                    'break_even', 'tp', 'sl', 'edge_ratio', 'edge_capture',
+                    'edge_cost', 'edge_required', 'edge_ok', 'status',
+                    'algo_mode', 'entry_z', 'max_entry_z', 'stop_z',
+                    'length', 'increment')
+
+    def save_zone_event(self, row):
+        """Append one sigma-zone change. Never updates: the history is
+        the point, and a row that can be rewritten is not one."""
+        values = []
+        for name in self.ZONE_COLUMNS:
+            value = row.get(name)
+            if name == 'edge_ok' and value is not None:
+                value = 1 if value else 0
+            values.append(value)
+        with self._connect() as connection:
+            connection.execute(
+                'INSERT INTO z_zone_events (%s) VALUES (%s)'
+                % (','.join(self.ZONE_COLUMNS),
+                   ','.join('?' * len(self.ZONE_COLUMNS))), values)
+        return True
+
+    def zone_events(self, pair_key=None, since=None, limit=2000):
+        """Zone changes, newest first, FILTERED IN THE QUERY.
+
+        `since` is a UTC second, and the index on (pair_key, at) serves
+        it — the date range must never become "read every row ever
+        written and throw most of them away in the browser".
+        """
+        where, params = [], []
+        if pair_key:
+            where.append('pair_key = ?')
+            params.append(pair_key)
+        if since is not None:
+            where.append('at >= ?')
+            params.append(float(since))
+        clause = ('WHERE ' + ' AND '.join(where)) if where else ''
+        params.append(int(limit))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f'SELECT * FROM z_zone_events {clause} '
+                f'ORDER BY at DESC, id DESC LIMIT ?', params).fetchall()
+        out = []
+        for row in rows:
+            body = {name: row[name] for name in self.ZONE_COLUMNS}
+            body['id'] = row['id']
+            if body['edge_ok'] is not None:
+                body['edge_ok'] = bool(body['edge_ok'])
+            out.append(body)
+        return out
+
+    def zone_span(self, pair_key=None):
+        """Per ladder: first and last row, and how many. What the data
+        availability question actually asks."""
+        where, params = [], []
+        if pair_key:
+            where.append('pair_key = ?')
+            params.append(pair_key)
+        clause = ('WHERE ' + ' AND '.join(where)) if where else ''
+        with self._connect() as connection:
+            rows = connection.execute(
+                f'SELECT pair_key, MIN(at) AS first_at, MAX(at) AS last_at, '
+                f'COUNT(*) AS rows FROM z_zone_events {clause} '
+                f'GROUP BY pair_key', params).fetchall()
+        return {row['pair_key']: {'first_at': row['first_at'],
+                                  'last_at': row['last_at'],
+                                  'rows': row['rows']} for row in rows}
+
+    def save_zone_state(self, pair_key, timeframe_sec, zone, at=None):
+        """Remember the zone last RECORDED, so a restart does not record
+        the one the spread is already in."""
+        with self._connect() as connection:
+            connection.execute(
+                'INSERT OR REPLACE INTO z_zone_state '
+                '(pair_key, timeframe_sec, zone, at) VALUES (?,?,?,?)',
+                (pair_key, float(timeframe_sec or 0.0), zone,
+                 self.clock() if at is None else float(at)))
+
+    def zone_state(self):
+        """{(pair_key, timeframe_sec): zone} as last recorded."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                'SELECT pair_key, timeframe_sec, zone '
+                'FROM z_zone_state').fetchall()
+        return {(row['pair_key'], float(row['timeframe_sec'])): row['zone']
+                for row in rows}
 
     def events_between(self, kinds, start=None, end=None):
         """Audit-trail rows of these kinds, oldest first."""

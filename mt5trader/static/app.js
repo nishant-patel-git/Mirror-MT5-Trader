@@ -43,6 +43,9 @@
     // is filtered to. The backtest's answer is kept here too, because
     // the pane is redrawn on every snapshot.
     analysis: null, analysisAt: 0, analysisDays: 7, analysisPair: '',
+    // The SIGMA ZONE track's own range. A day by default: the rows are
+    // a tick-by-tick record, and a day of them is the usual read.
+    zoneDays: 1,
     analysisBt: null, analysisBtDays: 5,
     // What the Reconciler tab's adopt form has selected. IN STATE, not
     // in the DOM: that pane is re-rendered from innerHTML on every
@@ -3698,6 +3701,10 @@
           state.analysisPair = e.target.value;
           loadAnalysis(true);
         }
+        if (e.target.classList.contains('an-zone-days')) {
+          state.zoneDays = Number(e.target.value);
+          loadAnalysis(true);
+        }
         if (e.target.classList.contains('an-bt-days')) {
           state.analysisBtDays = Number(e.target.value);
         }
@@ -4366,6 +4373,7 @@
     }
     state.analysisAt = now;
     fetch('/api/analysis?days=' + state.analysisDays +
+          '&zone_days=' + state.zoneDays +
           (state.analysisPair ? '&pair=' +
            encodeURIComponent(state.analysisPair) : ''))
       .then(function (r) { return r.json(); })
@@ -4461,6 +4469,139 @@
 
   function anSide(side) {
     return side === 'SELL' ? 'H to L' : (side === 'BUY' ? 'L to H' : (side || DASH));
+  }
+
+  //: How each Status reads, and what it means. The Algo's own gate
+  //: order: a band that cannot measure is not "filtered", and a filter
+  //: that could not be PRICED is a block, not a pass.
+  var ZONE_STATUS = {
+    COLLECTING: ['collecting', 'the band has not got its candles yet'],
+    WARMUP: ['warming up', 'the band is full but the live tape has not ' +
+             'been watched long enough'],
+    NO_SIGNAL: ['no signal', 'inside the entry threshold — the Algo ' +
+                'wants no entry here'],
+    ELIGIBLE: ['eligible', 'past the entry threshold with no filter or ' +
+               'gate refusing — NOT "it would have traded": the ' +
+               're-entry arming, the direction and the confirm ticks are ' +
+               'the Algo’s and are not modelled here'],
+    BEYOND_MAX: ['beyond max', 'past max_entry_z — a blow-out, not a ' +
+                 'stretch'],
+    FILTERED: ['filtered out', 'a filter priced it and said no'],
+    BLOCKED: ['blocked', 'a gate held it, or a filter could not be priced ' +
+              '— which the Algo treats as a block'],
+    SIGNALLED: ['signalled', 'the Algo signalled an entry here'],
+    ENTERED: ['entered', 'a position was opened from it']
+  };
+
+  function zoneStatusCell(row) {
+    var known = ZONE_STATUS[row.status];
+    var title = known ? known[1] : '';
+    if (row.blocked_by) { title += (title ? ' — ' : '') + row.blocked_by; }
+    var cls = row.status === 'ENTERED' || row.status === 'SIGNALLED' ? 'up'
+      : (row.status === 'FILTERED' || row.status === 'BLOCKED' ? 'down' : '');
+    return '<td class="l ' + cls + '"' +
+      (title ? ' title="' + escapeHtml(title) + '"' : '') + '>' +
+      escapeHtml(known ? known[0] : (row.status || DASH)) + '</td>';
+  }
+
+  function zoneCell(zone) {
+    if (!zone) { return DASH; }
+    return zone === 'MEAN' ? 'Mean' : zone + 'σ';
+  }
+
+  function zoneEdgeCell(row) {
+    // The ratio IS the edge filter's value: expected capture over the
+    // round-trip cost. None means it could not be priced, which the
+    // Algo treats as a block — never 0.00, which would read as "no
+    // edge at all" about a number nobody measured.
+    if (row.edge_ratio === null || row.edge_ratio === undefined) {
+      return '<td title="the round-trip cost is not priced yet">' + DASH +
+        '</td>';
+    }
+    var required = row.edge_required;
+    var title = 'capture ' + money(row.edge_capture) + ' against a cost of ' +
+      money(row.edge_cost) + (required ? ', ' + required + 'x required' : '');
+    return '<td class="' + (row.edge_ok ? 'up' : 'down') + '" title="' +
+      escapeHtml(title) + '">' + Number(row.edge_ratio).toFixed(2) + 'x</td>';
+  }
+
+  //: How many σ zone rows are KEPT in all, across every ladder — as
+  //: against how many the chosen range shows. Read by the range bar
+  //: and by the table's empty state, which say different things when
+  //: the track is empty ("none yet") and when the range is ("none in
+  //: this range").
+  function zoneTotal(a) {
+    var span = (a || {}).zone_span || {};
+    return Object.keys(span).reduce(function (sum, key) {
+      return sum + (span[key].rows || 0);
+    }, 0);
+  }
+
+  //: The cut-off the chosen range implies, in UTC seconds. 0 is "all
+  //: records" — every row ever kept.
+  function zoneSince() {
+    return state.zoneDays > 0
+      ? (Date.now() / 1000) - state.zoneDays * 86400 : 0;
+  }
+
+  //: The range dropdown. It heads the whole Z-score excursions view,
+  //: because it governs the counters' event list AND the σ zone table
+  //: under it — a range that moved one of two tables on one screen
+  //: would be worse than no range at all.
+  function zoneRangeBar(a) {
+    var total = zoneTotal(a);
+    return '<div class="an-bar">Showing the ' +
+      '<select class="an-zone-days">' +
+      [[1, 'last 1 day'], [7, 'last 7 days'], [30, 'last 30 days'],
+       [0, 'all records']].map(function (o) {
+        return '<option value="' + o[0] + '"' +
+          (state.zoneDays === o[0] ? ' selected' : '') + '>' + o[1] +
+          '</option>';
+      }).join('') + '</select>' +
+      (total ? ' <span class="hint">' + (a.zones || []).length + ' of ' +
+        total + ' σ zone changes kept</span>' : '') + '</div>';
+  }
+
+  function zoneTable(a) {
+    var rows = a.zones || [];
+    var total = zoneTotal(a);
+    var html = '<h4>σ zone changes <small>— one row when the ' +
+      'zone CHANGES, and nothing while it sits in one</small></h4>';
+    html += '<table class="an-table"><thead><tr><th>When</th>' +
+      '<th class="l">Zone</th><th class="l">From</th><th>z</th>' +
+      '<th class="l">Side</th><th>Edge</th><th class="l">Status</th>' +
+      '<th>Entry</th><th>Take profit</th><th>Stop loss</th>' +
+      '<th class="l">Algo</th></tr></thead><tbody>';
+    if (!rows.length) {
+      html += '<tr><td colspan="11" class="hint">no σ zone change in ' +
+        'this range' + (total ? '' : ' — the track starts recording ' +
+        'as soon as a ladder’s band has its candles, with the Algo ' +
+        'on or off') + '</td></tr>';
+    }
+    rows.forEach(function (r) {
+      // The prices are HYPOTHETICAL and frozen at the event: what the
+      // settings in force at the time would have produced. Most zone
+      // changes never become a trade.
+      html += '<tr><td>' + anClock(r.at) + '</td>' +
+        '<td class="l"><b>' + zoneCell(r.zone) + '</b></td>' +
+        '<td class="l hint">' + zoneCell(r.prev_zone) + '</td>' +
+        '<td>' + fmt(r.z, 2) + '</td>' +
+        '<td class="l">' + anSide(r.side) + '</td>' +
+        zoneEdgeCell(r) + zoneStatusCell(r) +
+        '<td>' + fmt(r.entry, 4) + '</td>' +
+        '<td title="measured from break-even ' + fmt(r.break_even, 4) +
+        '">' + fmt(r.tp, 4) + '</td>' +
+        '<td>' + fmt(r.sl, 4) + '</td>' +
+        '<td class="l hint">' + escapeHtml(r.algo_mode || DASH) +
+        '</td></tr>';
+    });
+    html += '</tbody></table>' +
+      '<div class="note">Entry, take profit and stop loss are what the ' +
+      'ladder’s settings AT THAT MOMENT would have produced, frozen ' +
+      'into the row — editing a ladder does not rewrite them. They ' +
+      'are hypothetical: most σ zone changes never become a trade, ' +
+      'and a level that could not be priced is a dash, never a zero.</div>';
+    return html;
   }
 
   function analysisPane() {
@@ -4616,11 +4757,12 @@
     var ex = a.z_excursions || {};
     var keys = Object.keys(ex);
     html += '<h4>Z-score excursions <small>\u2014 on the Algo\u2019s own ' +
-      'band, while it is on</small> <button class="btn an-reset">Reset</button>' +
-      '</h4>';
+      'band, with its Algo on or off</small> ' +
+      '<button class="btn an-reset">Reset</button></h4>';
+    html += zoneRangeBar(a);
     if (!keys.length) {
       html += '<p class="hint">nothing counted yet \u2014 counting starts ' +
-        'when a ladder\u2019s Algo is on</p>';
+        'as soon as a ladder\u2019s band has its candles</p>';
     }
     keys.forEach(function (key) {
       var e = ex[key];
@@ -4637,7 +4779,9 @@
         anTile('Peak |z|', peak === null ? DASH : peak.toFixed(2), '',
              'max ' + fmt(e.max_z, 2) + ' / min ' + fmt(e.min_z, 2)) +
         '</div>';
-      var events = (e.events || []).slice(0, 15);
+      var events = (e.events || []).filter(function (ev) {
+        return !zoneSince() || (ev.at || 0) >= zoneSince();
+      }).slice(0, 15);
       if (events.length) {
         html += '<table class="an-table"><tbody>' + events.map(function (ev) {
           var label = {touch_2_up: 'touched +2\u03c3', touch_2_down:
@@ -4649,6 +4793,8 @@
         }).join('') + '</tbody></table>';
       }
     });
+
+    html += zoneTable(a);
 
     // 7. The journal.
     var trips = a.journal || [];
