@@ -211,16 +211,18 @@ def test_the_days_that_have_signals_are_published_for_the_picker(desk):
 
 def test_the_tally_counts_what_the_tiles_show(desk):
     client, store = desk
-    for outcome in ('TP', 'TP', 'SL'):
+    for outcome, net in (('TP', 30.0), ('TP', 18.0), ('SL', -44.0)):
         write_signal(store, 'A|B', '2026-11-05', outcome=outcome,
-                     reverted=outcome == 'TP')
+                     net_pnl=net, reverted=outcome == 'TP')
     write_signal(store, 'A|B', '2026-11-05', outcome='NO_ENTRY',
                  state='CLOSED', entered_at=None, entered_z=None)
     body = client.get('/api/analysis?date=2026-11-05').get_json()
     tally = body['signal_tally']
     assert tally['armed'] == 4 and tally['entered'] == 3
     assert tally['no_entry'] == 1
+    # Won and lost are counted in MONEY, not by which level was touched.
     assert tally['tp'] == 2 and tally['sl'] == 1
+    assert tally['net_pnl'] == pytest.approx(4.0)
     assert tally['win_rate'] == pytest.approx(66.7)
 
 

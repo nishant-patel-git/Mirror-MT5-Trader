@@ -21,8 +21,9 @@ import time
 from datetime import datetime
 
 from . import algo as algo_module, algofilters, analysis, atomicfile, \
-    bands, carry, costs, config as config_module, depth as depth_book, \
-    fairvalue, hedgeratio, signals, sizing, takeprofit, zones
+    backtest, bands, carry, costs, config as config_module, \
+    depth as depth_book, fairvalue, hedgeratio, signals, sizing, \
+    takeprofit, zones
 from . import book as book_module
 from .algodesk import AlgoDesk, judge_filters
 from .algoexec import LiveSink
@@ -1743,6 +1744,71 @@ class Coordinator:
             out[f'leg_{leg}_side'] = side
             out[f'leg_{leg}_entry'] = entry
             out[f'leg_{leg}_now'] = now
+        return out
+
+    #: How far back a derived history reaches by default.
+    BACKFILL_DAYS = 30
+
+    def backfill_signals(self, pair_key=None, days=None):
+        """DERIVE the signals of the last `days` from MT5's own bars.
+
+        The live track only measures forward: it starts empty and fills
+        from the moment it is deployed, so it can say nothing about a
+        day that has already gone. This replays the ladder's own
+        settings back over MT5's history through `backtest.run` — the
+        same `algo.AlgoSignal` the live Algo runs, fed candles instead
+        of ticks — and writes what it would have traded as signal rows
+        stamped REPLAY.
+
+        It is a reading, not a measurement, and the difference is on
+        the screen: one look per candle cannot see a stop touched and
+        recovered inside one, and the bid-ask is today's width held
+        constant. Re-running replaces the derived rows rather than
+        adding a second copy of every trade; live rows are never
+        touched.
+
+        Sends nothing. It is `algo_backtest` with its answer written
+        down instead of drawn once.
+        """
+        days = max(1, min(int(days or self.BACKFILL_DAYS), 90))
+        keys = [pair_key] if pair_key else list(self.config.pairs)
+        out = {'ok': True, 'days': days, 'pairs': {}, 'written': 0,
+               'caveats': []}
+        if self.store is None:
+            return {'ok': False, 'reason': 'no database to write to'}
+        for key in keys:
+            answer = self.algo_backtest(key, days=days, compare=False)
+            if not answer.get('ok'):
+                out['pairs'][key] = {'ok': False,
+                                     'reason': answer.get('reason')}
+                continue
+            pair = self.config.pairs[key]
+            params = algo_module.clean_params(pair.algo_params)
+            units = (self._algo_cost(pair).get('k') or 0.0) \
+                * params['algo_qty']
+            offset = self._offset_of(pair.account_a)
+            rows = []
+            for trade in answer.get('trades') or ():
+                opened = trade.get('opened_at')
+                rows.append(signals.from_replay(
+                    trade, key, params,
+                    broker_day=backtest._broker_day(opened, offset),
+                    units=units or None))
+            try:
+                dropped = self.store.drop_replayed(key)
+                for row in rows:
+                    self.store.save_signal(row)
+            except Exception as e:
+                logging.error('[BACKFILL %s] could not write: %s', key, e)
+                out['pairs'][key] = {'ok': False, 'reason': str(e)}
+                continue
+            out['pairs'][key] = {'ok': True, 'derived': len(rows),
+                                 'replaced': dropped,
+                                 'candles': answer.get('summary', {}).get(
+                                     'candles'),
+                                 'note': answer.get('note')}
+            out['written'] += len(rows)
+            out['caveats'] = answer.get('caveats') or out['caveats']
         return out
 
     def algo_backtest(self, pair_key, days=5, compare=True):

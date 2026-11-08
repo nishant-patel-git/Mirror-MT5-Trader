@@ -47,6 +47,23 @@ REARM_INSIDE = 1.0
 #: written when there were three must still read back.
 ALGO = 'ALGO'
 
+#: WHERE A ROW CAME FROM, and it matters enough to be on the screen.
+#:
+#: LIVE is measured forward tick by tick, as it happened. REPLAY is
+#: derived afterwards by running the ladder's own settings back over
+#: MT5's bars, which is the only way to answer for a day that has
+#: already gone - and it sees one look per candle, so a stop touched
+#: and recovered inside fifteen minutes is invisible to it. Mixing the
+#: two silently would let a trader read a candle-resolution guess as a
+#: measurement.
+LIVE, REPLAY = 'LIVE', 'REPLAY'
+SOURCES = (LIVE, REPLAY)
+
+#: The Algo's own exit reasons, and what each one settles as. Only the
+#: take-profit and the stop say a level was REACHED; the rest closed
+#: the trade for another reason entirely and are neither.
+EXIT_OUTCOME = {'PROFIT_TARGET': 'TP', 'STOP_LOSS': 'SL'}
+
 #: Where a signal is in its life.
 ARMED = 'ARMED'          # stretched out; waiting (ALGO) or entered at once
 OPEN = 'OPEN'            # hypothetically on, being watched forward
@@ -148,6 +165,12 @@ def new_signal(pair_key, basis, side, at, z, params, broker_day=None,
         'units': None,
         'closed_at': None, 'closed_z': None,
         'peak_net': None, 'trough_net': None,
+        #: What the trade would have MADE, in money, at its close. The
+        #: page's "would have won / would have lost" is this, not which
+        #: level was touched: an exit on the mean reversion in profit
+        #: is a win however it got out.
+        'net_pnl': None,
+        'source': LIVE, 'exit_reason': None,
         'reverted': False, 'revert_min': None,
         'held_min': None,
         'entry_z': params.get('entry_z'),
@@ -251,21 +274,61 @@ def watch(signal, closing_spread, z, at, window_sec):
             signal['revert_min'] = minutes
             changed = True
     if _hit_stop(signal, closing_spread):
-        return _close(signal, SL, at, z, minutes)
+        return _close(signal, SL, at, z, minutes, net)
     if _hit_target(signal, closing_spread):
-        return _close(signal, TP, at, z, minutes)
+        return _close(signal, TP, at, z, minutes, net)
     if window_sec and at - signal['entered_at'] >= float(window_sec):
-        return _close(signal, EXPIRED, at, z, minutes) or True
+        return _close(signal, EXPIRED, at, z, minutes, net) or True
     return changed
 
 
-def _close(signal, outcome, at, z, minutes):
+def _close(signal, outcome, at, z, minutes, net=None):
     signal['state'] = CLOSED
     signal['outcome'] = outcome
     signal['closed_at'] = float(at)
     signal['closed_z'] = None if z is None else round(float(z), 3)
     signal['held_min'] = minutes
+    if net is not None:
+        signal['net_pnl'] = round(float(net), 2)
     return True
+
+
+def from_replay(trade, pair_key, params, broker_day=None, units=None):
+    """One trade from `backtest.run` as a signal row.
+
+    The backtest replays the SAME `algo.AlgoSignal` the live Algo runs,
+    so its arming, its filters and its exits are not a second model of
+    the Algo - they are the Algo, fed candles instead of ticks. What
+    differs is resolution, and that is why the row is stamped REPLAY:
+    one look per candle cannot see a stop touched and recovered inside
+    one.
+    """
+    params = dict(params or {})
+    opened = trade.get('opened_at')
+    closed = trade.get('closed_at')
+    reason = trade.get('reason')
+    z_in = trade.get('entry_z')
+    row = new_signal(pair_key, ALGO, trade.get('side'), opened,
+                     0.0 if z_in is None else z_in, params,
+                     broker_day=broker_day,
+                     threshold=params.get('entry_z'))
+    row['source'] = REPLAY
+    row['exit_reason'] = reason
+    row['entered_at'] = opened
+    row['entered_z'] = None if z_in is None else round(float(z_in), 3)
+    row['entry'] = trade.get('entry')
+    row['units'] = units
+    if closed is None:
+        # Still open when the replay ran out of candles. Not a result.
+        row['state'] = OPEN
+        return row
+    row['state'] = CLOSED
+    row['outcome'] = EXIT_OUTCOME.get(reason, EXPIRED)
+    row['closed_at'] = closed
+    row['held_min'] = round(max(0.0, closed - opened) / 60.0, 1)
+    pnl = trade.get('pnl')
+    row['net_pnl'] = None if pnl is None else round(float(pnl), 2)
+    return row
 
 
 def tally(rows):
@@ -279,8 +342,14 @@ def tally(rows):
     mine = list(rows or ())
     entered = [r for r in mine if r.get('entered_at') is not None]
     settled = [r for r in entered if r.get('outcome') in (TP, SL, EXPIRED)]
-    wins = [r for r in settled if r.get('outcome') == TP]
-    losses = [r for r in settled if r.get('outcome') == SL]
+    # WON and LOST are measured in money, not by which level was
+    # touched. An exit on the mean reversion in profit is a win however
+    # it got out, and a page that called it "neither" would under-report
+    # exactly the trades the Algo's own exits are there to take. A row
+    # whose P&L was never measured is in neither count.
+    priced = [r for r in settled if r.get('net_pnl') is not None]
+    wins = [r for r in priced if r['net_pnl'] > 0]
+    losses = [r for r in priced if r['net_pnl'] < 0]
     reverted = [r for r in settled if r.get('reverted')]
     nets = [r['peak_net'] for r in settled if r.get('peak_net') is not None]
     return {
@@ -289,13 +358,18 @@ def tally(rows):
         'no_entry': sum(1 for r in mine if r.get('outcome') == NO_ENTRY),
         'open': sum(1 for r in mine if r.get('state') == OPEN),
         'settled': len(settled),
+        'priced': len(priced),
         'tp': len(wins), 'sl': len(losses),
+        'net_pnl': (round(sum(r['net_pnl'] for r in priced), 2)
+                    if priced else None),
+        'live': sum(1 for r in mine if r.get('source') != REPLAY),
+        'replayed': sum(1 for r in mine if r.get('source') == REPLAY),
         'expired': sum(1 for r in settled if r.get('outcome') == EXPIRED),
         'reverted': len(reverted),
         # None, not 0, where nothing has settled: a win rate of 0% on no
         # trades is a statement nobody measured.
-        'win_rate': (round(100.0 * len(wins) / len(settled), 1)
-                     if settled else None),
+        'win_rate': (round(100.0 * len(wins) / len(priced), 1)
+                     if priced else None),
         'revert_rate': (round(100.0 * len(reverted) / len(settled), 1)
                         if settled else None),
         'best_peak': round(max(nets), 2) if nets else None,

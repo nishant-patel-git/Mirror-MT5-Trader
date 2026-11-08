@@ -179,9 +179,11 @@ def test_an_unpriced_signal_is_watched_without_inventing_a_number():
 
 def test_the_tally_counts_armed_entered_and_how_they_ended():
     rows = []
-    for outcome in (signals.TP, signals.TP, signals.SL, signals.EXPIRED):
+    for outcome, net in ((signals.TP, 30.0), (signals.TP, 18.0),
+                         (signals.SL, -44.0), (signals.EXPIRED, -3.0)):
         sig = armed_then_entered('SELL', tp=12.5, sl=13.4)
         sig['state'], sig['outcome'] = signals.CLOSED, outcome
+        sig['net_pnl'] = net
         sig['reverted'] = outcome != signals.SL
         rows.append(sig)
     never = signals.new_signal('A|B', signals.ALGO, 'SELL', 0.0, 2.6,
@@ -191,7 +193,8 @@ def test_the_tally_counts_armed_entered_and_how_they_ended():
     body = signals.tally(rows)
     assert body['armed'] == 5 and body['entered'] == 4
     assert body['no_entry'] == 1 and body['settled'] == 4
-    assert body['tp'] == 2 and body['sl'] == 1 and body['expired'] == 1
+    # Won and lost are by MONEY: the expired trade closed at -$3.
+    assert body['tp'] == 2 and body['sl'] == 2 and body['expired'] == 1
     assert body['win_rate'] == 50.0
     assert body['reverted'] == 3 and body['revert_rate'] == 75.0
 
@@ -208,3 +211,82 @@ def test_nothing_at_all_still_reports_every_figure():
     body = signals.tally([])
     assert body['armed'] == 0 and body['entered'] == 0
     assert body['win_rate'] is None and body['revert_rate'] is None
+
+
+# -- derived from history ----------------------------------------------------
+
+def replay_trade(**kw):
+    return dict({'side': 'SELL', 'opened_at': 1000.0, 'entry': 13.2,
+                 'entry_z': 2.61, 'closed_at': 4600.0, 'exit': 12.7,
+                 'reason': 'PROFIT_TARGET', 'pnl': 24.5}, **kw)
+
+
+def test_a_replayed_trade_becomes_a_signal_that_says_it_is_derived():
+    row = signals.from_replay(replay_trade(), 'A|B', PARAMS,
+                              broker_day='2026-11-05', units=50.0)
+    assert row['source'] == signals.REPLAY
+    assert row['basis'] == signals.ALGO
+    assert row['broker_day'] == '2026-11-05'
+    assert row['state'] == signals.CLOSED
+    assert row['outcome'] == signals.TP
+    assert row['net_pnl'] == 24.5
+    assert row['held_min'] == 60.0
+    assert row['armed_z'] == 2.61 and row['entered_z'] == 2.61
+
+
+def test_only_the_target_and_the_stop_say_a_level_was_reached():
+    """The Algo's other exits closed the trade for another reason
+    entirely; calling them a take-profit would overstate the page."""
+    assert signals.from_replay(replay_trade(reason='PROFIT_TARGET'),
+                               'A|B', PARAMS)['outcome'] == signals.TP
+    assert signals.from_replay(replay_trade(reason='STOP_LOSS'),
+                               'A|B', PARAMS)['outcome'] == signals.SL
+    for other in ('Z_STOP', 'MEAN_REVERSION', 'TIME_STOP', 'session cutoff'):
+        assert signals.from_replay(replay_trade(reason=other), 'A|B',
+                                   PARAMS)['outcome'] == signals.EXPIRED
+
+
+def test_a_replay_that_ran_out_of_candles_is_open_not_a_result():
+    row = signals.from_replay(
+        replay_trade(closed_at=None, pnl=None, reason='still open'),
+        'A|B', PARAMS)
+    assert row['state'] == signals.OPEN
+    assert row['outcome'] is None and row['net_pnl'] is None
+
+
+def test_won_and_lost_are_measured_in_money_not_by_the_level_touched():
+    """An exit on the mean reversion in profit is a win however it got
+    out. Counting only PROFIT_TARGET would under-report exactly the
+    trades the Algo's own exits exist to take."""
+    rows = [signals.from_replay(replay_trade(reason=r, pnl=p), 'A|B', PARAMS)
+            for r, p in (('PROFIT_TARGET', 30.0), ('MEAN_REVERSION', 12.0),
+                         ('STOP_LOSS', -40.0), ('TIME_STOP', -5.0))]
+    body = signals.tally(rows)
+    assert body['tp'] == 2 and body['sl'] == 2
+    assert body['win_rate'] == 50.0
+    assert body['net_pnl'] == -3.0
+
+
+def test_a_trade_whose_pnl_was_never_measured_is_in_neither_count():
+    rows = [signals.from_replay(replay_trade(pnl=None), 'A|B', PARAMS),
+            signals.from_replay(replay_trade(pnl=10.0), 'A|B', PARAMS)]
+    body = signals.tally(rows)
+    assert body['settled'] == 2 and body['priced'] == 1
+    assert body['tp'] == 1 and body['sl'] == 0
+    assert body['win_rate'] == 100.0
+
+
+def test_the_tally_says_how_many_rows_were_measured_and_how_many_derived():
+    live = armed_then_entered('SELL', tp=12.5, sl=13.4)
+    live['state'], live['outcome'], live['net_pnl'] = 'CLOSED', 'TP', 20.0
+    rows = [live, signals.from_replay(replay_trade(), 'A|B', PARAMS)]
+    body = signals.tally(rows)
+    assert body['live'] == 1 and body['replayed'] == 1
+
+
+def test_a_live_close_records_what_it_would_have_made():
+    sig = armed_then_entered('SELL', tp=12.5, sl=13.4)
+    signals.watch(sig, 12.4, 0.1, 600.0, 86400)
+    assert sig['outcome'] == signals.TP
+    # break-even 13.0, sold, closed at 12.4, k of 50
+    assert sig['net_pnl'] == 30.0
