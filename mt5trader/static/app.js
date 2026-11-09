@@ -580,9 +580,18 @@
     // the desk has been scrolled sideways.
     var origin = desktopOrigin();
     if (!desktop.width) { return; }
+    // HEIGHT IS THE ROOM THERE IS, not a flat 560.
+    //
+    // A tool window opened at 560px on a 900px screen left a third of
+    // the display as bare desktop below it while the Analysis tab -
+    // which is several screens long - scrolled inside a short box. The
+    // width still has a ceiling, because a table wider than about
+    // 1180 is read by scrolling whatever the window does; the height
+    // has none, because every one of these panes is a list that is
+    // either longer than the screen or quickly scrolled.
     var wanted = size(node,
                       Math.min(1180, Math.max(desktop.width - 80, 320)),
-                      Math.min(560, Math.max(desktop.height - 80, 200)));
+                      Math.max(desktop.height - 80, 200));
     // Stepped down and across so a second and third one do not land
     // exactly on top of the first.
     // Beside the tiled ladders where there is room for it, so opening
@@ -603,8 +612,13 @@
                        Math.max(desktop.height - wanted.h - 8, 0));
     var at = place(node, left, top);
     node.style.zIndex = nextZ();
+    // `auto`: this size was CHOSEN BY US, not by the trader. A size
+    // the trader dragged is theirs and is restored exactly; one we
+    // picked is recomputed on every open, so a saved default from a
+    // smaller screen - or from before this default grew - does not
+    // leave a strip of bare desktop under the window for good.
     layout[id] = {left: at.left, top: at.top, z: topZ,
-                  w: wanted.w, h: wanted.h};
+                  w: wanted.w, h: wanted.h, auto: true};
     writeLayout();
   }
 
@@ -653,7 +667,22 @@
       }
       return;
     }
-    if (saved.w && saved.h) { size(node, saved.w, saved.h); }
+    // `!== false`, not `=== true`: a layout saved before this flag
+    // existed has neither, and it is far more likely to be the old
+    // 560px default than a size somebody chose. Those windows take
+    // the room there is once, and a drag after that is remembered.
+    if (saved.auto !== false && FLOATING_BY_DEFAULT.indexOf(id) >= 0) {
+      // Ours, not theirs: take the room there is now.
+      var desktop = desktopBox();
+      if (desktop.width) {
+        var fresh = size(node,
+                         Math.min(1180, Math.max(desktop.width - 80, 320)),
+                         Math.max(desktop.height - 80, 200));
+        layout[id] = Object.assign({}, saved, {w: fresh.w, h: fresh.h});
+        writeLayout();
+      }
+    }
+    else if (saved.w && saved.h) { size(node, saved.w, saved.h); }
     else if (saved.w) {
       // Width remembered, height left to the content — what the fair
       // window is given until the trader drags it themselves.
@@ -777,7 +806,10 @@
     function move(event) {
       var to = size(node, box.width + (event.clientX - startX),
                     box.height + (event.clientY - startY));
-      layout[id] = Object.assign({}, layout[id], {w: to.w, h: to.h});
+      // Dragged by hand: the size is the trader's from here on, and
+      // is restored exactly rather than recomputed.
+      layout[id] = Object.assign({}, layout[id],
+                                 {w: to.w, h: to.h, auto: false});
     }
 
     function drop() {
@@ -3795,7 +3827,37 @@
       'opens, equal to one round turn of both legs’ bid-ask. That is ' +
       'what closing it immediately would cost.';
     node.classList.toggle('inactive', state.active !== panelId('monitor'));
+    fitMonitorPane(node);
     return node;
+  }
+
+  //: How close the foot of the monitor may come to the foot of the
+  //: desktop, and the least room its pane is ever given.
+  var MONITOR_PANE_GAP = 6;
+  var MONITOR_PANE_MIN = 160;
+
+  function fitMonitorPane(node) {
+    /* THE WINDOW TAKES THE ROOM THAT IS THERE.
+     *
+     * The pane was capped at a flat 60vh, so the Analysis tab - which
+     * is far longer than one screen - left the bottom third of the
+     * display as bare desktop while its own content scrolled inside a
+     * short box. The room that is actually available is from the
+     * pane's own top to the foot of the desktop, less the note that
+     * sits under it, and that is what it takes: a window dragged
+     * halfway down gets what is left below it rather than running off
+     * the bottom.
+     */
+    var pane = node.querySelector('.pane');
+    var desktop = el('desktop');
+    if (!pane || !desktop) { return; }
+    var note = node.querySelector('.monitor-note');
+    var foot = desktop.getBoundingClientRect().bottom;
+    var top = pane.getBoundingClientRect().top;
+    var reserved = (note ? note.getBoundingClientRect().height : 0) +
+      MONITOR_PANE_GAP;
+    pane.style.maxHeight =
+      Math.max(foot - top - reserved, MONITOR_PANE_MIN) + 'px';
   }
 
   function eachPosition(callback) {
@@ -4466,6 +4528,31 @@
     return h ? h + 'h ' + m + 'm' : (m ? m + 'm ' + (s % 60) + 's' : s + 's');
   }
 
+  // A spread PRICE, not money: the two numbers a trade is the
+  // difference of. Trailing zeros come off back to two decimals, the
+  // same as the engine prints them.
+  function anSpread(value) {
+    if (value === null || value === undefined) { return DASH; }
+    var text = Number(value).toFixed(4);
+    var bits = text.split('.');
+    var decimals = bits[1].replace(/0+$/, '');
+    while (decimals.length < 2) { decimals += '0'; }
+    return bits[0] + '.' + decimals;
+  }
+
+  // The SIZE that was on, per leg. Two legs, so two numbers: a hedge
+  // is not one lot figure and printing one of them hides a mismatch.
+  function anLots(row) {
+    var a = row.lots_a, b = row.lots_b;
+    if ((a === null || a === undefined) && (b === null || b === undefined)) {
+      return DASH;
+    }
+    var one = function (v) {
+      return v === null || v === undefined ? DASH : Number(v).toFixed(2);
+    };
+    return one(a) + ' / ' + one(b);
+  }
+
   function anSide(side) {
     return side === 'SELL' ? 'H to L'
       : (side === 'BUY' ? 'L to H' : (side || DASH));
@@ -4578,7 +4665,8 @@
                 escapeHtml(one.reason || 'no history'));
             });
             done('derived ' + data.written + ' signal(s) over ' + data.days +
-                 ' days \u2014 ' + parts.join(' \u00b7 '),
+                 ' days \u2014 ' + parts.join(' \u00b7 ') +
+                 heldBack(data.held),
                  data.written ? 'up' : 'hint');
           }).catch(function (error) {
             done('could not derive: ' + escapeHtml(error.message), 'down');
@@ -4587,6 +4675,21 @@
     }).catch(function (error) {
       done('could not derive: ' + escapeHtml(error.message), 'down');
     });
+  }
+
+  // '0 derived' on its own reads as a broken replay. The reasons the
+  // replay REFUSED each entry are the answer when there are none, and
+  // the top three are as much as a one-line note can carry.
+  function heldBack(held) {
+    var reasons = Object.keys(held || {}).map(function (reason) {
+      return [reason, held[reason]];
+    }).sort(function (a, b) { return b[1] - a[1]; });
+    if (!reasons.length) { return ''; }
+    var total = reasons.reduce(function (sum, r) { return sum + r[1]; }, 0);
+    return ' \u2014 held back ' + total + ' time(s): ' +
+      reasons.slice(0, 3).map(function (r) {
+        return escapeHtml(r[0]) + ' ' + r[1];
+      }).join(', ');
   }
 
   function signalTiles(a) {
@@ -4613,10 +4716,11 @@
       anTile('Net', money(t.net_pnl), anSign(t.net_pnl),
              'over the trades that were actually taken') +
       '</div>' +
-      '<div class="hint">' + t.live + ' measured forward, ' + t.replayed +
-      ' derived from MT5\u2019s bars. A derived row sees one look per ' +
-      'candle: a stop touched and recovered inside one is not seen, and ' +
-      'the bid-ask is today\u2019s width held constant.</div>';
+      '<div class="hint">' + t.live + ' recorded live off the book, ' +
+      t.replayed + ' replayed from MT5\u2019s bars. A replayed row ' +
+      'sees one look per candle: a stop touched and recovered inside ' +
+      'one is not seen, and the bid-ask is today\u2019s width held ' +
+      'constant.</div>';
   }
 
   function signalTable(a) {
@@ -4628,72 +4732,93 @@
     var label = function (key) {
       return escapeHtml(names[key] || key || DASH);
     };
-    var html = '<h4>Signals <small>— on the ladder’s own ' +
-      'settings, with its Algo on or off: how often it would have ' +
-      'traded, and how that would have gone</small>' +
+    var html = '<h4>Signal journal <small>— every stretch the ' +
+      'ladder’s settings signalled, recorded as it happened, with ' +
+      'its Algo on or off: how often it signalled, what it refused, ' +
+      'and what the trades would have made</small>' +
       '<button class="btn an-derive"' +
       (state.deriving ? ' disabled' : '') + '>' +
       (state.deriving ? 'deriving…' : 'Derive 30 days') +
       '</button></h4>';
     if (state.deriveNote) {
-      html += '<div class="an-bt-out ' + (state.deriveNote.cls || '') +
-        '">' + state.deriveNote.html + '</div>';
+      // Its own class as well as the shared style: the backtest panel
+      // below also renders an `an-bt-out`, and a bare selector reaches
+      // whichever of the two comes first.
+      html += '<div class="an-bt-out an-derive-out ' +
+        (state.deriveNote.cls || '') + '">' + state.deriveNote.html +
+        '</div>';
     }
     html += zoneRangeBar(a);
     html += signalTiles(a);
+    // THE SIGNAL JOURNAL. Deliberately the same shape as the trade
+    // journal above it, so the two can be read against each other: the
+    // same columns, in the same order, with a running total down the
+    // right. A signal that was refused carries no money and must not
+    // move that total.
+    var SIGNAL_COLS = 13;
     html += '<table class="an-table"><thead><tr><th>Signalled</th>' +
-      '<th class="l">Pair</th><th class="l">From</th>' +
-      '<th class="l">Side</th>' +
-      '<th>z in</th><th>Entered</th><th>Entry</th><th>Take profit</th>' +
-      '<th>Stop loss</th><th class="l">Outcome</th><th class="l">Back to ' +
-      'mean</th><th>Best</th><th>Worst</th><th>Held</th>' +
+      '<th class="l">Pair</th><th class="l">Side</th>' +
+      '<th class="l">From</th><th>Size</th>' +
+      '<th>z in → out</th><th>Spread in → out</th>' +
+      '<th>Leg A in</th><th>Leg B in</th><th>Held</th>' +
+      '<th class="l">Outcome</th><th>Net P&amp;L</th><th>Running</th>' +
       '</tr></thead><tbody>';
     if (!rows.length) {
-      html += '<tr><td colspan="15" class="hint">no signal in this ' +
-        'range</td></tr>';
+      html += '<tr><td colspan="' + SIGNAL_COLS + '" class="hint">no ' +
+        'signal in this range</td></tr>';
     }
     rows.forEach(function (r) {
       var out = SIGNAL_OUTCOME[r.outcome] ||
         [r.state === 'OPEN' ? 'running' : 'armed', ''];
       html += '<tr><td>' + anClock(r.armed_at) + '</td>' +
         '<td class="l">' + label(r.pair_key) + '</td>' +
+        '<td class="l">' + anSide(r.side) + '</td>' +
         '<td class="l' + (r.source === 'REPLAY' ? ' hint' : '') +
         '" title="' + (r.source === 'REPLAY' ?
-          'derived afterwards from MT5\u2019s bars \u2014 one look per ' +
+          'replayed afterwards from MT5’s bars — one look per ' +
           'candle, so a stop touched and recovered inside one is not seen' :
-          'measured forward, tick by tick, as it happened') + '">' +
-        (r.source === 'REPLAY' ? 'derived' : 'measured') + '</td>' +
-        '<td class="l">' + anSide(r.side) + '</td>' +
-        '<td>' + fmt(r.armed_z, 2) + '</td>' +
-        '<td>' + (r.entered_at ? anClock(r.entered_at) : DASH) + '</td>' +
-        '<td>' + fmt(r.entry, 4) + '</td>' +
-        '<td>' + fmt(r.tp, 4) + '</td>' +
-        '<td>' + fmt(r.sl, 4) + '</td>' +
-        '<td class="l ' + out[1] + '"' +
-        (r.block_reason ? ' title="' + escapeHtml(r.block_reason) + '"'
-                        : '') + '>' + out[0] +
-        (r.outcome === 'BLOCKED' && r.edge_ratio !== null &&
-         r.edge_ratio !== undefined
-          ? ' <span class="hint">edge ' + Number(r.edge_ratio).toFixed(2) +
-            'x of ' + (r.edge_required || DASH) + 'x</span>' : '') +
+          'recorded live off the book, as it happened') + '">' +
+        (r.source === 'REPLAY' ? 'replayed' : 'live') + '</td>' +
+        '<td>' + (r.quantity === null || r.quantity === undefined ? DASH
+                  : qty(r.quantity)) + '</td>' +
+        '<td>' + fmt(r.armed_z, 2) + ' → ' + fmt(r.closed_z, 2) +
         '</td>' +
+        '<td>' + fmt(r.entry, 4) + ' → ' + fmt(r.exit_spread, 4) +
+        '</td>' +
+        '<td>' + (r.leg_a_entry === null || r.leg_a_entry === undefined
+                  ? DASH : (r.leg_a_side || '') + ' ' +
+                  fmt(r.leg_a_entry, 3)) + '</td>' +
+        '<td>' + (r.leg_b_entry === null || r.leg_b_entry === undefined
+                  ? DASH : (r.leg_b_side || '') + ' ' +
+                  fmt(r.leg_b_entry, 3)) + '</td>' +
+        '<td>' + (r.held_min === null || r.held_min === undefined ? DASH
+                  : anMin(r.held_min)) + '</td>' +
+        '<td class="l ' + out[1] + '">' + out[0] + '</td>' +
         '<td class="' + anSign(r.net_pnl) + '">' + money(r.net_pnl) +
         '</td>' +
-        '<td class="l">' + (r.entered_at === null ? DASH :
-          (r.reverted ? 'yes, ' + anMin(r.revert_min) : 'no')) + '</td>' +
-        '<td class="' + anSign(r.peak_net) + '">' + money(r.peak_net) +
-        '</td><td class="' + anSign(r.trough_net) + '">' +
-        money(r.trough_net) + '</td>' +
-        '<td>' + (r.held_min === null ? DASH : anMin(r.held_min)) +
+        '<td class="' + anSign(r.cum_pnl) + '">' + money(r.cum_pnl) +
         '</td></tr>';
+      // The levels it was judged against, the filter that refused it,
+      // or the window it never came back inside - whichever applies.
+      // A signal moves no money, so the row is only as good as what it
+      // says about itself.
+      if (r.detail) {
+        html += '<tr class="detail"><td></td><td colspan="' +
+          (SIGNAL_COLS - 1) + '" class="l">' + escapeHtml(r.detail) +
+          '</td></tr>';
+      }
     });
     html += '</tbody></table>' +
-      '<div class="note">Hypothetical, and measured forward from the ' +
-      'moment each signal armed — on the settings in force then, ' +
-      'with the Algo on or off. The stop is checked before the target, ' +
-      'so a poll where both look reached is booked as the stop. ' +
-      '“Came back” is the spread crossing its mean, which is a ' +
-      'different question from whether the trade paid.</div>';
+      '<div class="note">Recorded off the LIVE book as it happened: the ' +
+      'z, the executable prices and the two legs are what the market ' +
+      'was showing at that moment, on the settings in force then, with ' +
+      'the Algo on or off. What did not happen is the ORDER — ' +
+      'nothing here was sent, so Net P&amp;L is what the trade would ' +
+      'have made, not money taken. A row marked <i>replayed</i> is the ' +
+      'exception: it was reconstructed from MT5’s bars by ' +
+      '“Derive 30 days” and sees one look per candle. The ' +
+      'stop is checked before the target, so a poll where both look ' +
+      'reached is booked as the stop.</div>';
     return html;
   }
   function analysisPane() {
@@ -4723,11 +4848,13 @@
     var names = a.names || {};
     function name(key) { return escapeHtml(names[key] || key || DASH); }
 
-    // THE TWO HALVES. Above this line is what the desk actually did;
-    // below it is what the Algo would have done. They are different
-    // populations and they were being read as one page - four rows of
-    // em dashes over a busy hypothetical table looks like a fault
-    // rather than like a quiet week.
+    // THE TWO HALVES. Above this line is what the desk actually
+    // TRADED; below it is every stretch the settings signalled,
+    // whether or not an order followed. Both are measured off the same
+    // live book - the difference is that one half moved money. They
+    // are different populations and they were being read as one page:
+    // four rows of em dashes over a busy signal table looks like a
+    // fault rather than like a quiet week.
     var s = a.summary || {};
     html += '<h3 class="an-half">What actually happened ' +
       '<small>\u2014 the trades this desk really put on</small></h3>';
@@ -4875,6 +5002,13 @@
         '</td><td class="' + anSign(t.pnl) + '">' + money(t.pnl) +
         '</td><td class="' + anSign(t.cum_pnl) + '">' + money(t.cum_pnl) +
         '</td></tr>';
+      // WHY it ended, in numbers, under the row it belongs to: the
+      // level, the setting that put it there, and how far past it the
+      // close went. 'Algo: stop loss' says none of that.
+      if (t.exit_detail) {
+        html += '<tr class="detail"><td></td><td colspan="12" class="l">' +
+          escapeHtml(t.exit_detail) + '</td></tr>';
+      }
     });
     html += '</tbody></table>';
 
@@ -4882,7 +5016,11 @@
     // what these settings WOULD have done, which is a different
     // question from what the desk did, and the two were read as
     // one page until they were given a heading each.
-    html += '<h3 class="an-half">What the Algo would have done <small>\u2014 hypothetical, on the ladder\u2019s own settings, with its Algo on or off</small></h3>';
+    html += '<h3 class="an-half">What the Algo signalled <small>' +
+      '\u2014 recorded off the live book as it happened, on the ' +
+      'ladder\u2019s own settings, with its Algo on or off. The ' +
+      'signals are real; the ORDERS are what did not happen' +
+      '</small></h3>';
 
     // 5. The backtest.
     var bt = state.analysisBt;

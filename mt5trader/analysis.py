@@ -324,6 +324,110 @@ def drawdown(positions):
             'best_trade': round(max(_pnl(r) for r in closed), 2)}
 
 
+def _num(value, places=4):
+    """A spread price as the screen prints it, or None.
+
+    Trailing zeros are trimmed back to two decimals: an oil spread is
+    quoted in cents and `71.4000` reads as four digits of precision
+    this system does not have, while an FX spread genuinely needs them.
+    """
+    if value is None:
+        return None
+    try:
+        text = f'{float(value):,.{places}f}'
+    except (TypeError, ValueError):
+        return None
+    if '.' not in text:
+        return text
+    whole, _, decimals = text.partition('.')
+    decimals = decimals.rstrip('0')
+    while len(decimals) < 2:
+        decimals += '0'
+    return f'{whole}.{decimals}'
+
+
+def _lots(leg):
+    """One leg's volume, or None. `leg` is the stored JSON dict."""
+    if not isinstance(leg, dict):
+        return None
+    volume = leg.get('volume')
+    return None if volume is None else float(volume)
+
+
+#: The exit reasons the Algo itself signals, and which level each one
+#: was measured against. Anything else - a cutoff, a kill, a close by
+#: hand, a force-clear - is not a level being touched and is left in
+#: its own words.
+_LEVEL_OF_EXIT = (('stop loss', 'sl'), ('profit target', 'tp'))
+
+
+def exit_detail(row):
+    """WHY this trade ended, with the numbers behind it.
+
+    'Algo: stop loss' on its own does not say what the stop was, how it
+    was arrived at, or how far past it the close went - which is the
+    difference between a stop that was hit and a stop that was set in
+    the wrong place. The levels are the ones the position was last
+    judged against; a trade closed before they were kept has none, and
+    says so rather than guessing a level from today's settings.
+    """
+    reason = (row.get('close_reason') or '').lower()
+    levels = row.get('exit_levels') or {}
+    side = row.get('side')
+    sign = 1.0 if side in ('BUY', 'L to H') else -1.0
+    parts = []
+    which = None
+    for words, name in _LEVEL_OF_EXIT:
+        if words in reason:
+            which = name
+    level = levels.get(which) if which else None
+    be = levels.get('break_even')
+    exit_spread = row.get('exit_spread')
+    if which and level is not None:
+        said = 'stop' if which == 'sl' else 'target'
+        line = f'{said} {_num(level)}'
+        if be is not None:
+            gap = abs(float(level) - float(be))
+            line += f' = break-even {_num(be)} ' \
+                f'{"-" if (which == "sl") == (sign > 0) else "+"} {_num(gap)}'
+        parts.append(line)
+        parts.append(_how_the_level_was_set(which, levels))
+        if exit_spread is not None:
+            past = sign * (float(exit_spread) - float(level))
+            past = past if which == 'tp' else -past
+            parts.append(
+                f'closed {_num(exit_spread)}, {_num(abs(past))} '
+                + ('past it' if past >= 0 else 'short of it'))
+    elif which:
+        parts.append('the level it was measured against was not recorded '
+                     '— kept from this version on')
+    money = levels.get('sl_money') if which == 'sl' else \
+        levels.get('tp_money') if which == 'tp' else None
+    if money is not None:
+        parts.append(f'worth {money:,.2f} at that level')
+    return ' · '.join(p for p in parts if p) or None
+
+
+def _how_the_level_was_set(which, levels):
+    """The SETTING behind a stop or a target, in its own numbers."""
+    mode = levels.get('stop_mode' if which == 'sl' else 'target_mode')
+    if mode == 'ATR':
+        mult = levels.get('atr_stop_mult' if which == 'sl'
+                          else 'atr_target_mult')
+        atr = levels.get('entry_atr')
+        if mult is not None and atr is not None:
+            return f'{mult:g} × ATR {_num(atr)} at entry'
+        return 'from the ATR at entry, which was not measured'
+    pct = levels.get('stop_loss_pct' if which == 'sl' else 'tp_pct')
+    margin = levels.get('entry_margin')
+    if pct is None:
+        return None
+    said = f'{float(pct):g}% of margin'
+    if margin is not None:
+        said += f' ({margin:,.2f} per spread at entry)'
+    return said
+
+
 def excursion_row(row):
     """One closed trade: how bad it got, how good it got, and how much
     of its best it kept (utilisation)."""
@@ -337,6 +441,14 @@ def excursion_row(row):
             'source': row.get('source') or 'MANUAL',
             'closed_at': row.get('closed_at'),
             'exit_reason': row.get('close_reason'),
+            # Entry, exit and the size are NOT repeated here: the
+            # trade journal below carries them for the same trades, and
+            # one page saying the same thing twice is one page nobody
+            # reads twice. This table is about the EXTREMES.
+            'entry_spread': row.get('entry_spread'),
+            'exit_spread': row.get('exit_spread'),
+            'lots_a': _lots(row.get('leg_a')),
+            'lots_b': _lots(row.get('leg_b')),
             'mae': None if mae is None else round(mae, 2),
             'mfe': None if mfe is None else round(mfe, 2),
             'pnl': None if pnl is None else round(pnl, 2),
@@ -433,6 +545,11 @@ def journal(positions, entry_z=None, exit_z=None):
             'exit_z': exit_z.get(row.get('position_id')),
             'leg_a': legs['a'], 'leg_b': legs['b'],
             'exit_reason': row.get('close_reason'),
+            # ...and the NUMBERS behind that reason: the level, the
+            # setting it came out of, and how far past it the close
+            # went. 'Algo: stop loss' alone cannot tell a stop that was
+            # hit from a stop that was in the wrong place.
+            'exit_detail': exit_detail(row),
             'pnl': None if pnl is None else round(pnl, 2),
             # The spread's move times k, before commission; the fees
             # are what lies between that and the net. Either is None

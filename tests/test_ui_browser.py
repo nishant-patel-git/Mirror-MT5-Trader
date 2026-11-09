@@ -5709,3 +5709,165 @@ def test_your_position_is_marked_on_the_ladder_and_named_yours(page):
         publisher.algo = 'NONE'
         publisher.algo_block = None
         publisher.publish()
+
+
+def test_a_derive_that_found_nothing_says_what_held_it_back(page):
+    """'derived 0 signal(s)' on its own reads as a broken replay.
+
+    This is the whole reason the engine now returns the reasons: the
+    note has to say that the Algo LOOKED and declined, and why, or the
+    screen cannot tell a filter doing its job from a derive that never
+    ran.
+    """
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .an-derive', timeout=WAIT)
+    page.evaluate("""() => {
+        // Stand in for the engine: the command log and its result.
+        window.__realFetch = window.fetch;
+        const json = (body) => Promise.resolve(new Response(
+            JSON.stringify(body),
+            {status: 200, headers: {'Content-Type': 'application/json'}}));
+        window.fetch = function (url, options) {
+            const at = String(url);
+            if (at.indexOf('/api/command') >= 0) {
+                return json({ok: true, id: 'cmd1'});
+            }
+            if (at.indexOf('/api/result/') >= 0) {
+                return json({ok: true, data: {
+                    ok: true, days: 30, written: 0,
+                    pairs: {'XAUUSD_|GC1226': {
+                        ok: true, derived: 0, replaced: 0,
+                        held: {'edge filter': 400, 'trend': 12}}},
+                    held: {'edge filter': 400, 'trend': 12}}});
+            }
+            return window.__realFetch(url, options);
+        };
+    }""")
+    page.click('.monitor .an-derive')
+    page.wait_for_selector('.monitor .an-derive-out', timeout=WAIT)
+    for _ in range(40):
+        note = page.text_content('.monitor .an-derive-out')
+        if 'held back' in note:
+            break
+        page.wait_for_timeout(100)
+    note = page.text_content('.monitor .an-derive-out')
+    assert 'derived 0 signal(s) over 30 days' in note
+    # The counts, biggest first, and the total so the size of it reads.
+    assert 'held back 412 time(s)' in note
+    assert 'edge filter 400' in note and 'trend 12' in note
+    assert note.index('edge filter') < note.index('trend')
+    page.evaluate('() => { window.fetch = window.__realFetch; }')
+
+
+def test_the_journal_says_why_a_trade_ended_in_numbers(page):
+    """'Algo: stop loss' on its own cannot tell a stop that was hit
+    from a stop that was set in the wrong place."""
+    page.errors.clear()      # earlier tests raise on purpose
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {count: 1, closed: 1, net_pnl: -205.0, win_rate: 0.0,
+                    wins: 0, losses: 1},
+          drawdown: {}, calibration: {}, shadow: {}, excursion: [],
+          signals: [],
+          journal: [{position_id: 'P1', pair_key: 'A|B', side: 'SELL',
+            closed_at: 1762600000, source: 'ALGO', quantity: 1.0,
+            exit_reason: 'Algo: stop loss',
+            exit_detail: 'stop 71.40 = break-even 71.20 + 0.20 \u00b7 ' +
+              '2% of margin (4,720.00 per spread at entry) \u00b7 ' +
+              'closed 71.46, 0.06 past it',
+            entry_spread: 71.0, exit_spread: 71.46, held_sec: 900,
+            entry_z: 2.6, exit_z: 3.1,
+            leg_a: {side: 'BUY', entry: 101.118},
+            leg_b: {side: 'SELL', entry: 115.554},
+            pnl: -205.0, cum_pnl: -205.0}]};
+        // Fresh enough that the pane does not refetch over it.
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis table', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    assert 'Algo: stop loss' in text
+    assert 'break-even 71.20 + 0.20' in text and '2% of margin' in text
+    assert page.locator('.monitor .analysis tr.detail').count() >= 1
+    assert page.errors == []
+
+
+def test_the_signal_journal_reads_like_the_trade_journal(page):
+    """The same columns in the same order, so the two halves of the
+    page can be read against each other \u2014 and the signals are
+    recorded off the live book, not simulated."""
+    page.errors.clear()      # earlier tests raise on purpose
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {}, drawdown: {}, calibration: {}, shadow: {},
+          excursion: [], journal: [],
+          signal_tally: {armed: 2, blocked: 1, entered: 1, no_entry: 0,
+                         tp: 0, sl: 1, win_rate: 0.0, net_pnl: -205.0,
+                         live: 2, replayed: 0, priced: 1, settled: 1},
+          signals: [
+            {pair_key: 'A|B', side: 'SELL', source: 'LIVE', state: 'CLOSED',
+             outcome: 'SL', armed_at: 1762600000, armed_z: 2.61,
+             closed_z: 3.12, entry: 71.0, exit_spread: 71.46,
+             quantity: 1.0, held_min: 15.0,
+             leg_a_side: 'BUY', leg_a_entry: 101.118,
+             leg_b_side: 'SELL', leg_b_entry: 115.554,
+             net_pnl: -205.0, cum_pnl: -205.0,
+             detail: 'break-even 71.20 \u00b7 target 70.55 \u00b7 ' +
+               'stop 71.40 \u00b7 came off at 71.46'},
+            {pair_key: 'A|B', side: 'SELL', source: 'LIVE', state: 'CLOSED',
+             outcome: 'BLOCKED', armed_at: 1762500000, armed_z: 2.55,
+             net_pnl: null, cum_pnl: -205.0,
+             detail: 'edge filter: capture is 0.02x the round trip \u00b7 ' +
+               'edge 0.02x of the 1.50x it requires'}]};
+        // Fresh enough that the pane does not refetch over it.
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis table', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    # The journal's own columns, on the signals.
+    for heading in ('Size', 'z in \u2192 out'.replace('\\u2192', '\u2192'),
+                    'Leg A in', 'Leg B in', 'Running'):
+        assert heading in text, heading
+    assert 'BUY 101.118' in text and 'SELL 115.554' in text
+    assert '2.61' in text and '3.12' in text
+    # The numbers behind each outcome, including the refusal.
+    assert 'stop 71.40' in text
+    assert 'edge 0.02x of the 1.50x it requires' in text
+    # Recorded, not simulated: the word that was wrong is gone.
+    assert 'hypothetical' not in text.lower()
+    assert 'recorded off the live book' in text.lower()
+    assert page.errors == []
+
+
+def test_the_monitor_takes_the_room_there_is(page):
+    """A flat 560px default left the bottom third of the screen as bare
+    desktop under a tab that is several screens long."""
+    page.evaluate("""() => {
+        window.localStorage.removeItem('mt5trader.windows.v1');
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis', timeout=WAIT)
+    room = page.evaluate("""() => {
+        const w = document.querySelector('.window.monitor');
+        const d = document.getElementById('desktop');
+        return d.getBoundingClientRect().bottom -
+               w.getBoundingClientRect().bottom;
+    }""")
+    # Within one window's furniture of the foot of the desktop, not a
+    # third of the screen away.
+    assert 0 <= room < 120, room

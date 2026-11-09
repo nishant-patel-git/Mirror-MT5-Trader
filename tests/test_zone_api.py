@@ -119,3 +119,25 @@ def test_a_day_with_nothing_is_an_empty_list_not_an_error(desk):
     client, _store = desk
     body = client.get('/api/analysis?date=1999-01-01').get_json()
     assert body['ok'] and body['signals'] == []
+
+
+def test_the_api_serves_the_signals_in_journal_shape(desk):
+    """The page reads the same shape for signals as for trades: newest
+    first, each row saying why it ended, with a running total."""
+    client, store = desk
+    write_signal(store, 'A|B', '2026-11-05', outcome='SL', net_pnl=-205.0,
+                 closed_at=time.time(), break_even=71.20, tp=70.55,
+                 sl=71.40, exit_spread=71.46, quantity=1.0,
+                 leg_a_side='BUY', leg_a_entry=101.118,
+                 leg_b_side='SELL', leg_b_entry=115.554)
+    write_signal(store, 'A|B', '2026-11-05', outcome='BLOCKED',
+                 net_pnl=None, closed_at=time.time() + 60,
+                 block_reason='edge filter: capture is 0.02x',
+                 edge_ratio=0.02, edge_required=1.5)
+    rows = client.get('/api/analysis?date=2026-11-05').get_json()['signals']
+    assert [r['outcome'] for r in rows] == ['BLOCKED', 'SL']
+    # The refusal carries no money, so the total does not move for it.
+    assert [r['cum_pnl'] for r in rows] == [-205.0, -205.0]
+    assert 'stop 71.40' in rows[1]['detail']
+    assert rows[1]['leg_a_entry'] == 101.118
+    assert 'edge 0.02x' in rows[0]['detail']

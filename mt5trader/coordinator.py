@@ -1103,9 +1103,18 @@ class Coordinator:
 
     def _track_positions(self, pair, md, settings, now):
         open_ids = set()
+        # The levels every open position is being JUDGED against on
+        # this pass, kept ON the position. Computed here rather than
+        # taken from the Algo's body because the body is None for a
+        # ladder whose Algo is off - and a trade closed by hand still
+        # has to be able to say what its stop was.
+        levels = self._level_marks(pair, md)
         for position in self.book.positions(pair.key):
             open_ids.add(position.position_id)
             _gross, net, _closing = mark_position(position, md, settings)
+            mark = levels.get(position.position_id)
+            if mark:
+                position.exit_levels = mark
             if analysis.observe_extremes(position, net, now):
                 last = self._extremes_saved.get(position.position_id)
                 if last is None or now - last >= self.ANALYSIS_SAVE_SEC:
@@ -1120,6 +1129,38 @@ class Coordinator:
                 continue
             self.remember(position)          # its final extremes
             self._arm_shadow(pair, position, settings, now)
+
+    #: The fields of an Algo position row that are kept ON the position
+    #: as its exit levels. Only the numbers the Analysis tab words an
+    #: exit from - not the whole row, which carries this poll's mark and
+    #: would be rewritten on disk every ten seconds for no reason.
+    LEVEL_MARKS = ('break_even', 'tp', 'sl', 'tp_money', 'sl_money',
+                   'stop_mode', 'target_mode', 'atr_stop_mult',
+                   'atr_target_mult', 'tp_pct', 'stop_loss_pct',
+                   'entry_margin', 'entry_atr', 'stop_points',
+                   'spread_units')
+
+    def _level_marks(self, pair, md):
+        """{position_id: the levels it is judged against}, or {}.
+
+        Never raises and never decides anything: a ladder that cannot
+        be priced simply keeps the levels it last had, which are the
+        ones its exit was decided on.
+        """
+        if md is None:
+            return {}
+        try:
+            rows = self._algo_positions(pair, md)
+        except Exception as e:
+            logging.debug('[ANALYSIS %s] no exit levels this pass: %s',
+                          pair.key, e)
+            return {}
+        marks = {}
+        for row in rows:
+            mark = {name: row.get(name) for name in self.LEVEL_MARKS}
+            if any(value is not None for value in mark.values()):
+                marks[row['position_id']] = mark
+        return marks
 
     def _arm_shadow(self, pair, position, settings, now):
         fees = costs.mark_fees(
@@ -1371,7 +1412,9 @@ class Coordinator:
             if enter_now:
                 priced = self.hypothetical_levels(pair, md, side, params,
                                                   settings, reading)
-                signals.enter(row, now, z, priced['prices'], priced['units'])
+                signals.enter(row, now, z, priced['prices'],
+                              priced['units'], priced.get('legs'),
+                              priced.get('quantity'))
             live.append(self._write_signal(row))
             opened.append(row)
 
@@ -1405,7 +1448,8 @@ class Coordinator:
                     priced = self.hypothetical_levels(
                         pair, md, entered_side, params, settings, reading)
                     signals.enter(row, now, z, priced['prices'],
-                                  priced['units'])
+                                  priced['units'], priced.get('legs'),
+                                  priced.get('quantity'))
                     row['edge_ratio'] = (edge or {}).get('ratio')
                     row['edge_required'] = (edge or {}).get('required')
                 self._write_signal(row)
@@ -1546,7 +1590,34 @@ class Coordinator:
                                        pair.effective_increment()),
                 # `k` for the Algo's own size, which is what a
                 # hypothetical trade of `algo_qty` spreads is worth.
-                'units': (units * qty) if units else None}
+                'units': (units * qty) if units else None,
+                'quantity': qty,
+                # The two legs this entry would actually cross, at the
+                # touch each one would cross - the same numbers the
+                # trade journal prints for a trade that was taken, so
+                # the two pages can be read against each other.
+                'legs': self._entry_legs(md, side)}
+
+    @staticmethod
+    def _entry_legs(md, side):
+        """Each leg's executable price for an entry on `side`.
+
+        The spread is `B - beta x A`: selling it sells B and buys A, so
+        B crosses the bid and A the offer. Buying it is the mirror.
+        Unreadable stays None - a leg priced at 0 reads as a fill.
+        """
+        if not md or side not in ('BUY', 'SELL'):
+            return {'leg_a_side': None, 'leg_a_entry': None,
+                    'leg_b_side': None, 'leg_b_entry': None}
+        a_side = 'SELL' if side == 'BUY' else 'BUY'
+        b_side = side
+        return {
+            'leg_a_side': a_side,
+            'leg_a_entry': md.get('leg_a_bid' if a_side == 'SELL'
+                                  else 'leg_a_ask'),
+            'leg_b_side': b_side,
+            'leg_b_entry': md.get('leg_b_bid' if b_side == 'SELL'
+                                  else 'leg_b_ask')}
 
     @staticmethod
     def _zone_target_points(params, settings, margin, qty, units, atr):
@@ -1659,6 +1730,16 @@ class Coordinator:
                          # THIS side's multiples, for the panel's note.
                          'atr_stop_mult': params['atr_stop_mult'],
                          'atr_target_mult': params['atr_target_mult'],
+                         # ...and the settings each level came OUT of,
+                         # so the Analysis tab can say which number in
+                         # the settings put the stop where it was.
+                         'tp_pct': pct,
+                         'stop_loss_pct': (params['stop_loss_pct']
+                                           if params['stop_loss_on']
+                                           else None),
+                         'entry_margin': margin,
+                         'stop_points': stop,
+                         'spread_units': units,
                          **self._leg_marks(position, md)})
         return rows
 
@@ -1736,7 +1817,7 @@ class Coordinator:
         days = max(1, min(int(days or self.BACKFILL_DAYS), 90))
         keys = [pair_key] if pair_key else list(self.config.pairs)
         out = {'ok': True, 'days': days, 'pairs': {}, 'written': 0,
-               'caveats': []}
+               'caveats': [], 'held': {}}
         if self.store is None:
             return {'ok': False, 'reason': 'no database to write to'}
         for key in keys:
@@ -1765,11 +1846,21 @@ class Coordinator:
                 logging.error('[BACKFILL %s] could not write: %s', key, e)
                 out['pairs'][key] = {'ok': False, 'reason': str(e)}
                 continue
+            # WHY nothing was derived is the whole answer when
+            # nothing was: the replay ran, the Algo armed, and every
+            # entry was refused for a reason `backtest.run` counted.
+            # Dropping that dict left the screen saying '0 derived'
+            # with no way to tell a filter from a broken replay.
+            held = {str(reason): int(count) for reason, count
+                    in (answer.get('held') or {}).items()}
             out['pairs'][key] = {'ok': True, 'derived': len(rows),
                                  'replaced': dropped,
                                  'candles': answer.get('summary', {}).get(
                                      'candles'),
+                                 'held': held,
                                  'note': answer.get('note')}
+            for reason, count in held.items():
+                out['held'][reason] = out['held'].get(reason, 0) + count
             out['written'] += len(rows)
             out['caveats'] = answer.get('caveats') or out['caveats']
         return out

@@ -76,6 +76,114 @@ def test_a_trade_from_before_extremes_were_kept_is_left_out():
     assert analysis.calibration([closed(4.0, 1)])['n'] == 0
 
 
+# -- what was traded, and why it ended ---------------------------------------
+
+#: The levels an Algo position is judged against, as the engine keeps
+#: them on it. A SELL: break-even 71.20, stop ABOVE, target BELOW.
+SELL_LEVELS = {'break_even': 71.20, 'sl': 71.40, 'tp': 70.55,
+               'sl_money': -205.0, 'tp_money': 487.0,
+               'stop_mode': 'PCT', 'target_mode': 'PCT',
+               'stop_loss_pct': 2.0, 'tp_pct': 1.5,
+               'entry_margin': 4720.0, 'entry_atr': 0.41}
+
+
+def traded(reason, exit_spread, levels=None, side='SELL', **kw):
+    return closed(-10.0, 1, peak=1.0, trough=-20.0, side=side,
+                  close_reason=reason, entry_spread=71.00,
+                  exit_spread=exit_spread, quantity=1.0,
+                  exit_levels=SELL_LEVELS if levels is None else levels,
+                  **dict({'leg_a': {'volume': 0.10},
+                          'leg_b': {'volume': 0.25}}, **kw))
+
+
+def test_the_journal_carries_the_numbers_behind_the_exit():
+    """The journal already said WHAT was traded and at what. What it
+    could not say is why it ended, in numbers."""
+    [row] = analysis.journal([traded('Algo: stop loss', 71.46)])
+    assert row['entry_spread'] == 71.00 and row['exit_spread'] == 71.46
+    assert row['leg_a']['volume'] == 0.10 and row['leg_b']['volume'] == 0.25
+    assert 'stop 71.40' in row['exit_detail']
+    assert row['cum_pnl'] == -10.0
+
+
+def test_the_extremes_table_does_not_repeat_the_journals_columns():
+    """One page saying the same thing twice is one page nobody reads
+    twice: the journal carries the size, this table carries the
+    extremes."""
+    [row] = analysis.excursion_rows([traded('Algo: stop loss', 71.46)])
+    assert 'quantity' not in row and 'exit_detail' not in row
+    assert row['mae'] == 20.0 and row['mfe'] == 1.0
+
+
+def test_an_unrecorded_leg_is_no_lot_size_rather_than_zero():
+    [row] = analysis.excursion_rows([traded('Algo: stop loss', 71.46,
+                                            leg_a=None, leg_b=None)])
+    assert row['lots_a'] is None and row['lots_b'] is None
+
+
+def test_a_stop_says_where_it_was_and_which_setting_put_it_there():
+    said = analysis.exit_detail(
+        {'side': 'SELL', 'close_reason': 'Algo: stop loss',
+         'exit_spread': 71.46, 'exit_levels': SELL_LEVELS})
+    assert 'stop 71.40' in said
+    # A SHORT's stop is ABOVE its break-even. Signed the other way, the
+    # line reads as a stop that was never reachable.
+    assert 'break-even 71.20 + 0.20' in said
+    assert '2% of margin' in said and '4,720.00' in said
+    assert 'closed 71.46, 0.06 past it' in said
+    assert 'worth -205.00' in said
+
+
+def test_a_long_puts_its_stop_the_other_way_round():
+    levels = dict(SELL_LEVELS, sl=70.90, tp=71.90)
+    said = analysis.exit_detail(
+        {'side': 'BUY', 'close_reason': 'Algo: stop loss',
+         'exit_spread': 70.85, 'exit_levels': levels})
+    assert 'break-even 71.20 - 0.30' in said
+    assert '0.05 past it' in said
+
+
+def test_a_target_is_measured_against_the_target():
+    said = analysis.exit_detail(
+        {'side': 'SELL', 'close_reason': 'Algo: profit target (after costs)',
+         'exit_spread': 70.60, 'exit_levels': SELL_LEVELS})
+    assert 'target 70.55' in said and '1.5% of margin' in said
+    # It came off 0.05 SHORT of the target - which is the slippage the
+    # take-profit re-check exists for, and saying 'past it' would hide
+    # exactly that.
+    assert '0.05 short of it' in said
+
+
+def test_an_atr_stop_names_the_multiple_and_the_atr_it_was_sized_from():
+    levels = dict(SELL_LEVELS, stop_mode='ATR', atr_stop_mult=2.5,
+                  entry_atr=0.16, sl=71.60)
+    said = analysis.exit_detail(
+        {'side': 'SELL', 'close_reason': 'Algo: stop loss',
+         'exit_spread': 71.62, 'exit_levels': levels})
+    assert '2.5 \u00d7 ATR 0.16 at entry' in said
+
+
+def test_a_trade_closed_before_the_levels_were_kept_says_so():
+    """Unmeasured is not zero, and it is not today's settings either:
+    a level invented afterwards would read as the one it was stopped
+    on."""
+    said = analysis.exit_detail({'side': 'SELL',
+                                 'close_reason': 'Algo: stop loss',
+                                 'exit_spread': 71.46})
+    assert 'not recorded' in said
+    assert '71.40' not in said
+
+
+def test_an_exit_that_was_not_a_level_is_left_in_its_own_words():
+    """A cutoff, a kill and a close by hand are not a level being
+    touched, and dressing them up in one would be a lie."""
+    for reason in ('OVERNIGHT_CLOSE', 'closed by the trader',
+                   'force-cleared: leg A not at the broker after 3 checks'):
+        row = {'side': 'SELL', 'close_reason': reason,
+               'exit_spread': 71.46, 'exit_levels': SELL_LEVELS}
+        assert analysis.exit_detail(row) is None
+
+
 def test_calibration_reads_the_peaks():
     rows = [closed(1, i, peak=float(i), peak_min=float(i)) for i in
             range(1, 11)]
@@ -222,6 +330,45 @@ def test_the_engine_keeps_each_open_trades_best_and_worst(config, pair, legs,
     # Saved, so a restart and the tab both have them.
     [row] = store.open_positions()
     assert row['trough_pnl'] == position.trough_pnl
+
+
+def test_the_levels_a_position_is_judged_against_are_kept_on_it(
+        config, pair, legs, tmp_path):
+    """And survive its close, which is the only moment they matter.
+
+    The Analysis tab has to be able to say WHICH stop a trade was
+    stopped on. Recomputing it afterwards from today's settings would
+    print a level the trade was never measured against.
+    """
+    coordinator, store, clock = engine(config, legs, tmp_path)
+    position = opened(coordinator, pair)
+    coordinator.poll_once()
+    levels = position.exit_levels
+    assert levels and levels['break_even'] is not None
+    # Saved with the position, not only held in memory.
+    [row] = store.open_positions()
+    assert row['exit_levels']['break_even'] == levels['break_even']
+
+    coordinator.executor.close_position(pair, position,
+                                        coordinator.market[pair.key],
+                                        reason='Algo: stop loss')
+    clock.now += 5
+    coordinator.poll_once()
+    closed_row = store.position(position.position_id)
+    assert closed_row['closed_at'] is not None
+    assert closed_row['exit_levels']['break_even'] == levels['break_even']
+
+
+def test_a_ladder_that_cannot_be_priced_keeps_the_levels_it_had(
+        config, pair, legs, tmp_path):
+    """CONTROL. A pass with no market must not wipe them: the last set
+    is the one the exit was decided on."""
+    coordinator, store, clock = engine(config, legs, tmp_path)
+    position = opened(coordinator, pair)
+    coordinator.poll_once()
+    before = dict(position.exit_levels)
+    coordinator._track_positions(pair, None, {}, clock.now)
+    assert position.exit_levels == before
 
 
 def test_a_close_that_is_not_the_target_arms_a_shadow(config, pair, legs,
