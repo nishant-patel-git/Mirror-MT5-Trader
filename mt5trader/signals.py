@@ -32,6 +32,15 @@ through the floor first. A trend rides the band and never comes back,
 so it arms and never enters, which is the Algo working and worth
 seeing.
 
+**A signal is RECORDED, not simulated.** The z, the executable entry,
+the two legs and the mark forward are the live book's own numbers, read
+as they happened; the levels are the ones the Algo would have used on
+the settings in force at that moment. The only thing that did not
+happen is the ORDER - so a row's P&L is what the trade would have made,
+never money taken. The one exception is a row stamped REPLAY, which
+`backfill_signals` reconstructs from MT5's bars afterwards and which
+says so on the screen.
+
 Nothing here reads a price, a broker or a clock, and nothing here can
 reach an order. It takes numbers and returns numbers.
 """
@@ -66,7 +75,7 @@ EXIT_OUTCOME = {'PROFIT_TARGET': 'TP', 'STOP_LOSS': 'SL'}
 
 #: Where a signal is in its life.
 ARMED = 'ARMED'          # stretched out; waiting (ALGO) or entered at once
-OPEN = 'OPEN'            # hypothetically on, being watched forward
+OPEN = 'OPEN'            # would be on, and is marked forward
 CLOSED = 'CLOSED'        # it is done; `outcome` says how
 
 #: How it ended. REVERTED is NOT one of these: coming back to the mean
@@ -161,7 +170,7 @@ class AlgoArming:
 
 def new_signal(pair_key, basis, side, at, z, params, broker_day=None,
                threshold=None):
-    """A signal the moment it arms. Nothing hypothetical priced yet —
+    """A signal the moment it arms. No levels priced yet —
     that happens when (and if) it enters."""
     return {
         'pair_key': pair_key, 'basis': basis, 'side': side,
@@ -171,8 +180,17 @@ def new_signal(pair_key, basis, side, at, z, params, broker_day=None,
         'armed_at': float(at), 'armed_z': round(float(z), 3),
         'entered_at': None, 'entered_z': None,
         'entry': None, 'break_even': None, 'tp': None, 'sl': None,
-        'units': None,
+        'units': None, 'quantity': None,
+        #: The two legs this entry would have crossed, and at what.
+        #: None on a DERIVED row: a replay works on the spread series
+        #: and never saw a leg's book, and a leg price invented from
+        #: the spread would read as a fill nobody got.
+        'leg_a_side': None, 'leg_a_entry': None,
+        'leg_b_side': None, 'leg_b_entry': None,
         'closed_at': None, 'closed_z': None,
+        #: The spread it would have come off at. Together with `entry`
+        #: this is the move the money is the product of.
+        'exit_spread': None,
         'peak_net': None, 'trough_net': None,
         #: What the trade would have MADE, in money, at its close. The
         #: page's "would have won / would have lost" is this, not which
@@ -195,8 +213,12 @@ def new_signal(pair_key, basis, side, at, z, params, broker_day=None,
     }
 
 
-def enter(signal, at, z, prices, units):
-    """Freeze the hypothetical trade onto a signal that has entered."""
+def enter(signal, at, z, prices, units, legs=None, quantity=None):
+    """Freeze the entry onto a signal that has entered.
+
+    The prices are the book's at this moment, not a guess: what did
+    not happen is the order, not the quote.
+    """
     signal['state'] = OPEN
     signal['entered_at'] = float(at)
     signal['entered_z'] = round(float(z), 3)
@@ -205,6 +227,9 @@ def enter(signal, at, z, prices, units):
     signal['tp'] = (prices or {}).get('tp')
     signal['sl'] = (prices or {}).get('sl')
     signal['units'] = units
+    signal['quantity'] = quantity
+    for name, value in (legs or {}).items():
+        signal[name] = value
     return signal
 
 
@@ -236,7 +261,7 @@ def abandon(signal, at):
 
 
 def net_at(signal, closing_spread):
-    """What the hypothetical trade would be making, in money, closing
+    """What the trade would be making, in money, closing
     at this spread. None where it cannot be measured."""
     if closing_spread is None or signal.get('break_even') is None \
             or not signal.get('units'):
@@ -305,20 +330,23 @@ def watch(signal, closing_spread, z, at, window_sec):
             signal['revert_min'] = minutes
             changed = True
     if _hit_stop(signal, closing_spread):
-        return _close(signal, SL, at, z, minutes, net)
+        return _close(signal, SL, at, z, minutes, net, closing_spread)
     if _hit_target(signal, closing_spread):
-        return _close(signal, TP, at, z, minutes, net)
+        return _close(signal, TP, at, z, minutes, net, closing_spread)
     if window_sec and at - signal['entered_at'] >= float(window_sec):
-        return _close(signal, EXPIRED, at, z, minutes, net) or True
+        return _close(signal, EXPIRED, at, z, minutes, net,
+                      closing_spread) or True
     return changed
 
 
-def _close(signal, outcome, at, z, minutes, net=None):
+def _close(signal, outcome, at, z, minutes, net=None, closing_spread=None):
     signal['state'] = CLOSED
     signal['outcome'] = outcome
     signal['closed_at'] = float(at)
     signal['closed_z'] = None if z is None else round(float(z), 3)
     signal['held_min'] = minutes
+    if closing_spread is not None:
+        signal['exit_spread'] = float(closing_spread)
     if net is not None:
         signal['net_pnl'] = round(float(net), 2)
     return True
@@ -348,7 +376,11 @@ def from_replay(trade, pair_key, params, broker_day=None, units=None):
     row['entered_at'] = opened
     row['entered_z'] = None if z_in is None else round(float(z_in), 3)
     row['entry'] = trade.get('entry')
+    row['break_even'] = trade.get('break_even')
+    row['tp'] = trade.get('tp')
+    row['sl'] = trade.get('sl')
     row['units'] = units
+    row['quantity'] = params.get('algo_qty')
     if closed is None:
         # Still open when the replay ran out of candles. Not a result.
         row['state'] = OPEN
@@ -356,6 +388,7 @@ def from_replay(trade, pair_key, params, broker_day=None, units=None):
     row['state'] = CLOSED
     row['outcome'] = EXIT_OUTCOME.get(reason, EXPIRED)
     row['closed_at'] = closed
+    row['exit_spread'] = trade.get('exit')
     row['held_min'] = round(max(0.0, closed - opened) / 60.0, 1)
     pnl = trade.get('pnl')
     row['net_pnl'] = None if pnl is None else round(float(pnl), 2)
@@ -407,3 +440,99 @@ def tally(rows):
                         if settled else None),
         'best_peak': round(max(nets), 2) if nets else None,
     }
+
+
+def _spread(value):
+    """A spread price as the screen prints it, trimmed back to two
+    decimals. None stays None - a level that could not be priced is a
+    dash, never a zero."""
+    if value is None:
+        return None
+    try:
+        text = f'{float(value):,.4f}'
+    except (TypeError, ValueError):
+        return None
+    whole, _, decimals = text.partition('.')
+    decimals = decimals.rstrip('0')
+    while len(decimals) < 2:
+        decimals += '0'
+    return f'{whole}.{decimals}'
+
+
+def detail(row):
+    """WHY this signal ended the way it did, in its own numbers.
+
+    The trade journal carries a line like this under every round trip,
+    and a signal needs the same one for a harder reason: no money
+    changed hands, so the row is ONLY as good as what it says about
+    itself. 'blocked' without the filter and the reading behind it, or
+    'stop' without the level, is a number nobody can check.
+    """
+    row = row or {}
+    outcome = row.get('outcome')
+    parts = []
+    if outcome == BLOCKED:
+        if row.get('block_reason'):
+            parts.append(str(row['block_reason']))
+        ratio, needed = row.get('edge_ratio'), row.get('edge_required')
+        if ratio is not None:
+            said = f'edge {float(ratio):.2f}x'
+            if needed is not None:
+                said += f' of the {float(needed):.2f}x it requires'
+            parts.append(said)
+        armed = row.get('armed_z')
+        if armed is not None:
+            parts.append(f'armed at {float(armed):.2f}σ')
+        return ' · '.join(parts) or None
+    if outcome == NO_ENTRY:
+        armed = row.get('armed_z')
+        parts.append('armed at ' + (f'{float(armed):.2f}σ' if armed
+                                    is not None else 'an unmeasured z')
+                     + ' and never came back inside the window')
+        if row.get('entry_z') is not None:
+            said = f'enters at {float(row["entry_z"]):.2f}σ'
+            if row.get('reentry_back') is not None:
+                said += f', back inside {float(row["reentry_back"]):.2f}σ'
+            parts.append(said)
+        return ' · '.join(parts)
+    # Entered: the three levels it was being judged against, and which
+    # one it came off on.
+    for label, name in (('break-even', 'break_even'), ('target', 'tp'),
+                        ('stop', 'sl')):
+        said = _spread(row.get(name))
+        parts.append(f'{label} {said}' if said else f'{label} not priced')
+    if row.get('exit_spread') is not None:
+        parts.append(f'came off at {_spread(row["exit_spread"])}')
+    if row.get('entered_at') is not None:
+        parts.append('came back to the mean after '
+                     f'{float(row["revert_min"]):.1f} min'
+                     if row.get('reverted') and row.get('revert_min')
+                     is not None else
+                     ('came back to the mean' if row.get('reverted')
+                      else 'never came back to the mean'))
+    return ' · '.join(parts) or None
+
+
+def journal(rows):
+    """Every signal, newest first, with a running total.
+
+    The same shape as the trade journal and for the same reason: a
+    column of outcomes says how it went, and a running total says what
+    it was WORTH - which is the question the page exists to answer.
+    The total runs over the signals that ENTERED and were priced; a
+    refusal and a stretch that never came back carry no money and must
+    not move it.
+    """
+    ordered = sorted(rows or (),
+                     key=lambda r: (r.get('closed_at')
+                                    or r.get('entered_at')
+                                    or r.get('armed_at') or 0.0))
+    running = 0.0
+    out = []
+    for row in ordered:
+        pnl = row.get('net_pnl')
+        if pnl is not None:
+            running += float(pnl)
+        out.append(dict(row, detail=detail(row), cum_pnl=round(running, 2)))
+    out.reverse()
+    return out

@@ -254,3 +254,31 @@ def test_a_ladder_with_no_history_says_so_and_writes_nothing(config, pair,
     assert answer['ok'] and answer['written'] == 0
     assert answer['pairs'][pair.key]['ok'] is False
     assert store.signals() == []
+
+
+def test_a_derive_that_finds_nothing_says_what_held_it_back(config, pair,
+                                                            legs, tmp_path):
+    """'0 derived' on its own reads as a broken replay.
+
+    On a live desk the derive came back with nothing and there was no
+    way to tell a filter doing its job from a replay that never ran.
+    The replay already counts the reason it refused every entry; this
+    is that count reaching the caller.
+    """
+    coordinator, store = backfill_engine(config, legs, tmp_path)
+    plenty = coordinator.backfill_signals(pair.key, days=30)
+    assert plenty['written'], plenty            # the control: it DOES trade
+
+    # The same candles, with an edge filter nothing could clear.
+    pair.algo_params = dict(pair.algo_params or {}, edge_on=True,
+                            edge_multiple=10000.0)
+    answer = coordinator.backfill_signals(pair.key, days=30)
+    assert answer['ok'] and answer['written'] == 0
+    held = answer['pairs'][pair.key]['held']
+    assert held, answer
+    assert any('edge' in reason for reason in held)
+    # And the same counts, summed over the ladders, at the top level.
+    assert answer['held'] == held
+    assert all(isinstance(count, int) and count > 0
+               for count in held.values())
+    assert store.signals(pair.key) == []       # the old rows were replaced

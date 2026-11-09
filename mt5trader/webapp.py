@@ -512,7 +512,9 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                             names=names,
                             zone_days=zone_days,
                             date=zone_date,
-                            signals=signal_rows,
+                            # The JOURNAL shape: newest first, each row
+                            # carrying why it ended and a running total.
+                            signals=signals.journal(signal_rows),
                             signal_days=signal_days,
                             signal_tally=signals.tally(signal_rows)))
 

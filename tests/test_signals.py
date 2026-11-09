@@ -290,3 +290,87 @@ def test_a_live_close_records_what_it_would_have_made():
     assert sig['outcome'] == signals.TP
     # break-even 13.0, sold, closed at 12.4, k of 50
     assert sig['net_pnl'] == 30.0
+
+
+# -- the signal journal ------------------------------------------------------
+
+def a_signal(**kw):
+    row = {'pair_key': 'A|B', 'side': 'SELL', 'source': signals.LIVE,
+           'state': signals.CLOSED, 'outcome': signals.SL,
+           'armed_at': 100.0, 'armed_z': 2.61, 'entered_at': 110.0,
+           'closed_at': 200.0,
+           'closed_z': 3.12, 'entry': 71.0, 'exit_spread': 71.46,
+           'break_even': 71.20, 'tp': 70.55, 'sl': 71.40,
+           'net_pnl': -205.0, 'reverted': False}
+    row.update(kw)
+    return row
+
+
+def test_the_journal_runs_a_total_in_the_order_things_closed():
+    rows = [a_signal(closed_at=300.0, net_pnl=50.0),
+            a_signal(closed_at=100.0, net_pnl=-20.0),
+            a_signal(closed_at=200.0, net_pnl=10.0)]
+    out = signals.journal(rows)
+    # Newest first on the screen, but the total runs in CLOSING order.
+    assert [r['closed_at'] for r in out] == [300.0, 200.0, 100.0]
+    assert [r['cum_pnl'] for r in out] == [40.0, -10.0, -20.0]
+
+
+def test_a_refusal_carries_no_money_and_does_not_move_the_total():
+    """A signal the Algo declined is not a loss, and a page that let it
+    move the running total would report money nobody could have lost."""
+    rows = [a_signal(closed_at=100.0, net_pnl=-20.0),
+            a_signal(closed_at=150.0, outcome=signals.BLOCKED, net_pnl=None,
+                     block_reason='edge filter: capture is 0.02x',
+                     edge_ratio=0.02, edge_required=1.5)]
+    out = signals.journal(rows)
+    assert [r['cum_pnl'] for r in out] == [-20.0, -20.0]
+
+
+def test_the_detail_line_says_which_levels_it_was_judged_against():
+    [row] = signals.journal([a_signal()])
+    assert 'break-even 71.20' in row['detail']
+    assert 'target 70.55' in row['detail'] and 'stop 71.40' in row['detail']
+    assert 'came off at 71.46' in row['detail']
+    assert 'never came back to the mean' in row['detail']
+
+
+def test_a_refusal_says_the_filter_and_the_reading_behind_it():
+    [row] = signals.journal([a_signal(
+        outcome=signals.BLOCKED, net_pnl=None, entered_at=None,
+        block_reason='edge filter: capture is 0.02x the round trip',
+        edge_ratio=0.02, edge_required=1.5)])
+    assert 'edge filter' in row['detail']
+    assert 'edge 0.02x of the 1.50x it requires' in row['detail']
+    # No level is quoted: it never entered, so it had none.
+    assert 'break-even' not in row['detail']
+
+
+def test_a_stretch_that_never_came_back_names_the_window():
+    [row] = signals.journal([a_signal(
+        outcome=signals.NO_ENTRY, net_pnl=None, entered_at=None,
+        entry_z=2.0, reentry_back=0.5)])
+    assert 'never came back inside the window' in row['detail']
+    assert 'enters at 2.00' in row['detail']
+
+
+def test_an_unpriced_level_is_said_so_rather_than_printed_as_zero():
+    [row] = signals.journal([a_signal(tp=None, sl=None)])
+    assert 'target not priced' in row['detail']
+    assert 'stop not priced' in row['detail']
+    assert '0.00' not in row['detail']
+
+
+def test_a_close_records_the_spread_it_came_off_at():
+    """The journal prints 'spread in -> out'. Without this the out half
+    was a dash on every row."""
+    signal = signals.new_signal('A|B', signals.ALGO, 'SELL', 10.0, 2.6,
+                                {'entry_z': 2.0})
+    signals.enter(signal, 11.0, 2.6, {'entry': 71.0, 'break_even': 70.9,
+                                      'tp': 70.0, 'sl': 71.5}, 10.0,
+                  {'leg_a_side': 'BUY', 'leg_a_entry': 101.118,
+                   'leg_b_side': 'SELL', 'leg_b_entry': 115.554}, 1.0)
+    assert signal['leg_a_entry'] == 101.118 and signal['quantity'] == 1.0
+    signals.watch(signal, 71.6, 3.1, 12.0, 0)
+    assert signal['outcome'] == signals.SL
+    assert signal['exit_spread'] == 71.6

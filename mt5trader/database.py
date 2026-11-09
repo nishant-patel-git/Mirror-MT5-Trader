@@ -365,6 +365,17 @@ class Store:
         ('signal_events', 'block_reason', 'TEXT'),
         ('signal_events', 'edge_ratio', 'REAL'),
         ('signal_events', 'edge_required', 'REAL'),
+        # The signal journal's own columns: the spread it would have
+        # come off at, the size, and the two legs it would have
+        # crossed. NULL on every row written before they were kept, and
+        # NULL for ever on a DERIVED row - a replay works on the spread
+        # series and never saw a leg's book.
+        ('signal_events', 'exit_spread', 'REAL'),
+        ('signal_events', 'quantity', 'REAL'),
+        ('signal_events', 'leg_a_side', 'TEXT'),
+        ('signal_events', 'leg_a_entry', 'REAL'),
+        ('signal_events', 'leg_b_side', 'TEXT'),
+        ('signal_events', 'leg_b_entry', 'REAL'),
         ('positions', 'naked_ms', 'REAL'),
         # MANUAL or ALGO. NULL on a row written before it existed, which
         # reads back as MANUAL: nothing traded by itself then either.
@@ -380,6 +391,12 @@ class Store:
         ('positions', 'trough_min', 'REAL'),
         # The ATR frozen when the position was first priced.
         ('positions', 'entry_atr', 'REAL'),
+        # JSON: the break-even, take-profit and stop this position was
+        # last judged against, and which setting produced each. NULL on
+        # every row closed before it was kept, which is why the Analysis
+        # tab says a trade's exit "was not recorded" rather than
+        # inventing a level for it.
+        ('positions', 'exit_levels', 'TEXT'),
     )
 
     #: Rows to clear when a column is added for the first time, because
@@ -432,8 +449,9 @@ class Store:
                     closed_at, close_reason, realized_pnl, entry_slippage,
                     exit_slippage, click_to_on_ms, naked_ms, leg_a, leg_b,
                     source, entry_margin, peak_pnl, peak_min, trough_pnl,
-                    trough_min, entry_atr)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    trough_min, entry_atr, exit_levels)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                           ?)""",
                 (row['position_id'], row['pair_key'], row['side'],
                  row['quantity'], row['entry_spread'], row['exit_spread'],
                  row['spread_units'], row['order_type'], row['opened_at'],
@@ -444,7 +462,9 @@ class Store:
                  row.get('source'), row.get('entry_margin'),
                  row.get('peak_pnl'), row.get('peak_min'),
                  row.get('trough_pnl'), row.get('trough_min'),
-                 row.get('entry_atr')))
+                 row.get('entry_atr'),
+                 json.dumps(row['exit_levels'])
+                 if row.get('exit_levels') else None))
         return position
 
     def remember_tickets(self, rows):
@@ -854,7 +874,9 @@ class Store:
                       'held_min', 'entry_z', 'max_entry_z', 'reentry_back',
                       'reentry_window_pct', 'algo_mode', 'source',
                       'exit_reason', 'net_pnl', 'block_reason',
-                      'edge_ratio', 'edge_required')
+                      'edge_ratio', 'edge_required', 'exit_spread',
+                      'quantity', 'leg_a_side', 'leg_a_entry',
+                      'leg_b_side', 'leg_b_entry')
 
     def save_signal(self, row):
         """Write a signal, or update the one `row['id']` names.
@@ -1015,7 +1037,9 @@ class Store:
 def _position_row(row):
     """A stored row, as the plain dict the book rebuilds a position from."""
     data = dict(row)
-    for leg in ('leg_a', 'leg_b'):
+    for leg in ('leg_a', 'leg_b', 'exit_levels'):
+        if leg not in data:                 # an older database
+            continue
         try:
             data[leg] = json.loads(data[leg]) if data[leg] else None
         except ValueError:
