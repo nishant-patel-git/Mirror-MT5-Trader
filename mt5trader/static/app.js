@@ -4466,85 +4466,17 @@
     return h ? h + 'h ' + m + 'm' : (m ? m + 'm ' + (s % 60) + 's' : s + 's');
   }
 
+  function anSide(side) {
+    return side === 'SELL' ? 'H to L'
+      : (side === 'BUY' ? 'L to H' : (side || DASH));
+  }
+
   function anClock(at) {
     if (!at) { return DASH; }
     var d = new Date(at * 1000);
     return d.toLocaleDateString(undefined, {month: 'short', day: 'numeric'}) +
       ' ' + d.toLocaleTimeString(undefined, {hour12: false});
   }
-
-  function anSide(side) {
-    return side === 'SELL' ? 'H to L' : (side === 'BUY' ? 'L to H' : (side || DASH));
-  }
-
-  //: How each Status reads, and what it means. The Algo's own gate
-  //: order: a band that cannot measure is not "filtered", and a filter
-  //: that could not be PRICED is a block, not a pass.
-  var ZONE_STATUS = {
-    COLLECTING: ['collecting', 'the band has not got its candles yet'],
-    WARMUP: ['warming up', 'the band is full but the live tape has not ' +
-             'been watched long enough'],
-    NO_SIGNAL: ['no signal', 'inside the entry threshold — the Algo ' +
-                'wants no entry here'],
-    ELIGIBLE: ['eligible', 'past the entry threshold with no filter or ' +
-               'gate refusing — NOT "it would have traded": the ' +
-               're-entry arming, the direction and the confirm ticks are ' +
-               'the Algo’s and are not modelled here'],
-    BEYOND_MAX: ['beyond max', 'past max_entry_z — a blow-out, not a ' +
-                 'stretch'],
-    FILTERED: ['filtered out', 'a filter priced it and said no'],
-    BLOCKED: ['blocked', 'a gate held it, or a filter could not be priced ' +
-              '— which the Algo treats as a block'],
-    SIGNALLED: ['signalled', 'the Algo signalled an entry here'],
-    ENTERED: ['entered', 'a position was opened from it']
-  };
-
-  function zoneStatusCell(row) {
-    var known = ZONE_STATUS[row.status];
-    var title = known ? known[1] : '';
-    if (row.blocked_by) { title += (title ? ' — ' : '') + row.blocked_by; }
-    var cls = row.status === 'ENTERED' || row.status === 'SIGNALLED' ? 'up'
-      : (row.status === 'FILTERED' || row.status === 'BLOCKED' ? 'down' : '');
-    return '<td class="l ' + cls + '"' +
-      (title ? ' title="' + escapeHtml(title) + '"' : '') + '>' +
-      escapeHtml(known ? known[0] : (row.status || DASH)) + '</td>';
-  }
-
-  function zoneCell(zone) {
-    if (!zone) { return DASH; }
-    return zone === 'MEAN' ? 'Mean' : zone + 'σ';
-  }
-
-  function zoneEdgeCell(row) {
-    // The ratio IS the edge filter's value: expected capture over the
-    // round-trip cost. None means it could not be priced, which the
-    // Algo treats as a block — never 0.00, which would read as "no
-    // edge at all" about a number nobody measured.
-    if (row.edge_ratio === null || row.edge_ratio === undefined) {
-      return '<td title="the round-trip cost is not priced yet">' + DASH +
-        '</td>';
-    }
-    var required = row.edge_required;
-    var title = 'capture ' + money(row.edge_capture) + ' against a cost of ' +
-      money(row.edge_cost) + (required ? ', ' + required + 'x required' : '');
-    return '<td class="' + (row.edge_ok ? 'up' : 'down') + '" title="' +
-      escapeHtml(title) + '">' + Number(row.edge_ratio).toFixed(2) + 'x</td>';
-  }
-
-  //: How many σ zone rows are KEPT in all, across every ladder — as
-  //: against how many the chosen range shows. Read by the range bar
-  //: and by the table's empty state, which say different things when
-  //: the track is empty ("none yet") and when the range is ("none in
-  //: this range").
-  function zoneTotal(a) {
-    var span = (a || {}).zone_span || {};
-    return Object.keys(span).reduce(function (sum, key) {
-      return sum + (span[key].rows || 0);
-    }, 0);
-  }
-
-  //: The cut-off the chosen range implies, in UTC seconds. 0 is "all
-  //: records" — every row ever kept.
   function zoneSince() {
     return state.zoneDays > 0
       ? (Date.now() / 1000) - state.zoneDays * 86400 : 0;
@@ -4554,34 +4486,43 @@
   //: because it governs the counters' event list AND the σ zone table
   //: under it — a range that moved one of two tables on one screen
   //: would be worse than no range at all.
+  //: The Signals bar: WHICH LADDER and WHEN, together, because those
+  //: are the two questions asked of this page and asking them in two
+  //: different places on the screen is how you end up reading one
+  //: ladder's numbers under another ladder's name.
   function zoneRangeBar(a) {
-    var total = zoneTotal(a);
+    var pairs = (state.snapshot && state.snapshot.pairs) || {};
     var dated = !!state.zoneDate;
-    var days = (a.signal_days || []);
-    // A day and a rolling range answer different questions, so only
-    // one of them is in force: picking a date greys the range out,
-    // and clearing the date gives it back.
-    return '<div class="an-bar">Showing the ' +
-      '<select class="an-zone-days"' + (dated ? ' disabled' : '') + '>' +
+    var days = a.signal_days || [];
+    return '<div class="an-bar">' +
+      '<select class="an-pair">' +
+      '<option value="">every ladder</option>' +
+      Object.keys(pairs).map(function (key) {
+        return '<option value="' + escapeHtml(key) + '"' +
+          (state.analysisPair === key ? ' selected' : '') + '>' +
+          escapeHtml(pairs[key].name || key) + '</option>';
+      }).join('') + '</select>' +
+      ' over the <select class="an-zone-days"' +
+      (dated ? ' disabled' : '') + '>' +
       [[1, 'last 1 day'], [7, 'last 7 days'], [30, 'last 30 days'],
        [0, 'all records']].map(function (o) {
         return '<option value="' + o[0] + '"' +
           (state.zoneDays === o[0] ? ' selected' : '') + '>' + o[1] +
           '</option>';
       }).join('') + '</select>' +
-      ' or one day <input type="date" class="an-zone-date" value="' +
+      ' or on <input type="date" class="an-zone-date" value="' +
       escapeHtml(state.zoneDate) + '"' +
       (days.length ? ' max="' + escapeHtml(days[0].day) + '"' : '') + '>' +
-      (dated ? ' <span class="hint">the broker’s ' +
+      (dated ? ' <span class="hint">the broker\u2019s ' +
         escapeHtml(state.zoneDate) + ', not the last 24 hours</span>' : '') +
-      (total && !dated ? ' <span class="hint">' + (a.zones || []).length +
-        ' of ' + total + ' σ zone changes kept</span>' : '') +
       '</div>';
   }
 
   var SIGNAL_OUTCOME = {
     TP: ['took profit', 'up'], SL: ['stopped out', 'down'],
-    EXPIRED: ['neither', ''], NO_ENTRY: ['never entered', '']
+    EXPIRED: ['neither', ''], NO_ENTRY: ['never came back', ''],
+    // A refusal, NOT a result: the Algo looked and declined.
+    BLOCKED: ['blocked', 'hint']
   };
 
   //: The three numbers the page exists to answer: how often these
@@ -4655,22 +4596,22 @@
       anTile('Signals', t.armed, '', 'stretches that reached the ' +
              'ladder\u2019s entry z \u2014 a second poke at the band ' +
              'while still armed is NOT a second signal') +
+      anTile('Blocked', t.blocked, t.blocked ? 'hint' : '',
+             'the Algo looked and declined: its edge, regime, trend or ' +
+             'half-life filter, or a stop that would sit inside the ' +
+             'bid-ask. A refusal is not a trade and is never counted as ' +
+             'a loss') +
       anTile('Traded', t.entered, '', t.no_entry + ' armed and never came ' +
-             'back inside the window, so they were never entered') +
-      anTile('Would have WON', t.tp, 'up', 'reached the take-profit ' +
-             'before the stop') +
-      anTile('Would have LOST', t.sl, 'down', 'reached the stop first') +
+             'back inside the window') +
+      anTile('Would have WON', t.tp, 'up', 'closed in profit') +
+      anTile('Would have LOST', t.sl, 'down', 'closed at a loss') +
       anTile('Win rate', t.win_rate === null ? DASH : anPct(t.win_rate),
              t.win_rate === null ? '' : (t.win_rate >= 50 ? 'up' : 'down'),
-             t.settled + ' settled; signals still running are not counted ' +
-             'as losses') +
-      anTile('Came back', t.revert_rate === null ? DASH :
-             anPct(t.revert_rate), '',
-             t.reverted + ' of ' + t.settled + ' crossed the mean \u2014 a ' +
-             'different question from whether it paid') +
+             t.priced + ' of ' + t.settled + ' settled trades carried a ' +
+             'measurable P&L; signals still running are not counted as ' +
+             'losses') +
       anTile('Net', money(t.net_pnl), anSign(t.net_pnl),
-             t.priced + ' of ' + t.settled + ' settled signals carried a ' +
-             'measurable P&L') +
+             'over the trades that were actually taken') +
       '</div>' +
       '<div class="hint">' + t.live + ' measured forward, ' + t.replayed +
       ' derived from MT5\u2019s bars. A derived row sees one look per ' +
@@ -4728,7 +4669,14 @@
         '<td>' + fmt(r.entry, 4) + '</td>' +
         '<td>' + fmt(r.tp, 4) + '</td>' +
         '<td>' + fmt(r.sl, 4) + '</td>' +
-        '<td class="l ' + out[1] + '">' + out[0] + '</td>' +
+        '<td class="l ' + out[1] + '"' +
+        (r.block_reason ? ' title="' + escapeHtml(r.block_reason) + '"'
+                        : '') + '>' + out[0] +
+        (r.outcome === 'BLOCKED' && r.edge_ratio !== null &&
+         r.edge_ratio !== undefined
+          ? ' <span class="hint">edge ' + Number(r.edge_ratio).toFixed(2) +
+            'x of ' + (r.edge_required || DASH) + 'x</span>' : '') +
+        '</td>' +
         '<td class="' + anSign(r.net_pnl) + '">' + money(r.net_pnl) +
         '</td>' +
         '<td class="l">' + (r.entered_at === null ? DASH :
@@ -4748,49 +4696,6 @@
       'different question from whether the trade paid.</div>';
     return html;
   }
-
-  function zoneTable(a) {
-    var rows = a.zones || [];
-    var total = zoneTotal(a);
-    var html = '<h4>σ zone changes <small>— one row when the ' +
-      'zone CHANGES, and nothing while it sits in one</small></h4>';
-    html += '<table class="an-table"><thead><tr><th>When</th>' +
-      '<th class="l">Zone</th><th class="l">From</th><th>z</th>' +
-      '<th class="l">Side</th><th>Edge</th><th class="l">Status</th>' +
-      '<th>Entry</th><th>Take profit</th><th>Stop loss</th>' +
-      '<th class="l">Algo</th></tr></thead><tbody>';
-    if (!rows.length) {
-      html += '<tr><td colspan="11" class="hint">no σ zone change in ' +
-        'this range' + (total ? '' : ' — the track starts recording ' +
-        'as soon as a ladder’s band has its candles, with the Algo ' +
-        'on or off') + '</td></tr>';
-    }
-    rows.forEach(function (r) {
-      // The prices are HYPOTHETICAL and frozen at the event: what the
-      // settings in force at the time would have produced. Most zone
-      // changes never become a trade.
-      html += '<tr><td>' + anClock(r.at) + '</td>' +
-        '<td class="l"><b>' + zoneCell(r.zone) + '</b></td>' +
-        '<td class="l hint">' + zoneCell(r.prev_zone) + '</td>' +
-        '<td>' + fmt(r.z, 2) + '</td>' +
-        '<td class="l">' + anSide(r.side) + '</td>' +
-        zoneEdgeCell(r) + zoneStatusCell(r) +
-        '<td>' + fmt(r.entry, 4) + '</td>' +
-        '<td title="measured from break-even ' + fmt(r.break_even, 4) +
-        '">' + fmt(r.tp, 4) + '</td>' +
-        '<td>' + fmt(r.sl, 4) + '</td>' +
-        '<td class="l hint">' + escapeHtml(r.algo_mode || DASH) +
-        '</td></tr>';
-    });
-    html += '</tbody></table>' +
-      '<div class="note">Entry, take profit and stop loss are what the ' +
-      'ladder’s settings AT THAT MOMENT would have produced, frozen ' +
-      'into the row — editing a ladder does not rewrite them. They ' +
-      'are hypothetical: most σ zone changes never become a trade, ' +
-      'and a level that could not be priced is a dash, never a zero.</div>';
-    return html;
-  }
-
   function analysisPane() {
     var a = state.analysis;
     var pairs = state.snapshot.pairs || {};
@@ -4818,8 +4723,26 @@
     var names = a.names || {};
     function name(key) { return escapeHtml(names[key] || key || DASH); }
 
-    // 1. The summary.
+    // THE TWO HALVES. Above this line is what the desk actually did;
+    // below it is what the Algo would have done. They are different
+    // populations and they were being read as one page - four rows of
+    // em dashes over a busy hypothetical table looks like a fault
+    // rather than like a quiet week.
     var s = a.summary || {};
+    html += '<h3 class="an-half">What actually happened ' +
+      '<small>\u2014 the trades this desk really put on</small></h3>';
+    if (!(s.count || 0)) {
+      // ONE SENTENCE, not four rows of dashes. Nothing is wrong: there
+      // is simply nothing in this window yet, and saying so plainly
+      // beats a wall of em dashes that reads as a broken page.
+      html += '<p class="hint">No trades opened in this window. The ' +
+        'summary, drawdown, calibration and what-if-held readings ' +
+        'below fill in from the first trade \u2014 widen the range ' +
+        'above, or look at what the Algo would have done further ' +
+        'down.</p>';
+    }
+
+    // 1. The summary.
     html += '<h4>Summary</h4><div class="an-tiles">' +
       anTile('Trades', s.count || 0) +
       anTile('Closed', s.closed || 0) +
@@ -4923,27 +4846,6 @@
       html += '</tbody></table>';
     }
 
-    // 5. The backtest.
-    var bt = state.analysisBt;
-    html += '<h4>Backtest <small>\u2014 the Algo\u2019s own, on MT5\u2019s ' +
-      'history; nothing is sent</small></h4><div class="an-bar">' +
-      (state.analysisPair ? escapeHtml((pairs[state.analysisPair] || {}).name ||
-        state.analysisPair) : '<span class="hint">pick one ladder above</span>') +
-      ' \u00b7 last <select class="an-bt-days">' +
-      [3, 5, 10].map(function (n) {
-        return '<option value="' + n + '"' +
-          (state.analysisBtDays === n ? ' selected' : '') + '>' + n +
-          ' days</option>';
-      }).join('') + '</select> <button class="btn an-bt-run"' +
-      (bt && bt.running ? ' disabled' : '') + '>Run backtest</button></div>' +
-      '<div class="an-bt-out ' + (bt ? bt.cls || '' : 'hint') + '">' +
-      (bt ? bt.html : 'The ladder\u2019s Algo must be on (Signals is fine).') +
-      '</div>';
-
-    // 6. Signals, and the zone path they were read off.
-    html += signalTable(a);
-    html += zoneTable(a);
-
     // 7. The journal.
     var trips = a.journal || [];
     var total = trips.length ? trips[0].cum_pnl : null;
@@ -4974,7 +4876,35 @@
         '</td><td class="' + anSign(t.cum_pnl) + '">' + money(t.cum_pnl) +
         '</td></tr>';
     });
-    html += '</tbody></table></div>';
+    html += '</tbody></table>';
+
+    // The ALGO half: nothing below this line happened. It is
+    // what these settings WOULD have done, which is a different
+    // question from what the desk did, and the two were read as
+    // one page until they were given a heading each.
+    html += '<h3 class="an-half">What the Algo would have done <small>\u2014 hypothetical, on the ladder\u2019s own settings, with its Algo on or off</small></h3>';
+
+    // 5. The backtest.
+    var bt = state.analysisBt;
+    html += '<h4>Backtest <small>\u2014 the Algo\u2019s own, on MT5\u2019s ' +
+      'history; nothing is sent</small></h4><div class="an-bar">' +
+      (state.analysisPair ? escapeHtml((pairs[state.analysisPair] || {}).name ||
+        state.analysisPair) : '<span class="hint">pick one ladder above</span>') +
+      ' \u00b7 last <select class="an-bt-days">' +
+      [3, 5, 10].map(function (n) {
+        return '<option value="' + n + '"' +
+          (state.analysisBtDays === n ? ' selected' : '') + '>' + n +
+          ' days</option>';
+      }).join('') + '</select> <button class="btn an-bt-run"' +
+      (bt && bt.running ? ' disabled' : '') + '>Run backtest</button></div>' +
+      '<div class="an-bt-out ' + (bt ? bt.cls || '' : 'hint') + '">' +
+      (bt ? bt.html : 'The ladder\u2019s Algo must be on (Signals is fine).') +
+      '</div>';
+
+    // 6. Signals, and the zone path they were read off.
+    html += signalTable(a);
+
+    html += '</div>';
     return html;
   }
 

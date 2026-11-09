@@ -77,7 +77,16 @@ TP = 'TP'                # the take-profit would have been reached
 SL = 'SL'                # the stop would have been reached
 EXPIRED = 'EXPIRED'      # neither, inside the watch window
 NO_ENTRY = 'NO_ENTRY'    # armed, then disarmed without ever entering
-OUTCOMES = (TP, SL, EXPIRED, NO_ENTRY)
+#: The stretch came back into the window, and the Algo REFUSED it - its
+#: edge, regime, trend or half-life filter, or a stop that would sit
+#: inside the bid-ask. Not a trade, and the reason is on the row.
+#:
+#: This is the outcome the page was missing. Without it a desk reads
+#: 147 losing trades where the Algo would have taken none, and the
+#: edge filter refusing them - which is the filter doing its job - is
+#: invisible.
+BLOCKED = 'BLOCKED'
+OUTCOMES = (TP, SL, EXPIRED, NO_ENTRY, BLOCKED)
 
 
 def reentry_window(entry_z, reentry_back, window_pct):
@@ -171,6 +180,11 @@ def new_signal(pair_key, basis, side, at, z, params, broker_day=None,
         #: is a win however it got out.
         'net_pnl': None,
         'source': LIVE, 'exit_reason': None,
+        #: WHY the Algo refused it, in its own words, and the edge
+        #: reading at that moment. An edge of 0.02x against the 1.5x
+        #: required is the single most useful number on a page about
+        #: whether these settings are worth switching on.
+        'block_reason': None, 'edge_ratio': None, 'edge_required': None,
         'reverted': False, 'revert_min': None,
         'held_min': None,
         'entry_z': params.get('entry_z'),
@@ -191,6 +205,23 @@ def enter(signal, at, z, prices, units):
     signal['tp'] = (prices or {}).get('tp')
     signal['sl'] = (prices or {}).get('sl')
     signal['units'] = units
+    return signal
+
+
+def block(signal, at, reason, edge=None):
+    """The stretch came back and the Algo REFUSED it.
+
+    A refusal is not a trade and must never be counted as one - but it
+    is the most informative row on the page, because it says what the
+    settings are actually doing. The reason is the Algo's own words.
+    """
+    edge = dict(edge or {})
+    signal['state'] = CLOSED
+    signal['outcome'] = BLOCKED
+    signal['closed_at'] = float(at)
+    signal['block_reason'] = reason
+    signal['edge_ratio'] = edge.get('ratio')
+    signal['edge_required'] = edge.get('required')
     return signal
 
 
@@ -342,6 +373,7 @@ def tally(rows):
     mine = list(rows or ())
     entered = [r for r in mine if r.get('entered_at') is not None]
     settled = [r for r in entered if r.get('outcome') in (TP, SL, EXPIRED)]
+    blocked = [r for r in mine if r.get('outcome') == BLOCKED]
     # WON and LOST are measured in money, not by which level was
     # touched. An exit on the mean reversion in profit is a win however
     # it got out, and a page that called it "neither" would under-report
@@ -356,6 +388,7 @@ def tally(rows):
         'armed': len(mine),
         'entered': len(entered),
         'no_entry': sum(1 for r in mine if r.get('outcome') == NO_ENTRY),
+        'blocked': len(blocked),
         'open': sum(1 for r in mine if r.get('state') == OPEN),
         'settled': len(settled),
         'priced': len(priced),

@@ -28,7 +28,7 @@ from datetime import date
 from flask import Flask, jsonify, render_template, request
 
 from . import analysis, atomicfile, config as cfg, diagnostics, fairvalue, \
-    hedgeratio, signals, sizing, slippage, zones
+    hedgeratio, signals, sizing, slippage
 from .commands import CommandLog
 from .legs import RemoteLeg
 
@@ -500,22 +500,17 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                             'error': f'{zone_date} is not a date — '
                                      f'YYYY-MM-DD'}), 400
         try:
-            zone_rows = db.zone_events(pair_key, since=zone_since,
-                                       broker_day=zone_date)
-            zone_span = db.zone_span(pair_key)
             signal_rows = db.signals(pair_key, since=zone_since,
                                      broker_day=zone_date)
             signal_days = db.signal_days(pair_key)
         except Exception as e:
             # A tab that cannot read one section still shows the rest:
             # the zone track is a reading, not the money.
-            logging.error('the zone track could not be read: %s', e)
-            zone_rows, zone_span = [], {}
+            logging.error('the signal track could not be read: %s', e)
             signal_rows, signal_days = [], []
         return jsonify(dict(body, ok=True, days=days, pair=pair_key,
-                            names=names, zones=zone_rows,
-                            zone_days=zone_days, zone_span=zone_span,
-                            zone_statuses=list(zones.STATUSES),
+                            names=names,
+                            zone_days=zone_days,
                             date=zone_date,
                             signals=signal_rows,
                             signal_days=signal_days,
