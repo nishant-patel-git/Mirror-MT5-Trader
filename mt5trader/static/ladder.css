@@ -1100,6 +1100,14 @@ table.legbook tr.spread .c-width { color: #7a4b00; }
   text-align: right;
 }
 .monitor tr.detail td { background: #fafafa; font-size: 10px; }
+/* The level an exit was actually measured against. One cell of three
+ * is marked, so the eye finds the stop that fired without reading the
+ * Exit column first — and a target that was never reached stays a
+ * plain number beside it. */
+.monitor td.on-level {
+  font-weight: 700;
+  box-shadow: inset 0 -2px 0 var(--chrome-dark);
+}
 /* An order that stopped working, kept on screen with its reason. */
 .monitor tr.dead td { background: #f6eeee; color: var(--muted); }
 .monitor .up { color: var(--traded); font-weight: 600; }

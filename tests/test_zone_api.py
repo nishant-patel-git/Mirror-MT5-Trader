@@ -138,6 +138,8 @@ def test_the_api_serves_the_signals_in_journal_shape(desk):
     assert [r['outcome'] for r in rows] == ['BLOCKED', 'SL']
     # The refusal carries no money, so the total does not move for it.
     assert [r['cum_pnl'] for r in rows] == [-205.0, -205.0]
-    assert 'stop 71.40' in rows[1]['detail']
+    # The levels are COLUMNS on the row, not a sentence under it.
+    assert rows[1]['sl'] == 71.40 and rows[1]['break_even'] == 71.20
     assert rows[1]['leg_a_entry'] == 101.118
-    assert 'edge 0.02x' in rows[0]['detail']
+    # ...and the WHY column keeps only what is not a number.
+    assert 'edge 0.02x' in rows[0]['why']

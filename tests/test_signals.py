@@ -327,12 +327,19 @@ def test_a_refusal_carries_no_money_and_does_not_move_the_total():
     assert [r['cum_pnl'] for r in out] == [-20.0, -20.0]
 
 
-def test_the_detail_line_says_which_levels_it_was_judged_against():
+def test_the_levels_are_columns_on_the_row_itself():
+    """They were a prose line under the row first. The signal already
+    carries its three levels, so the journal prints them as columns
+    and the WHY column keeps only what is not a number."""
     [row] = signals.journal([a_signal()])
-    assert 'break-even 71.20' in row['detail']
-    assert 'target 70.55' in row['detail'] and 'stop 71.40' in row['detail']
-    assert 'came off at 71.46' in row['detail']
-    assert 'never came back to the mean' in row['detail']
+    assert row['break_even'] == 71.20
+    assert row['tp'] == 70.55 and row['sl'] == 71.40
+    assert row['why'] == 'never came back to the mean'
+
+
+def test_a_signal_that_came_back_says_when():
+    [row] = signals.journal([a_signal(reverted=True, revert_min=22.0)])
+    assert row['why'] == 'came back to the mean after 22.0 min'
 
 
 def test_a_refusal_says_the_filter_and_the_reading_behind_it():
@@ -340,25 +347,24 @@ def test_a_refusal_says_the_filter_and_the_reading_behind_it():
         outcome=signals.BLOCKED, net_pnl=None, entered_at=None,
         block_reason='edge filter: capture is 0.02x the round trip',
         edge_ratio=0.02, edge_required=1.5)])
-    assert 'edge filter' in row['detail']
-    assert 'edge 0.02x of the 1.50x it requires' in row['detail']
-    # No level is quoted: it never entered, so it had none.
-    assert 'break-even' not in row['detail']
+    assert 'edge filter' in row['why']
+    assert 'edge 0.02x of 1.50x' in row['why']
 
 
 def test_a_stretch_that_never_came_back_names_the_window():
     [row] = signals.journal([a_signal(
         outcome=signals.NO_ENTRY, net_pnl=None, entered_at=None,
         entry_z=2.0, reentry_back=0.5)])
-    assert 'never came back inside the window' in row['detail']
-    assert 'enters at 2.00' in row['detail']
+    assert 'never back inside the window' in row['why']
+    assert 'enters 2.00' in row['why'] and 'back 0.50' in row['why']
 
 
-def test_an_unpriced_level_is_said_so_rather_than_printed_as_zero():
-    [row] = signals.journal([a_signal(tp=None, sl=None)])
-    assert 'target not priced' in row['detail']
-    assert 'stop not priced' in row['detail']
-    assert '0.00' not in row['detail']
+def test_a_signal_still_running_has_nothing_to_explain():
+    """CONTROL: the WHY column is for how it ENDED. One that has not
+    ended yet is a dash, not a sentence invented for it."""
+    [row] = signals.journal([a_signal(state=signals.OPEN, outcome=None,
+                                      entered_at=None, net_pnl=None)])
+    assert row['why'] is None
 
 
 def test_a_close_records_the_spread_it_came_off_at():
@@ -374,3 +380,65 @@ def test_a_close_records_the_spread_it_came_off_at():
     signals.watch(signal, 71.6, 3.1, 12.0, 0)
     assert signal['outcome'] == signals.SL
     assert signal['exit_spread'] == 71.6
+
+
+# -- how often the z was triggered -------------------------------------------
+
+def test_the_z_count_is_split_by_side_and_names_its_threshold():
+    """'How many times did it trigger' is the question the page is for.
+    Above and below are different trades, so they are counted apart."""
+    rows = [a_signal(armed_z=2.61, entry_z=2.5, side='SELL'),
+            a_signal(armed_z=3.12, entry_z=2.5, side='SELL'),
+            a_signal(armed_z=-2.63, entry_z=2.5, side='BUY')]
+    t = signals.tally(rows)
+    assert t['triggered'] == 3
+    assert t['triggered_up'] == 2 and t['triggered_down'] == 1
+    assert t['threshold_z'] == 2.5
+    assert t['peak_z'] == 3.12 and t['trough_z'] == -2.63
+
+
+def test_a_refusal_and_a_stretch_that_never_entered_still_triggered():
+    """The z reached the band: that is the trigger. What the Algo did
+    about it afterwards is a different column, and leaving these out
+    would under-count exactly the stretches worth knowing about."""
+    rows = [a_signal(armed_z=2.61, entry_z=2.5, outcome=signals.BLOCKED,
+                     net_pnl=None, entered_at=None),
+            a_signal(armed_z=2.70, entry_z=2.5, outcome=signals.NO_ENTRY,
+                     net_pnl=None, entered_at=None)]
+    t = signals.tally(rows)
+    assert t['triggered'] == 2 and t['entered'] == 0
+
+
+def test_two_ladders_that_disagree_quote_no_threshold():
+    """Printing either one would be wrong on half the rows."""
+    rows = [a_signal(armed_z=2.61, entry_z=2.5),
+            a_signal(armed_z=2.10, entry_z=2.0)]
+    assert signals.tally(rows)['threshold_z'] is None
+    # The COUNT still works: it is the threshold that cannot be named.
+    assert signals.tally(rows)['triggered'] == 2
+
+
+def test_nothing_triggered_is_no_furthest_z_rather_than_zero():
+    t = signals.tally([])
+    assert t['triggered'] == 0
+    assert t['peak_z'] is None and t['trough_z'] is None
+
+
+def test_a_second_poke_at_the_band_is_not_a_second_trigger():
+    """The whole reason the arming machine exists, now visible as a
+    count: one stretch out and back is ONE trigger, however many times
+    z pushes at the band on the way."""
+    arming = signals.AlgoArming()
+    params = {'entry_z': 2.5, 'reentry_back': 0.5, 'max_entry_z': 0}
+    rows = []
+    for z in (2.6, 2.1, 2.7, 2.55, 3.0):
+        armed, _entered = arming.observe(z, params)
+        if armed:
+            rows.append(a_signal(armed_z=z, entry_z=2.5, side='SELL'))
+    assert signals.tally(rows)['triggered'] == 1
+    # CONTROL: back through the floor, then out again, IS a second one.
+    arming.observe(0.2, params)
+    armed, _entered = arming.observe(2.8, params)
+    assert armed == 'SELL'
+    rows.append(a_signal(armed_z=2.8, entry_z=2.5, side='SELL'))
+    assert signals.tally(rows)['triggered'] == 2

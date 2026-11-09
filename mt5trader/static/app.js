@@ -580,17 +580,17 @@
     // the desk has been scrolled sideways.
     var origin = desktopOrigin();
     if (!desktop.width) { return; }
-    // HEIGHT IS THE ROOM THERE IS, not a flat 560.
+    // THE SIZE IS THE ROOM THERE IS, not a flat 1180 x 560.
     //
     // A tool window opened at 560px on a 900px screen left a third of
     // the display as bare desktop below it while the Analysis tab -
-    // which is several screens long - scrolled inside a short box. The
-    // width still has a ceiling, because a table wider than about
-    // 1180 is read by scrolling whatever the window does; the height
-    // has none, because every one of these panes is a list that is
-    // either longer than the screen or quickly scrolled.
-    var wanted = size(node,
-                      Math.min(1180, Math.max(desktop.width - 80, 320)),
+    // which is several screens long - scrolled inside a short box.
+    // The width was capped at 1180 on the reasoning that a wider
+    // table is read by scrolling anyway; the journals put the levels
+    // in columns and are 17 wide, so on a 1800px desk that cap threw
+    // away 500px of screen the trader had. Both ceilings are now the
+    // desk's own size, less a margin.
+    var wanted = size(node, Math.max(desktop.width - 80, 320),
                       Math.max(desktop.height - 80, 200));
     // Stepped down and across so a second and third one do not land
     // exactly on top of the first.
@@ -675,8 +675,7 @@
       // Ours, not theirs: take the room there is now.
       var desktop = desktopBox();
       if (desktop.width) {
-        var fresh = size(node,
-                         Math.min(1180, Math.max(desktop.width - 80, 320)),
+        var fresh = size(node, Math.max(desktop.width - 80, 320),
                          Math.max(desktop.height - 80, 200));
         layout[id] = Object.assign({}, saved, {w: fresh.w, h: fresh.h});
         writeLayout();
@@ -4553,6 +4552,37 @@
     return one(a) + ' / ' + one(b);
   }
 
+  // One LEVEL cell. `on` marks the level this exit was measured
+  // against, so the eye finds the one that mattered without reading
+  // the Exit column first. `sized_by` is the setting that put it
+  // there, in a tooltip: it is prose, and prose does not belong in a
+  // column of prices.
+  function anLevel(value, on, note, sizedBy, money) {
+    if (value === null || value === undefined) {
+      // A level nobody recorded is NOT today's level, and it is not
+      // zero. The dash says so and the tooltip says why.
+      return '<td' + (note ? ' class="hint" title="' + escapeHtml(note) +
+        '"' : '') + '>' + DASH + '</td>';
+    }
+    var tip = [];
+    if (on && sizedBy) { tip.push(sizedBy); }
+    if (on && money !== null && money !== undefined) {
+      tip.push('worth ' + money.toFixed(2) + ' at that level');
+    }
+    return '<td' + (on ? ' class="on-level"' : '') +
+      (tip.length ? ' title="' + escapeHtml(tip.join(' · ')) + '"' : '') +
+      '>' + fmt(value, 4) + '</td>';
+  }
+
+  // How far past the level it was measured against the close went.
+  // 'short of' on a take-profit is the slippage the re-check exists
+  // for, and it is worth seeing as its own number.
+  function anGap(x) {
+    if (!x || x.gap === null || x.gap === undefined) { return DASH; }
+    return fmt(x.gap, 4) + ' <span class="hint">' +
+      escapeHtml(x.gap_word || '') + '</span>';
+  }
+
   function anSide(side) {
     return side === 'SELL' ? 'H to L'
       : (side === 'BUY' ? 'L to H' : (side || DASH));
@@ -4695,10 +4725,30 @@
   function signalTiles(a) {
     var t = a.signal_tally || {};
     if (!t.armed) { return ''; }
+    // The THRESHOLD these were counted against, named on the tile
+    // rather than left to be guessed. Blank where two ladders on one
+    // page disagree about it: printing either would be wrong.
+    var band = t.threshold_z === null || t.threshold_z === undefined ? ''
+      : Number(t.threshold_z).toFixed(2) + 'σ';
     return '<div class="an-tiles">' +
-      anTile('Signals', t.armed, '', 'stretches that reached the ' +
-             'ladder\u2019s entry z \u2014 a second poke at the band ' +
-             'while still armed is NOT a second signal') +
+      anTile('z triggered' + (band ? ' ±' + band : ''),
+             t.triggered === undefined ? t.armed : t.triggered, '',
+             'how many times the spread reached the ladder’s own ' +
+             'entry z' + (band ? ' of ' + band : '') + ' — a second ' +
+             'poke at the band while still armed is NOT a second ' +
+             'trigger, because there is nothing new to act on until it ' +
+             'has come back through the floor') +
+      anTile('↑ above', t.triggered_up, '',
+             'stretched HIGH — the Algo SELLS these') +
+      anTile('↓ below', t.triggered_down, '',
+             'stretched LOW — the Algo BUYS these') +
+      anTile('Furthest z', t.peak_z === null || t.peak_z === undefined
+             ? DASH : Number(t.peak_z).toFixed(2) + 'σ', '',
+             'the furthest a trigger got, either way: ' +
+             (t.trough_z === null || t.trough_z === undefined ? DASH
+              : Number(t.trough_z).toFixed(2) + 'σ') + ' low, ' +
+             (t.peak_z === null || t.peak_z === undefined ? DASH
+              : Number(t.peak_z).toFixed(2) + 'σ') + ' high') +
       anTile('Blocked', t.blocked, t.blocked ? 'hint' : '',
              'the Algo looked and declined: its edge, regime, trend or ' +
              'half-life filter, or a stop that would sit inside the ' +
@@ -4752,16 +4802,25 @@
     html += signalTiles(a);
     // THE SIGNAL JOURNAL. Deliberately the same shape as the trade
     // journal above it, so the two can be read against each other: the
-    // same columns, in the same order, with a running total down the
-    // right. A signal that was refused carries no money and must not
-    // move that total.
-    var SIGNAL_COLS = 13;
+    // same columns, in the same order, with the three levels as
+    // columns and a running total down the right. A signal that was
+    // refused carries no money and must not move that total.
+    var SIGNAL_COLS = 17;
     html += '<table class="an-table"><thead><tr><th>Signalled</th>' +
       '<th class="l">Pair</th><th class="l">Side</th>' +
       '<th class="l">From</th><th>Size</th>' +
       '<th>z in → out</th><th>Spread in → out</th>' +
+      '<th title="After every cost. The level the other two are ' +
+      'measured from">Break-even</th>' +
+      '<th title="The take-profit this signal would have been given">' +
+      'Target</th>' +
+      '<th title="The stop this signal would have been given">Stop</th>' +
       '<th>Leg A in</th><th>Leg B in</th><th>Held</th>' +
-      '<th class="l">Outcome</th><th>Net P&amp;L</th><th>Running</th>' +
+      '<th class="l">Outcome</th>' +
+      '<th class="l" title="The one thing about a signal that is not a ' +
+      'number: the filter that refused it, the window it never came ' +
+      'back inside, or whether the spread came back to its mean">Why' +
+      '</th><th>Net P&amp;L</th><th>Running</th>' +
       '</tr></thead><tbody>';
     if (!rows.length) {
       html += '<tr><td colspan="' + SIGNAL_COLS + '" class="hint">no ' +
@@ -4770,6 +4829,8 @@
     rows.forEach(function (r) {
       var out = SIGNAL_OUTCOME[r.outcome] ||
         [r.state === 'OPEN' ? 'running' : 'armed', ''];
+      var onLevel = r.outcome === 'SL' ? 'sl'
+        : (r.outcome === 'TP' ? 'tp' : null);
       html += '<tr><td>' + anClock(r.armed_at) + '</td>' +
         '<td class="l">' + label(r.pair_key) + '</td>' +
         '<td class="l">' + anSide(r.side) + '</td>' +
@@ -4785,6 +4846,9 @@
         '</td>' +
         '<td>' + fmt(r.entry, 4) + ' → ' + fmt(r.exit_spread, 4) +
         '</td>' +
+        anLevel(r.break_even, false) +
+        anLevel(r.tp, onLevel === 'tp') +
+        anLevel(r.sl, onLevel === 'sl') +
         '<td>' + (r.leg_a_entry === null || r.leg_a_entry === undefined
                   ? DASH : (r.leg_a_side || '') + ' ' +
                   fmt(r.leg_a_entry, 3)) + '</td>' +
@@ -4794,19 +4858,11 @@
         '<td>' + (r.held_min === null || r.held_min === undefined ? DASH
                   : anMin(r.held_min)) + '</td>' +
         '<td class="l ' + out[1] + '">' + out[0] + '</td>' +
+        '<td class="l hint">' + escapeHtml(r.why || DASH) + '</td>' +
         '<td class="' + anSign(r.net_pnl) + '">' + money(r.net_pnl) +
         '</td>' +
         '<td class="' + anSign(r.cum_pnl) + '">' + money(r.cum_pnl) +
         '</td></tr>';
-      // The levels it was judged against, the filter that refused it,
-      // or the window it never came back inside - whichever applies.
-      // A signal moves no money, so the row is only as good as what it
-      // says about itself.
-      if (r.detail) {
-        html += '<tr class="detail"><td></td><td colspan="' +
-          (SIGNAL_COLS - 1) + '" class="l">' + escapeHtml(r.detail) +
-          '</td></tr>';
-      }
     });
     html += '</tbody></table>' +
       '<div class="note">Recorded off the LIVE book as it happened: the ' +
@@ -4974,41 +5030,57 @@
     }
 
     // 7. The journal.
+    //
+    // THE LEVELS ARE COLUMNS, not a sentence under the row. They were
+    // written as prose first - 'stop 71.40 = break-even 71.20 + 0.20
+    // . 2% of margin . closed 71.46, 0.06 past it' - and that reads
+    // fine for one trade and not at all for forty: a journal is a
+    // table, and a number worth printing is worth lining up down the
+    // page where it can be compared with the one above it.
     var trips = a.journal || [];
     var total = trips.length ? trips[0].cum_pnl : null;
-    html += '<h4>Trade journal <small>\u2014 ' + trips.length +
+    html += '<h4>Trade journal <small>— ' + trips.length +
       ' closed, running total ' + money(total) + '</small></h4>' +
       '<table class="an-table"><thead><tr><th>Closed</th><th class="l">Pair</th>' +
-      '<th class="l">Side</th><th class="l">Who</th><th>Size</th><th>z in \u2192 out</th>' +
-      '<th>Spread in \u2192 out</th><th>Leg A in</th><th>Leg B in</th>' +
+      '<th class="l">Side</th><th class="l">Who</th><th>Size</th><th>z in → out</th>' +
+      '<th>Spread in → out</th>' +
+      '<th title="After every cost. The level the other two are ' +
+      'measured from">Break-even</th>' +
+      '<th title="The take-profit this trade was given, and the ' +
+      'setting that put it there">Target</th>' +
+      '<th title="The stop this trade was given, and the setting that ' +
+      'put it there">Stop</th>' +
+      '<th title="How far past the level it was measured against the ' +
+      'close actually went">vs level</th>' +
+      '<th>Leg A in</th><th>Leg B in</th>' +
       '<th>Held</th><th class="l">Exit</th><th>Net P&amp;L</th><th>Running</th>' +
       '</tr></thead><tbody>';
     if (!trips.length) {
-      html += '<tr><td colspan="13" class="hint">no closed trade in this ' +
+      html += '<tr><td colspan="17" class="hint">no closed trade in this ' +
         'window</td></tr>';
     }
     trips.forEach(function (t) {
+      var x = t.exit || {};
       html += '<tr><td>' + anClock(t.closed_at) + '</td><td class="l">' +
         name(t.pair_key) + '</td><td class="l">' + anSide(t.side) +
         '</td><td class="l">' +
         (t.source === 'ALGO' ? '<b>Algo</b>' : 'Manual') + '</td><td>' +
-        qty(t.quantity) + '</td><td>' + fmt(t.entry_z, 2) + ' \u2192 ' +
-        fmt(t.exit_z, 2) + '</td><td>' + fmt(t.entry_spread, 4) + ' \u2192 ' +
-        fmt(t.exit_spread, 4) + '</td><td>' +
-        (t.leg_a.side || '') + ' ' + fmt(t.leg_a.entry, 3) + '</td><td>' +
-        (t.leg_b.side || '') + ' ' + fmt(t.leg_b.entry, 3) + '</td><td>' +
-        anHeld(t.held_sec) + '</td><td class="l">' +
+        qty(t.quantity) + '</td><td>' + fmt(t.entry_z, 2) + ' → ' +
+        fmt(t.exit_z, 2) + '</td><td>' + fmt(t.entry_spread, 4) + ' → ' +
+        fmt(t.exit_spread, 4) + '</td>' +
+        anLevel(x.break_even, false, x.note) +
+        anLevel(x.tp, x.on_level === 'tp', x.note, x.sized_by,
+                x.level_money) +
+        anLevel(x.sl, x.on_level === 'sl', x.note, x.sized_by,
+                x.level_money) +
+        '<td>' + anGap(x) + '</td>' +
+        '<td>' + (t.leg_a.side || '') + ' ' + fmt(t.leg_a.entry, 3) +
+        '</td><td>' + (t.leg_b.side || '') + ' ' + fmt(t.leg_b.entry, 3) +
+        '</td><td>' + anHeld(t.held_sec) + '</td><td class="l">' +
         escapeHtml(t.exit_reason || DASH) +
         '</td><td class="' + anSign(t.pnl) + '">' + money(t.pnl) +
         '</td><td class="' + anSign(t.cum_pnl) + '">' + money(t.cum_pnl) +
         '</td></tr>';
-      // WHY it ended, in numbers, under the row it belongs to: the
-      // level, the setting that put it there, and how far past it the
-      // close went. 'Algo: stop loss' says none of that.
-      if (t.exit_detail) {
-        html += '<tr class="detail"><td></td><td colspan="12" class="l">' +
-          escapeHtml(t.exit_detail) + '</td></tr>';
-      }
     });
     html += '</tbody></table>';
 
