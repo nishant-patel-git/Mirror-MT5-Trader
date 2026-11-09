@@ -442,3 +442,29 @@ def test_a_second_poke_at_the_band_is_not_a_second_trigger():
     assert armed == 'SELL'
     rows.append(a_signal(armed_z=2.8, entry_z=2.5, side='SELL'))
     assert signals.tally(rows)['triggered'] == 2
+
+
+def test_a_page_of_refusals_has_no_running_total_rather_than_zero():
+    """UNMEASURED IS NOT ZERO. Three signals, none of them entered:
+    $0.00 down the Running column reads as 'it broke even', which is a
+    measurement nobody made. Seen live on a desk whose edge filter
+    refused everything."""
+    rows = [a_signal(outcome=signals.BLOCKED, net_pnl=None,
+                     entered_at=None, closed_at=100.0),
+            a_signal(outcome=signals.NO_ENTRY, net_pnl=None,
+                     entered_at=None, closed_at=200.0)]
+    assert [r['cum_pnl'] for r in signals.journal(rows)] == [None, None]
+
+
+def test_the_total_is_real_from_the_first_priced_row_on():
+    """CONTROL. Once something has been priced the total is a
+    measurement, and a later unpriced row leaves it where it was
+    rather than blanking it again."""
+    rows = [a_signal(net_pnl=None, outcome=signals.BLOCKED,
+                     entered_at=None, closed_at=100.0),
+            a_signal(net_pnl=-205.0, closed_at=200.0),
+            a_signal(net_pnl=None, outcome=signals.BLOCKED,
+                     entered_at=None, closed_at=300.0)]
+    # Newest first on the screen.
+    assert [r['cum_pnl'] for r in signals.journal(rows)] == \
+        [-205.0, -205.0, None]

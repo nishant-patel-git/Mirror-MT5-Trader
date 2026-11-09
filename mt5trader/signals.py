@@ -526,12 +526,20 @@ def journal(rows):
                      key=lambda r: (r.get('closed_at')
                                     or r.get('entered_at')
                                     or r.get('armed_at') or 0.0))
-    running = 0.0
+    # None, not 0.0, until something has actually been priced.
+    # UNMEASURED IS NOT ZERO: a page of refusals and stretches that
+    # never entered has no running total, and printing $0.00 down the
+    # column reads as 'it broke even', which is a measurement nobody
+    # made. Once one row carries money the total is real, and a later
+    # unpriced row leaves it where it was.
+    running = None
     out = []
     for row in ordered:
         pnl = row.get('net_pnl')
         if pnl is not None:
-            running += float(pnl)
-        out.append(dict(row, why=why(row), cum_pnl=round(running, 2)))
+            running = float(pnl) + (running or 0.0)
+        out.append(dict(row, why=why(row),
+                        cum_pnl=None if running is None
+                        else round(running, 2)))
     out.reverse()
     return out

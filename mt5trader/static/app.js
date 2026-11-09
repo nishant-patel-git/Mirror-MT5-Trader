@@ -4718,7 +4718,14 @@
     var total = reasons.reduce(function (sum, r) { return sum + r[1]; }, 0);
     return ' \u2014 held back ' + total + ' time(s): ' +
       reasons.slice(0, 3).map(function (r) {
-        return escapeHtml(r[0]) + ' ' + r[1];
+        // The engine counts these under a reason with its NUMBERS
+        // taken out, so that '0.03x the cost' and '0.04x the cost' are
+        // one reason and not two. It writes that as '#', which on the
+        // screen reads as a fault rather than as a placeholder - and
+        // the count ran straight on after it, so the line ended
+        // '...the #x required 1'.
+        return escapeHtml(String(r[0]).replace(/#/g, 'n')) +
+          ' (' + r[1] + ')';
       }).join(', ');
   }
 
