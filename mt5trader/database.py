@@ -352,6 +352,19 @@ class Store:
         ('signal_events', 'exit_reason', 'TEXT'),
         # What the trade would have MADE at its close.
         ('signal_events', 'net_pnl', 'REAL'),
+        # WHY the Algo refused a stretch, in its own words, and the edge
+        # reading behind it.
+        #
+        # Adding this column also PURGES the signal rows written before
+        # it existed, and that is deliberate. Those rows were produced
+        # without the Algo's entry gates: on one live desk that put 147
+        # trades on the page the Algo would never have taken, every one
+        # of them stopped out on its first mark. Keeping known-wrong
+        # numbers in a total is worse than an empty page, and the page
+        # refills from `Derive 30 days`.
+        ('signal_events', 'block_reason', 'TEXT'),
+        ('signal_events', 'edge_ratio', 'REAL'),
+        ('signal_events', 'edge_required', 'REAL'),
         ('positions', 'naked_ms', 'REAL'),
         # MANUAL or ALGO. NULL on a row written before it existed, which
         # reads back as MANUAL: nothing traded by itself then either.
@@ -369,6 +382,18 @@ class Store:
         ('positions', 'entry_atr', 'REAL'),
     )
 
+    #: Rows to clear when a column is added for the first time, because
+    #: everything written before it was produced by logic now known to
+    #: be wrong. Keyed (table, column) -> the table to empty.
+    #:
+    #: Used ONCE, for `signal_events.block_reason`: the rows written
+    #: before it existed were entered without the Algo's own gates, so
+    #: they record trades it would never have taken. Nothing else in
+    #: this database is ever deleted by an upgrade — positions, fills
+    #: and the journal are the record of what really happened, and a
+    #: migration must never touch those.
+    PURGE_ON_ADD = {('signal_events', 'block_reason'): 'signal_events'}
+
     def _add_missing_columns(self, connection):
         for table, column, kind in self.LATER_COLUMNS:
             have = {row['name'] for row in
@@ -377,6 +402,17 @@ class Store:
                 continue
             connection.execute(
                 f'ALTER TABLE {table} ADD COLUMN {column} {kind}')
+            purge = self.PURGE_ON_ADD.get((table, column))
+            if purge:
+                gone = connection.execute(
+                    f'DELETE FROM {purge}').rowcount
+                if gone:
+                    logging.warning(
+                        '%d signal row(s) cleared: they were recorded '
+                        'before the Algo\'s entry gates were applied, so '
+                        'they describe trades it would not have taken. '
+                        'Press "Derive 30 days" to rebuild the page.',
+                        gone)
 
     # -- positions: the state a restart recovers ---------------------------
 
@@ -809,82 +845,6 @@ class Store:
                 'SELECT pair_key, data FROM z_excursions').fetchall()
         return {row['pair_key']: json.loads(row['data']) for row in rows}
 
-    #: The columns of one zone row, in the order they are written.
-    ZONE_COLUMNS = ('pair_key', 'at', 'timeframe_sec', 'zone', 'prev_zone',
-                    'direction', 'z', 'mean', 'sigma', 'side', 'entry',
-                    'break_even', 'tp', 'sl', 'edge_ratio', 'edge_capture',
-                    'edge_cost', 'edge_required', 'edge_ok', 'status',
-                    'algo_mode', 'entry_z', 'max_entry_z', 'stop_z',
-                    'length', 'increment', 'broker_day')
-
-    def save_zone_event(self, row):
-        """Append one sigma-zone change. Never updates: the history is
-        the point, and a row that can be rewritten is not one."""
-        values = []
-        for name in self.ZONE_COLUMNS:
-            value = row.get(name)
-            if name == 'edge_ok' and value is not None:
-                value = 1 if value else 0
-            values.append(value)
-        with self._connect() as connection:
-            connection.execute(
-                'INSERT INTO z_zone_events (%s) VALUES (%s)'
-                % (','.join(self.ZONE_COLUMNS),
-                   ','.join('?' * len(self.ZONE_COLUMNS))), values)
-        return True
-
-    def zone_events(self, pair_key=None, since=None, broker_day=None,
-                    limit=2000):
-        """Zone changes, newest first, FILTERED IN THE QUERY.
-
-        `since` is a UTC second and the index on (pair_key, at) serves
-        it; `broker_day` is one calendar day on the BROKER's clock and
-        wins where both are given. Either way the range must never
-        become "read every row ever written and throw most of them
-        away in the browser".
-        """
-        where, params = [], []
-        if pair_key:
-            where.append('pair_key = ?')
-            params.append(pair_key)
-        if broker_day:
-            where.append('broker_day = ?')
-            params.append(str(broker_day))
-        elif since is not None:
-            where.append('at >= ?')
-            params.append(float(since))
-        clause = ('WHERE ' + ' AND '.join(where)) if where else ''
-        params.append(int(limit))
-        with self._connect() as connection:
-            rows = connection.execute(
-                f'SELECT * FROM z_zone_events {clause} '
-                f'ORDER BY at DESC, id DESC LIMIT ?', params).fetchall()
-        out = []
-        for row in rows:
-            body = {name: row[name] for name in self.ZONE_COLUMNS}
-            body['id'] = row['id']
-            if body['edge_ok'] is not None:
-                body['edge_ok'] = bool(body['edge_ok'])
-            out.append(body)
-        return out
-
-    def zone_span(self, pair_key=None):
-        """Per ladder: first and last row, and how many. What the data
-        availability question actually asks."""
-        where, params = [], []
-        if pair_key:
-            where.append('pair_key = ?')
-            params.append(pair_key)
-        clause = ('WHERE ' + ' AND '.join(where)) if where else ''
-        with self._connect() as connection:
-            rows = connection.execute(
-                f'SELECT pair_key, MIN(at) AS first_at, MAX(at) AS last_at, '
-                f'COUNT(*) AS rows FROM z_zone_events {clause} '
-                f'GROUP BY pair_key', params).fetchall()
-        return {row['pair_key']: {'first_at': row['first_at'],
-                                  'last_at': row['last_at'],
-                                  'rows': row['rows']} for row in rows}
-
     #: One signal row, in the order it is written.
     SIGNAL_COLUMNS = ('pair_key', 'basis', 'side', 'broker_day', 'threshold',
                       'state', 'outcome', 'armed_at', 'armed_z',
@@ -893,7 +853,8 @@ class Store:
                       'peak_net', 'trough_net', 'reverted', 'revert_min',
                       'held_min', 'entry_z', 'max_entry_z', 'reentry_back',
                       'reentry_window_pct', 'algo_mode', 'source',
-                      'exit_reason', 'net_pnl')
+                      'exit_reason', 'net_pnl', 'block_reason',
+                      'edge_ratio', 'edge_required')
 
     def save_signal(self, row):
         """Write a signal, or update the one `row['id']` names.
@@ -1022,25 +983,6 @@ class Store:
             rows = connection.execute(
                 'SELECT pair_key, data FROM signal_arming').fetchall()
         return {row['pair_key']: json.loads(row['data']) for row in rows}
-
-    def save_zone_state(self, pair_key, timeframe_sec, zone, at=None):
-        """Remember the zone last RECORDED, so a restart does not record
-        the one the spread is already in."""
-        with self._connect() as connection:
-            connection.execute(
-                'INSERT OR REPLACE INTO z_zone_state '
-                '(pair_key, timeframe_sec, zone, at) VALUES (?,?,?,?)',
-                (pair_key, float(timeframe_sec or 0.0), zone,
-                 self.clock() if at is None else float(at)))
-
-    def zone_state(self):
-        """{(pair_key, timeframe_sec): zone} as last recorded."""
-        with self._connect() as connection:
-            rows = connection.execute(
-                'SELECT pair_key, timeframe_sec, zone '
-                'FROM z_zone_state').fetchall()
-        return {(row['pair_key'], float(row['timeframe_sec'])): row['zone']
-                for row in rows}
 
     def events_between(self, kinds, start=None, end=None):
         """Audit-trail rows of these kinds, oldest first."""

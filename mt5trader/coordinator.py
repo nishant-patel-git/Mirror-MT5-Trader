@@ -1096,7 +1096,6 @@ class Coordinator:
             # analysis band's when it is off.
             reading = self._band_reading(pair, md, body, now)
             self._track_excursions(pair, md, reading, now)
-            self._track_zones(pair, md, body, reading, settings, now)
             self._track_signals(pair, md, body, reading, settings, now)
         except Exception as e:
             logging.exception('[ANALYSIS %s] skipped this pass: %s',
@@ -1387,9 +1386,28 @@ class Coordinator:
                        and r['state'] == signals.ARMED]
             if waiting:
                 row = waiting[-1]
-                priced = self.hypothetical_levels(pair, md, entered_side,
-                                                  params, settings, reading)
-                signals.enter(row, now, z, priced['prices'], priced['units'])
+                # THE ALGO'S OWN GATES, before anything is entered.
+                #
+                # This used to arm and enter on z alone. On a live desk
+                # that put 147 trades on the page in one day that the
+                # Algo would never have taken - its edge filter was
+                # reading 0.02x against the 1.5x it requires - and every
+                # one of them was then stopped out on its first mark,
+                # for -$53,245 of P&L that never existed. A page that
+                # invents trades is worse than a page with nothing on
+                # it.
+                refusal, edge = self._entry_refusal(
+                    pair, md, body, reading, params, entered_side, z,
+                    settings)
+                if refusal:
+                    signals.block(row, now, refusal, edge)
+                else:
+                    priced = self.hypothetical_levels(
+                        pair, md, entered_side, params, settings, reading)
+                    signals.enter(row, now, z, priced['prices'],
+                                  priced['units'])
+                    row['edge_ratio'] = (edge or {}).get('ratio')
+                    row['edge_required'] = (edge or {}).get('required')
                 self._write_signal(row)
                 changed = True
 
@@ -1428,115 +1446,60 @@ class Coordinator:
             return None
         return executable_spread(md, SpreadSide(side), closing=True)
 
-    def _zone_state(self):
-        """The zone last RECORDED per (ladder, timeframe), read once.
+    def _entry_refusal(self, pair, md, body, reading, params, side, z,
+                       settings):
+        """Why the Algo would REFUSE this entry, and the edge behind it.
 
-        From the database, so a restart does not record the zone the
-        spread is already sitting in — which is the whole of the
-        duplicate problem: the counters' arming lived in memory, and
-        every restart logged a fresh touch for a spread that had not
-        moved.
+        (reason, edge) — reason None when it would take the trade. The
+        Algo's own `check(side, z)` decides, not a second opinion
+        written here: the edge, regime, trend and half-life filters all
+        run through it, and a filter it cannot PRICE blocks, as live.
+
+        On top of it, the one guard the live gates do not carry because
+        the live Algo gets it from `backtest._side_levels`: A STOP
+        INSIDE THE BID-ASK IS NOT A STOP. Entering at one executable
+        side and marking against the other puts the round trip against
+        the position immediately, so a stop nearer than the width is
+        reached on the first mark — which is exactly how a day of
+        trades all closed at 0.0 min.
         """
-        if self._zone_last is None:
-            self._zone_last = {}
-            if self.store is not None:
-                try:
-                    self._zone_last = self.store.zone_state()
-                except Exception as e:
-                    logging.error('could not read the zone state: %s', e)
-        return self._zone_last
-
-    def _track_zones(self, pair, md, body, reading, settings, now):
-        """Record a row when this ladder's SIGMA ZONE changes, and
-        nothing at all while it sits in one.
-
-        Runs whatever the Algo's mode is. It writes one database row
-        and returns; it cannot place, modify or cancel anything.
-        """
-        if not reading or reading.get('z') is None:
-            return None
-        z = reading['z']
-        zone = zones.zone_of(z)
-        candles = reading['candles']
-        key = (pair.key, float(candles.timeframe_sec))
-        state = self._zone_state()
-        previous = state.get(key)
-        if not zones.changed(previous, zone):
-            return None
-        params = algo_module.clean_params(getattr(pair, 'algo_params', None))
-        row = zones.event_row(
-            pair.key, now, z, zone, previous, reading['mean'],
-            reading['sigma'], params,
-            timeframe_sec=candles.timeframe_sec,
-            algo_mode=self.algos.mode(pair.key) or 'OFF',
-            step=pair.effective_increment(),
-            broker_day=self.broker_day(),
-            **self._zone_judgement(pair, md, body, reading, params, settings))
-        state[key] = zone
-        if self.store is not None:
-            try:
-                self.store.save_zone_event(row)
-                self.store.save_zone_state(pair.key, candles.timeframe_sec,
-                                           zone, now)
-            except Exception as e:
-                logging.error('could not record the zone change: %s', e)
-        return row
-
-    def _zone_judgement(self, pair, md, body, reading, params, settings):
-        """What the Algo would have made of this moment: its filters,
-        its edge, and the prices it would have used.
-
-        Every one of them FROZEN into the row, because a row whose
-        numbers move when the ladder is edited tomorrow is not a record
-        of what happened. Unpriceable stays None — a stop of 0.00 reads
-        as "get out at break-even", which is a different instruction.
-        """
-        z = reading['z']
-        side = zones.entry_side(z)
-        filters, block_reason = {'ready': False}, None
-        if body and body.get('filters'):
-            # ITS OWN READING. The Algo is running and has already
-            # judged this pass on its own band; re-judging it here
-            # against the analysis band's sigma would put two different
-            # verdicts on one moment.
-            filters = body['filters']
-            block_reason = body.get('blocked')
-        else:
-            cost_in = self._algo_cost(pair)
-            try:
+        edge = None
+        try:
+            if body and body.get('filters'):
+                filters = body['filters']
+                check = None
+                refusal = body.get('blocked')
+            else:
                 filters, check = judge_filters(
                     params, md, reading['stats'],
-                    reading['candles'].closes(), cost_in)
-                block_reason = None if side is None else check(side, z)
-            except Exception as e:
-                logging.error('[ANALYSIS %s] the filters would not price '
-                              'this zone: %s', pair.key, e)
-                filters, block_reason = {'ready': False}, None
-        warmup = ((body or {}).get('filters') or {}).get('warmup') or {}
-        qty = params['algo_qty']
-        # The edge AT THIS EVENT'S z, not the panel's preview.
-        #
-        # `judge_filters` prices its `edge` at the z an entry would be
-        # taken at (`entry_z` less the re-entry give-back) so the panel
-        # has a real number before z ever gets there. That is the right
-        # figure for a panel and the wrong one for a row: this row is a
-        # record of one moment, and capture scales with |z|, so the
-        # preview reads a different number from the one the filter
-        # actually judged here.
-        cost = (filters.get('cost') or {}).get('total')
-        edge = dict(algofilters.edge(z, reading['sigma'], filters.get('k'),
-                                     qty, cost, params['edge_capture_frac'],
-                                     params['edge_multiple']),
-                    on=params['edge_on'])
+                    reading['candles'].closes(), self._algo_cost(pair))
+                refusal = check(side, z)
+            cost = (filters.get('cost') or {}).get('total')
+            edge = dict(algofilters.edge(
+                z, reading['sigma'], filters.get('k'), params['algo_qty'],
+                cost, params['edge_capture_frac'], params['edge_multiple']),
+                on=params['edge_on'])
+            if refusal:
+                return refusal, edge
+        except Exception as e:
+            logging.error('[ANALYSIS %s] the entry gates would not price '
+                          'this signal: %s', pair.key, e)
+            return 'the entry gates could not be priced', edge
+        width = None
+        if md and md.get('long_spread') is not None \
+                and md.get('short_spread') is not None:
+            width = md['long_spread'] - md['short_spread']
         priced = self.hypothetical_levels(pair, md, side, params, settings,
                                           reading)
-        return {
-            'prices': priced['prices'],
-            'edge': edge,
-            'filters': filters,
-            'block_reason': block_reason,
-            'warmup_done': bool(warmup.get('done', True)),
-        }
+        stop_distance = None
+        prices = priced['prices']
+        if prices.get('sl') is not None and prices.get('break_even') is not None:
+            stop_distance = abs(prices['break_even'] - prices['sl'])
+        if stop_distance is not None and width is not None \
+                and stop_distance <= width:
+            return (f'levels: the stop is inside the bid-ask '
+                    f'({stop_distance:.4g} against {width:.4g})'), edge
+        return None, edge
 
     def hypothetical_levels(self, pair, md, side, params, settings,
                             reading=None):
