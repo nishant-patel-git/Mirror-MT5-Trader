@@ -5764,9 +5764,10 @@ def test_a_derive_that_found_nothing_says_what_held_it_back(page):
     page.evaluate('() => { window.fetch = window.__realFetch; }')
 
 
-def test_the_journal_says_why_a_trade_ended_in_numbers(page):
+def test_the_journal_puts_the_levels_in_columns(page):
     """'Algo: stop loss' on its own cannot tell a stop that was hit
-    from a stop that was set in the wrong place."""
+    from a stop that was set in the wrong place \u2014 and a prose line
+    under the row cannot be compared with the row above it."""
     page.errors.clear()      # earlier tests raise on purpose
     page.evaluate("""() => {
         const s = window.MT5Trader.state;
@@ -5780,23 +5781,67 @@ def test_the_journal_says_why_a_trade_ended_in_numbers(page):
           journal: [{position_id: 'P1', pair_key: 'A|B', side: 'SELL',
             closed_at: 1762600000, source: 'ALGO', quantity: 1.0,
             exit_reason: 'Algo: stop loss',
-            exit_detail: 'stop 71.40 = break-even 71.20 + 0.20 \u00b7 ' +
-              '2% of margin (4,720.00 per spread at entry) \u00b7 ' +
-              'closed 71.46, 0.06 past it',
+            exit: {break_even: 71.20, tp: 70.55, sl: 71.40,
+                   on_level: 'sl',
+                   sized_by: '2% of margin (4,720.00/spread)',
+                   level_money: -205.0, gap: 0.06, gap_word: 'past',
+                   note: null},
             entry_spread: 71.0, exit_spread: 71.46, held_sec: 900,
             entry_z: 2.6, exit_z: 3.1,
             leg_a: {side: 'BUY', entry: 101.118},
             leg_b: {side: 'SELL', entry: 115.554},
             pnl: -205.0, cum_pnl: -205.0}]};
-        // Fresh enough that the pane does not refetch over it.
         s.analysisAt = Date.now();
         window.MT5Trader.render();
     }""")
     page.wait_for_selector('.monitor .analysis table', timeout=WAIT)
     text = page.text_content('.monitor .analysis')
-    assert 'Algo: stop loss' in text
-    assert 'break-even 71.20 + 0.20' in text and '2% of margin' in text
-    assert page.locator('.monitor .analysis tr.detail').count() >= 1
+    for heading in ('Break-even', 'Target', 'Stop', 'vs level'):
+        assert heading in text, heading
+    assert '71.2000' in text and '70.5500' in text and '71.4000' in text
+    assert '0.0600' in text and 'past' in text
+    # The one that fired is marked, and only that one.
+    assert page.locator('.monitor .analysis td.on-level').count() == 1
+    marked = page.text_content('.monitor .analysis td.on-level')
+    assert '71.4000' in marked
+    # The setting that put it there is a tooltip, not a column of prose.
+    assert '2% of margin' in page.get_attribute(
+        '.monitor .analysis td.on-level', 'title')
+    # And no prose line survives under the row.
+    assert page.locator('.monitor .analysis tr.detail').count() == 0
+    assert page.errors == []
+
+
+def test_a_level_nobody_recorded_is_a_dash_not_a_number(page):
+    """CONTROL. Unmeasured is not zero and is not today's settings."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {}, drawdown: {}, calibration: {}, shadow: {},
+          excursion: [], signals: [],
+          journal: [{position_id: 'P9', pair_key: 'A|B', side: 'SELL',
+            closed_at: 1762600000, source: 'ALGO', quantity: 1.0,
+            exit_reason: 'Algo: stop loss',
+            exit: {break_even: null, tp: null, sl: null, on_level: 'sl',
+                   sized_by: null, level_money: null, gap: null,
+                   gap_word: null,
+                   note: 'the level it was measured against was not ' +
+                         'recorded \u2014 kept from this version on'},
+            entry_spread: 71.0, exit_spread: 71.46, held_sec: 900,
+            leg_a: {side: 'BUY', entry: 101.118},
+            leg_b: {side: 'SELL', entry: 115.554},
+            pnl: -205.0, cum_pnl: -205.0}]};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis table', timeout=WAIT)
+    assert page.locator('.monitor .analysis td.on-level').count() == 0
+    titles = page.locator('.monitor .analysis td.hint[title]')
+    assert titles.count() >= 3          # all three levels say why
+    assert 'not recorded' in titles.first.get_attribute('title')
     assert page.errors == []
 
 
@@ -5804,7 +5849,7 @@ def test_the_signal_journal_reads_like_the_trade_journal(page):
     """The same columns in the same order, so the two halves of the
     page can be read against each other \u2014 and the signals are
     recorded off the live book, not simulated."""
-    page.errors.clear()      # earlier tests raise on purpose
+    page.errors.clear()
     page.evaluate("""() => {
         const s = window.MT5Trader.state;
         s.open = ['monitor:'];
@@ -5819,32 +5864,33 @@ def test_the_signal_journal_reads_like_the_trade_journal(page):
             {pair_key: 'A|B', side: 'SELL', source: 'LIVE', state: 'CLOSED',
              outcome: 'SL', armed_at: 1762600000, armed_z: 2.61,
              closed_z: 3.12, entry: 71.0, exit_spread: 71.46,
+             break_even: 71.20, tp: 70.55, sl: 71.40,
              quantity: 1.0, held_min: 15.0,
              leg_a_side: 'BUY', leg_a_entry: 101.118,
              leg_b_side: 'SELL', leg_b_entry: 115.554,
              net_pnl: -205.0, cum_pnl: -205.0,
-             detail: 'break-even 71.20 \u00b7 target 70.55 \u00b7 ' +
-               'stop 71.40 \u00b7 came off at 71.46'},
+             why: 'never came back to the mean'},
             {pair_key: 'A|B', side: 'SELL', source: 'LIVE', state: 'CLOSED',
              outcome: 'BLOCKED', armed_at: 1762500000, armed_z: 2.55,
+             break_even: null, tp: null, sl: null,
              net_pnl: null, cum_pnl: -205.0,
-             detail: 'edge filter: capture is 0.02x the round trip \u00b7 ' +
-               'edge 0.02x of the 1.50x it requires'}]};
-        // Fresh enough that the pane does not refetch over it.
+             why: 'edge filter: capture is 0.02x the round trip \u00b7 ' +
+               'edge 0.02x of 1.50x'}]};
         s.analysisAt = Date.now();
         window.MT5Trader.render();
     }""")
     page.wait_for_selector('.monitor .analysis table', timeout=WAIT)
     text = page.text_content('.monitor .analysis')
-    # The journal's own columns, on the signals.
-    for heading in ('Size', 'z in \u2192 out'.replace('\\u2192', '\u2192'),
-                    'Leg A in', 'Leg B in', 'Running'):
+    for heading in ('Size', 'Leg A in', 'Leg B in', 'Running', 'Why',
+                    'Break-even'):
         assert heading in text, heading
     assert 'BUY 101.118' in text and 'SELL 115.554' in text
     assert '2.61' in text and '3.12' in text
-    # The numbers behind each outcome, including the refusal.
-    assert 'stop 71.40' in text
-    assert 'edge 0.02x of the 1.50x it requires' in text
+    # The levels as columns, with the one that fired marked.
+    assert '71.2000' in text and '70.5500' in text and '71.4000' in text
+    assert page.locator('.monitor .analysis td.on-level').count() == 1
+    # The refusal keeps its words, in the WHY column.
+    assert 'edge 0.02x of 1.50x' in text
     # Recorded, not simulated: the word that was wrong is gone.
     assert 'hypothetical' not in text.lower()
     assert 'recorded off the live book' in text.lower()
@@ -5871,3 +5917,59 @@ def test_the_monitor_takes_the_room_there_is(page):
     # Within one window's furniture of the foot of the desktop, not a
     # third of the screen away.
     assert 0 <= room < 120, room
+
+
+def test_the_z_trigger_count_is_on_the_page_with_its_threshold(page):
+    """'How many times did the z trigger' — split by side, with the
+    band it was counted against named rather than left to be guessed."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {}, drawdown: {}, calibration: {}, shadow: {},
+          excursion: [], journal: [], signals: [],
+          signal_tally: {armed: 9, triggered: 9, triggered_up: 6,
+                         triggered_down: 3, threshold_z: 2.5,
+                         peak_z: 3.41, trough_z: -2.88,
+                         blocked: 2, entered: 5, no_entry: 2, tp: 3, sl: 2,
+                         win_rate: 60.0, net_pnl: 410.0, live: 9,
+                         replayed: 0, priced: 5, settled: 5}};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis .an-tiles', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    assert 'z triggered ±2.50σ' in text
+    assert '↑ above' in text and '↓ below' in text
+    assert 'Furthest z' in text and '3.41σ' in text
+    # The two sides add up to the total, on the screen as in the engine.
+    assert '9' in text and '6' in text and '3' in text
+    assert page.errors == []
+
+
+def test_two_ladders_that_disagree_name_no_band_on_the_tile(page):
+    """CONTROL. Printing either threshold would be wrong on half the
+    rows, so the tile names none."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {}, summary: {}, drawdown: {},
+          calibration: {}, shadow: {}, excursion: [], journal: [],
+          signals: [],
+          signal_tally: {armed: 4, triggered: 4, triggered_up: 2,
+                         triggered_down: 2, threshold_z: null,
+                         peak_z: null, trough_z: null, blocked: 0,
+                         entered: 0, no_entry: 0, tp: 0, sl: 0,
+                         win_rate: null, net_pnl: null, live: 4,
+                         replayed: 0, priced: 0, settled: 0}};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis .an-tiles', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    assert 'z triggered' in text and 'σ' not in text.split('Blocked')[0]
+    assert page.errors == []

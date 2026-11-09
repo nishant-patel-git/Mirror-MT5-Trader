@@ -439,78 +439,77 @@ def tally(rows):
         'revert_rate': (round(100.0 * len(reverted) / len(settled), 1)
                         if settled else None),
         'best_peak': round(max(nets), 2) if nets else None,
+        # HOW OFTEN THE Z WAS TRIGGERED, which is the count the page is
+        # for. It is the ARMED count, split by side - a stretch is one
+        # trigger however many times it pokes the band while it is
+        # still out there, because there is nothing new to act on until
+        # it has come back through the floor. Counting the pokes
+        # instead inflates every number on the page and makes a quiet
+        # day look busy.
+        **_z_triggers(mine),
     }
 
 
-def _spread(value):
-    """A spread price as the screen prints it, trimmed back to two
-    decimals. None stays None - a level that could not be priced is a
-    dash, never a zero."""
-    if value is None:
-        return None
-    try:
-        text = f'{float(value):,.4f}'
-    except (TypeError, ValueError):
-        return None
-    whole, _, decimals = text.partition('.')
-    decimals = decimals.rstrip('0')
-    while len(decimals) < 2:
-        decimals += '0'
-    return f'{whole}.{decimals}'
+def _z_triggers(rows):
+    """The z count, by side, with the threshold it was counted against
+    and the furthest either way."""
+    up = [r for r in rows if (r.get('armed_z') or 0.0) > 0]
+    down = [r for r in rows if (r.get('armed_z') or 0.0) < 0]
+    zs = [float(r['armed_z']) for r in rows if r.get('armed_z') is not None]
+    # The threshold these were counted against. Only quoted when every
+    # row agrees: two ladders with different entry_z on one page have
+    # no single threshold, and printing either would be wrong.
+    thresholds = {r.get('entry_z') for r in rows
+                  if r.get('entry_z') is not None}
+    return {
+        'triggered': len(rows),
+        'triggered_up': len(up),
+        'triggered_down': len(down),
+        'threshold_z': (thresholds.pop() if len(thresholds) == 1 else None),
+        # Furthest the spread actually got, either way. None, not 0,
+        # where nothing armed.
+        'peak_z': round(max(zs), 2) if zs else None,
+        'trough_z': round(min(zs), 2) if zs else None,
+    }
 
 
-def detail(row):
-    """WHY this signal ended the way it did, in its own numbers.
+def why(row):
+    """The one thing about a signal that is NOT a number.
 
-    The trade journal carries a line like this under every round trip,
-    and a signal needs the same one for a harder reason: no money
-    changed hands, so the row is ONLY as good as what it says about
-    itself. 'blocked' without the filter and the reading behind it, or
-    'stop' without the level, is a number nobody can check.
+    Everything else it has to say - the levels, the z, the prices, the
+    size - is a column of its own. What is left is the sentence: which
+    filter refused it, which window it never came back inside, or
+    whether the spread came back to its mean. Written as a column too,
+    so the journal stays one table.
     """
     row = row or {}
     outcome = row.get('outcome')
-    parts = []
     if outcome == BLOCKED:
+        parts = []
         if row.get('block_reason'):
             parts.append(str(row['block_reason']))
         ratio, needed = row.get('edge_ratio'), row.get('edge_required')
         if ratio is not None:
             said = f'edge {float(ratio):.2f}x'
             if needed is not None:
-                said += f' of the {float(needed):.2f}x it requires'
+                said += f' of {float(needed):.2f}x'
             parts.append(said)
-        armed = row.get('armed_z')
-        if armed is not None:
-            parts.append(f'armed at {float(armed):.2f}σ')
-        return ' · '.join(parts) or None
+        return ' \u00b7 '.join(parts) or None
     if outcome == NO_ENTRY:
-        armed = row.get('armed_z')
-        parts.append('armed at ' + (f'{float(armed):.2f}σ' if armed
-                                    is not None else 'an unmeasured z')
-                     + ' and never came back inside the window')
+        said = 'never back inside the window'
         if row.get('entry_z') is not None:
-            said = f'enters at {float(row["entry_z"]):.2f}σ'
+            said += f' (enters {float(row["entry_z"]):.2f}\u03c3'
             if row.get('reentry_back') is not None:
-                said += f', back inside {float(row["reentry_back"]):.2f}σ'
-            parts.append(said)
-        return ' · '.join(parts)
-    # Entered: the three levels it was being judged against, and which
-    # one it came off on.
-    for label, name in (('break-even', 'break_even'), ('target', 'tp'),
-                        ('stop', 'sl')):
-        said = _spread(row.get(name))
-        parts.append(f'{label} {said}' if said else f'{label} not priced')
-    if row.get('exit_spread') is not None:
-        parts.append(f'came off at {_spread(row["exit_spread"])}')
-    if row.get('entered_at') is not None:
-        parts.append('came back to the mean after '
-                     f'{float(row["revert_min"]):.1f} min'
-                     if row.get('reverted') and row.get('revert_min')
-                     is not None else
-                     ('came back to the mean' if row.get('reverted')
-                      else 'never came back to the mean'))
-    return ' · '.join(parts) or None
+                said += f', back {float(row["reentry_back"]):.2f}\u03c3'
+            said += ')'
+        return said
+    if row.get('entered_at') is None:
+        return None
+    if row.get('reverted'):
+        minutes = row.get('revert_min')
+        return ('came back to the mean' if minutes is None else
+                f'came back to the mean after {float(minutes):.1f} min')
+    return 'never came back to the mean'
 
 
 def journal(rows):
@@ -533,6 +532,6 @@ def journal(rows):
         pnl = row.get('net_pnl')
         if pnl is not None:
             running += float(pnl)
-        out.append(dict(row, detail=detail(row), cum_pnl=round(running, 2)))
+        out.append(dict(row, why=why(row), cum_pnl=round(running, 2)))
     out.reverse()
     return out

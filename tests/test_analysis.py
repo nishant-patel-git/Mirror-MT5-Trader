@@ -102,7 +102,7 @@ def test_the_journal_carries_the_numbers_behind_the_exit():
     [row] = analysis.journal([traded('Algo: stop loss', 71.46)])
     assert row['entry_spread'] == 71.00 and row['exit_spread'] == 71.46
     assert row['leg_a']['volume'] == 0.10 and row['leg_b']['volume'] == 0.25
-    assert 'stop 71.40' in row['exit_detail']
+    assert row['exit']['sl'] == 71.40
     assert row['cum_pnl'] == -10.0
 
 
@@ -111,7 +111,7 @@ def test_the_extremes_table_does_not_repeat_the_journals_columns():
     twice: the journal carries the size, this table carries the
     extremes."""
     [row] = analysis.excursion_rows([traded('Algo: stop loss', 71.46)])
-    assert 'quantity' not in row and 'exit_detail' not in row
+    assert 'quantity' not in row and 'exit' not in row
     assert row['mae'] == 20.0 and row['mfe'] == 1.0
 
 
@@ -121,67 +121,78 @@ def test_an_unrecorded_leg_is_no_lot_size_rather_than_zero():
     assert row['lots_a'] is None and row['lots_b'] is None
 
 
-def test_a_stop_says_where_it_was_and_which_setting_put_it_there():
-    said = analysis.exit_detail(
+def test_the_three_levels_are_columns_and_the_one_that_fired_is_marked():
+    """They were one prose line under the row first. A journal is a
+    table: a number worth printing is worth lining up down the page."""
+    x = analysis.exit_columns(
         {'side': 'SELL', 'close_reason': 'Algo: stop loss',
          'exit_spread': 71.46, 'exit_levels': SELL_LEVELS})
-    assert 'stop 71.40' in said
-    # A SHORT's stop is ABOVE its break-even. Signed the other way, the
-    # line reads as a stop that was never reachable.
-    assert 'break-even 71.20 + 0.20' in said
-    assert '2% of margin' in said and '4,720.00' in said
-    assert 'closed 71.46, 0.06 past it' in said
-    assert 'worth -205.00' in said
+    assert x['break_even'] == 71.20 and x['tp'] == 70.55 and x['sl'] == 71.40
+    # Which of the three this exit was measured against - so the screen
+    # marks that one cell rather than all three.
+    assert x['on_level'] == 'sl'
+    assert x['sized_by'] == '2% of margin (4,720.00/spread)'
+    assert x['level_money'] == -205.0
+    assert x['gap'] == 0.06 and x['gap_word'] == 'past'
+    assert x['note'] is None
 
 
-def test_a_long_puts_its_stop_the_other_way_round():
+def test_how_far_past_is_measured_the_right_way_round_for_a_long():
+    """A long's stop sits BELOW its break-even. Signed the other way,
+    every stop reads as one that was never reached."""
     levels = dict(SELL_LEVELS, sl=70.90, tp=71.90)
-    said = analysis.exit_detail(
+    x = analysis.exit_columns(
         {'side': 'BUY', 'close_reason': 'Algo: stop loss',
          'exit_spread': 70.85, 'exit_levels': levels})
-    assert 'break-even 71.20 - 0.30' in said
-    assert '0.05 past it' in said
+    assert x['on_level'] == 'sl'
+    assert x['gap'] == 0.05 and x['gap_word'] == 'past'
 
 
-def test_a_target_is_measured_against_the_target():
-    said = analysis.exit_detail(
+def test_a_target_missed_by_a_tick_says_SHORT_rather_than_past():
+    """That gap is the slippage the take-profit re-check exists for,
+    and calling it 'past' would hide exactly that."""
+    x = analysis.exit_columns(
         {'side': 'SELL', 'close_reason': 'Algo: profit target (after costs)',
          'exit_spread': 70.60, 'exit_levels': SELL_LEVELS})
-    assert 'target 70.55' in said and '1.5% of margin' in said
-    # It came off 0.05 SHORT of the target - which is the slippage the
-    # take-profit re-check exists for, and saying 'past it' would hide
-    # exactly that.
-    assert '0.05 short of it' in said
+    assert x['on_level'] == 'tp'
+    assert x['gap'] == 0.05 and x['gap_word'] == 'short of'
+    assert x['sized_by'] == '1.5% of margin (4,720.00/spread)'
 
 
 def test_an_atr_stop_names_the_multiple_and_the_atr_it_was_sized_from():
     levels = dict(SELL_LEVELS, stop_mode='ATR', atr_stop_mult=2.5,
                   entry_atr=0.16, sl=71.60)
-    said = analysis.exit_detail(
+    x = analysis.exit_columns(
         {'side': 'SELL', 'close_reason': 'Algo: stop loss',
          'exit_spread': 71.62, 'exit_levels': levels})
-    assert '2.5 \u00d7 ATR 0.16 at entry' in said
+    assert x['sized_by'] == '2.5 \u00d7 ATR 0.16'
 
 
 def test_a_trade_closed_before_the_levels_were_kept_says_so():
     """Unmeasured is not zero, and it is not today's settings either:
     a level invented afterwards would read as the one it was stopped
     on."""
-    said = analysis.exit_detail({'side': 'SELL',
-                                 'close_reason': 'Algo: stop loss',
-                                 'exit_spread': 71.46})
-    assert 'not recorded' in said
-    assert '71.40' not in said
+    x = analysis.exit_columns({'side': 'SELL',
+                               'close_reason': 'Algo: stop loss',
+                               'exit_spread': 71.46})
+    assert x['sl'] is None and x['tp'] is None and x['break_even'] is None
+    assert 'not recorded' in x['note']
+    assert x['gap'] is None
 
 
-def test_an_exit_that_was_not_a_level_is_left_in_its_own_words():
+def test_an_exit_that_was_not_a_level_marks_no_level():
     """A cutoff, a kill and a close by hand are not a level being
-    touched, and dressing them up in one would be a lie."""
+    touched. The levels are still shown - they were what the trade was
+    being judged against - but none of them is marked as the one that
+    fired, and there is no distance to one."""
     for reason in ('OVERNIGHT_CLOSE', 'closed by the trader',
                    'force-cleared: leg A not at the broker after 3 checks'):
-        row = {'side': 'SELL', 'close_reason': reason,
-               'exit_spread': 71.46, 'exit_levels': SELL_LEVELS}
-        assert analysis.exit_detail(row) is None
+        x = analysis.exit_columns({'side': 'SELL', 'close_reason': reason,
+                                   'exit_spread': 71.46,
+                                   'exit_levels': SELL_LEVELS})
+        assert x['on_level'] is None
+        assert x['gap'] is None and x['sized_by'] is None
+        assert x['break_even'] == 71.20          # still worth seeing
 
 
 def test_calibration_reads_the_peaks():
