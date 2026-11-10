@@ -225,6 +225,15 @@ class AlgoDesk:
         run = self._runs.get(key)
         return run.mode if run else None
 
+    def candles(self, key):
+        """The candles a running Algo judges on, or None when it is off.
+
+        Read by the signal journal's shadow Algo, so that with the Algo
+        on the two read ONE band and cannot disagree about z. Read only:
+        the shadow never observes into them."""
+        run = self._runs.get(key)
+        return run.candles if run else None
+
     def turn_on(self, pair, mode=algo_module.DRY_RUN, confirmed=False,
                 adopt=()):
         """Switch one ladder's Algo on, or change its mode. Refused, in

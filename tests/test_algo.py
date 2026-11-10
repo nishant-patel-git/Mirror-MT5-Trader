@@ -237,6 +237,21 @@ def test_the_live_sink_reaches_orders_ONLY_through_the_coordinator():
     assert calls == {'algo_enter', 'algo_exit'}, calls
 
 
+def test_the_signal_journals_shadow_algo_cannot_reach_an_order():
+    """The journal runs the Algo's own code beside the desk - which is
+    only safe while that code has nothing to send to. It imports the
+    Algo, the filters and `judge_filters`, and nothing that places,
+    changes or cancels an order may appear in it as code."""
+    names, imports = _code_names('mt5trader/shadow.py')
+    assert imports == {'.:algo', '.:algofilters',
+                       'algodesk:WARMUP_CARRY_SEC',
+                       'algodesk:WARMUP_GAP_SEC',
+                       'algodesk:judge_filters'}, imports
+    assert names & (ORDER_VERBS | {'broker', 'legs', 'live', 'sink',
+                                   'send', 'enter', 'leave'}) == set(), \
+        names & ORDER_VERBS
+
+
 def test_the_sigma_zones_are_arithmetic_and_nothing_else():
     """The zone track is a READING. It records what the spread did and
     what the Algo would have made of it; it must not be able to reach

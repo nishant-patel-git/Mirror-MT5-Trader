@@ -376,6 +376,24 @@ class Store:
         ('signal_events', 'leg_a_entry', 'REAL'),
         ('signal_events', 'leg_b_side', 'TEXT'),
         ('signal_events', 'leg_b_entry', 'REAL'),
+        # WHO DECIDED THE ROW: 'algo' - the Algo's own code, live
+        # through `shadow.ShadowAlgo` or replayed through `backtest.run`.
+        #
+        # Adding it PURGES every signal row written before, and the
+        # saved arming with them. Those rows came from a COPY of the
+        # Algo's rules that did not match the Algo: one z off the mid
+        # for both sides, no edge filter while the Algo was on, a new
+        # trade on every signal, trading through a stale feed. On a
+        # live desk it showed dozens of trades in an afternoon in which
+        # the real Algo took none - every one of its four signals was
+        # held back by the edge filter. The page refills from the live
+        # feed and from `Derive 30 days`.
+        ('signal_events', 'decided_by', 'TEXT'),
+        # The margin and ATR a shadow trade FROZE at entry, as a live
+        # position freezes them - so its levels are repriced every pass
+        # by the same arithmetic, and survive a restart.
+        ('signal_events', 'entry_margin', 'REAL'),
+        ('signal_events', 'entry_atr', 'REAL'),
         ('positions', 'naked_ms', 'REAL'),
         # MANUAL or ALGO. NULL on a row written before it existed, which
         # reads back as MANUAL: nothing traded by itself then either.
@@ -409,7 +427,9 @@ class Store:
     #: this database is ever deleted by an upgrade — positions, fills
     #: and the journal are the record of what really happened, and a
     #: migration must never touch those.
-    PURGE_ON_ADD = {('signal_events', 'block_reason'): 'signal_events'}
+    PURGE_ON_ADD = {('signal_events', 'block_reason'): 'signal_events',
+                    ('signal_events', 'decided_by'): ('signal_events',
+                                                      'signal_arming')}
 
     def _add_missing_columns(self, connection):
         for table, column, kind in self.LATER_COLUMNS:
@@ -421,15 +441,20 @@ class Store:
                 f'ALTER TABLE {table} ADD COLUMN {column} {kind}')
             purge = self.PURGE_ON_ADD.get((table, column))
             if purge:
-                gone = connection.execute(
-                    f'DELETE FROM {purge}').rowcount
+                gone = 0
+                for target in ((purge,) if isinstance(purge, str)
+                               else purge):
+                    count = connection.execute(
+                        f'DELETE FROM {target}').rowcount
+                    if target == 'signal_events':
+                        gone += max(count, 0)
                 if gone:
                     logging.warning(
-                        '%d signal row(s) cleared: they were recorded '
-                        'before the Algo\'s entry gates were applied, so '
+                        '%d signal row(s) cleared: they were recorded by '
+                        'rules that did not match the Algo\'s own, so '
                         'they describe trades it would not have taken. '
-                        'Press "Derive 30 days" to rebuild the page.',
-                        gone)
+                        'The page refills from the live feed; press '
+                        '"Derive 30 days" to rebuild the history.', gone)
 
     # -- positions: the state a restart recovers ---------------------------
 
@@ -876,7 +901,8 @@ class Store:
                       'exit_reason', 'net_pnl', 'block_reason',
                       'edge_ratio', 'edge_required', 'exit_spread',
                       'quantity', 'leg_a_side', 'leg_a_entry',
-                      'leg_b_side', 'leg_b_entry')
+                      'leg_b_side', 'leg_b_entry', 'entry_margin',
+                      'entry_atr', 'decided_by')
 
     def save_signal(self, row):
         """Write a signal, or update the one `row['id']` names.

@@ -1,8 +1,15 @@
-"""Signals: how many, and would they have paid.
+"""Signals: the bookkeeping of the signal journal's rows.
 
-The fault these are written against: a spread that pokes the band
-twice without coming back was being counted as two signals, which
-inflates every number on the page and makes a quiet day look busy.
+WHAT IS NOT HERE ANY MORE, and why. This file used to test an
+arm-then-enter machine and a stop-and-target check that lived in
+`signals.py` as a copy of the Algo's rules. The copy did not match the
+Algo - on a live desk it showed dozens of trades in an afternoon in
+which the real Algo took none - and it is gone: what arms, what enters
+and what exits is decided by the Algo's own code (`shadow.ShadowAlgo`,
+tested in `test_signal_journal.py`), and its rules are tested where
+they live, in `test_algo_signal.py`. What remains here is arithmetic on
+rows: a refusal noted, a stretch settled, a trade marked and closed,
+the tally and the journal.
 """
 
 import pytest
@@ -13,195 +20,138 @@ from mt5trader import algo as algo_module, signals
 PARAMS = dict(algo_module.DEFAULT_PARAMS)      # entry_z 2.5, back 0.5, 50%
 
 
-# -- the arming discipline ---------------------------------------------------
+# -- the row's life, decided elsewhere ---------------------------------------
 
-# -- the Algo's own arm-then-enter machine -----------------------------------
-
-def test_the_window_arithmetic_agrees_with_the_algos_own():
-    """Kept in both places; they must never drift."""
-    for entry_z, back, pct in ((2.5, 0.5, 50.0), (3.0, 0.75, 40.0),
-                               (2.0, 0.2, 100.0)):
-        params = dict(PARAMS, entry_z=entry_z, reentry_back=back,
-                      reentry_window_pct=pct)
-        assert signals.reentry_window(entry_z, back, pct) == \
-            algo_module.reentry_window(params)
+def entered(side='SELL', be=13.0, tp=12.5, sl=13.4, units=50.0, at=0.0):
+    """A row the Algo entered: armed, then entered at break-even."""
+    sig = signals.new_signal('A|B', signals.ALGO, side, at, 2.6, PARAMS)
+    signals.enter(sig, at + 60.0, 1.8,
+                  {'entry': be, 'break_even': be, 'tp': tp, 'sl': sl},
+                  units)
+    return sig
 
 
-def test_a_second_poke_at_the_band_is_not_a_second_signal():
-    """2.6 -> 2.55 -> 2.9 has stretched ONCE: it never came back
-    inside, so there is nothing new to act on."""
-    arming = signals.AlgoArming()
-    fired = [arming.observe(z, PARAMS)[0]
-             for z in (2.6, 2.55, 2.9, 2.7, 3.1)]
-    assert fired == ['SELL', None, None, None, None]
-
-
-def test_control_a_stretch_that_came_back_arms_again():
-    arming = signals.AlgoArming()
-    fired = [arming.observe(z, PARAMS)[0] for z in (2.6, 0.5, 2.7)]
-    assert fired == ['SELL', None, 'SELL']
-
-
-def test_the_arming_survives_being_written_down_and_read_back():
-    """Arming that lives only in memory re-arms on every restart."""
-    arming = signals.AlgoArming()
-    assert arming.observe(2.6, PARAMS)[0] == 'SELL'
-    for _ in range(4):
-        arming = signals.AlgoArming(arming.to_dict())      # a restart
-        assert arming.observe(2.6, PARAMS)[0] is None
-
-
-def test_an_unmeasured_z_arms_nothing_and_disarms_nothing():
-    arming = signals.AlgoArming()
-    assert arming.observe(2.6, PARAMS)[0] == 'SELL'
-    for bad in (None, float('nan'), float('inf')):
-        assert arming.observe(bad, PARAMS) == (None, None)
-    assert arming.observe(2.6, PARAMS)[0] is None          # still armed
-
-
-def test_the_algo_arms_on_the_stretch_and_enters_on_the_way_back():
-    """Defaults: arms at 2.5, enters between 1.0 and 2.0."""
-    arming = signals.AlgoArming()
-    assert arming.observe(2.6, PARAMS) == ('SELL', None)      # armed
-    assert arming.observe(2.9, PARAMS) == (None, None)        # still out
-    assert arming.observe(2.2, PARAMS) == (None, None)        # above window
-    assert arming.observe(1.8, PARAMS) == (None, 'SELL')      # ENTERS
-
-
-def test_a_trend_that_rides_the_band_arms_and_never_enters():
-    """Which is the Algo declining to chase it — worth seeing, not a
-    failure."""
-    arming = signals.AlgoArming()
-    armed, entered = arming.observe(2.6, PARAMS)
-    assert (armed, entered) == ('SELL', None)
-    for z in (2.8, 3.1, 3.4, 3.9, 4.2):
-        assert arming.observe(z, PARAMS) == (None, None)
-
-
-def test_a_spread_that_comes_back_too_far_too_fast_disarms():
-    """Through the window's floor leaves nothing worth trading."""
-    arming = signals.AlgoArming()
-    assert arming.observe(2.6, PARAMS) == ('SELL', None)
-    assert arming.observe(0.6, PARAMS) == (None, None)        # under the floor
-    assert arming.observe(1.5, PARAMS) == (None, None)        # NOT an entry
-
-
-def test_the_buy_side_mirrors_it():
-    arming = signals.AlgoArming()
-    assert arming.observe(-2.6, PARAMS) == ('BUY', None)
-    assert arming.observe(-1.8, PARAMS) == (None, 'BUY')
-
-
-def test_with_re_entry_off_the_stretch_itself_is_the_entry():
-    params = dict(PARAMS, reentry_on=False)
-    arming = signals.AlgoArming()
-    assert arming.observe(2.6, params) == ('SELL', 'SELL')
-    assert arming.observe(2.7, params) == (None, None)        # not again
-
-
-# -- the hypothetical trade --------------------------------------------------
-
-def armed_then_entered(side, tp, sl, units=50.0, be=13.0):
-    sig = signals.new_signal('A|B', signals.ALGO, side, 0.0,
-                             2.6 if side == 'SELL' else -2.6, PARAMS)
-    return signals.enter(sig, 0.0, 2.6, {'entry': be, 'break_even': be,
-                                         'tp': tp, 'sl': sl}, units)
-
-
-def test_a_sell_takes_profit_when_the_spread_falls_to_its_target():
-    sig = armed_then_entered('SELL', tp=12.5, sl=13.4)
-    signals.watch(sig, 12.9, 2.0, 60.0, 86400)
-    assert sig['state'] == signals.OPEN
-    signals.watch(sig, 12.4, 0.2, 600.0, 86400)
-    assert sig['outcome'] == signals.TP
-    assert sig['held_min'] == 10.0
-
-
-def test_a_buy_takes_profit_in_the_other_direction():
-    sig = armed_then_entered('BUY', tp=13.5, sl=12.6)
-    signals.watch(sig, 13.6, -0.1, 300.0, 86400)
-    assert sig['outcome'] == signals.TP
-
-
-def test_the_stop_is_checked_before_the_target():
-    """Inside one poll both can look reached. Booking the happier of
-    the two is how a simulation flatters itself."""
-    sig = armed_then_entered('SELL', tp=12.5, sl=13.4)
-    signals.watch(sig, 13.5, 3.0, 60.0, 86400)     # past the stop
-    assert sig['outcome'] == signals.SL
-    # CONTROL: the same move short of the stop takes the target.
-    other = armed_then_entered('SELL', tp=12.5, sl=13.4)
-    signals.watch(other, 12.4, 0.1, 60.0, 86400)
-    assert other['outcome'] == signals.TP
-
-
-def test_coming_back_to_the_mean_is_recorded_beside_the_outcome():
-    """A trade can revert without paying, and pay without reverting.
-    Two questions, two fields."""
-    sig = armed_then_entered('SELL', tp=11.0, sl=14.0)    # a far target
-    signals.watch(sig, 12.95, 0.4, 60.0, 86400)
-    assert sig['reverted'] is False
-    signals.watch(sig, 12.9, -0.1, 120.0, 86400)          # through the mean
-    assert sig['reverted'] is True and sig['revert_min'] == 2.0
-    assert sig['outcome'] is None                          # still open
-    signals.watch(sig, 12.9, -0.1, 90000.0, 86400)
-    assert sig['outcome'] == signals.EXPIRED and sig['reverted'] is True
-
-
-def test_a_signal_that_never_entered_is_recorded_as_such():
+def test_a_row_is_stamped_as_decided_by_the_algos_own_code():
+    """The column the purge hangs on: a row without it came from the
+    copy of the rules that did not match the Algo."""
     sig = signals.new_signal('A|B', signals.ALGO, 'SELL', 0.0, 2.6, PARAMS)
-    signals.abandon(sig, 300.0)
-    assert sig['state'] == signals.CLOSED
+    assert sig['decided_by'] == signals.DECIDED_BY == 'algo'
+
+
+def test_a_refusal_is_noted_and_the_row_stays_armed():
+    """A block can clear before the stretch is over - a cooldown runs
+    out, a feed comes back - and then the entry is what counts. So a
+    refusal is NOTED, not settled."""
+    sig = signals.new_signal('A|B', signals.ALGO, 'SELL', 0.0, 2.6, PARAMS)
+    signals.note_block(sig, 'cooldown 4:40')
+    assert sig['state'] == signals.ARMED and sig['outcome'] is None
+    assert sig['block_reason'] == 'cooldown 4:40'
+    assert signals.why(sig) == 'held back: cooldown 4:40'
+
+
+def test_a_stretch_that_ends_held_back_settles_as_blocked():
+    sig = signals.new_signal('A|B', signals.ALGO, 'SELL', 0.0, 2.6, PARAMS)
+    signals.note_block(sig, 'edge filter: capture 0.34x the cost, under '
+                            'the 1x required', {'ratio': 0.34,
+                                                'required': 1.0})
+    signals.settle_unentered(sig, 60.0, 'never confirmed')
+    assert sig['outcome'] == signals.BLOCKED
+    assert sig['edge_ratio'] == 0.34 and sig['edge_required'] == 1.0
+    assert sig['net_pnl'] is None              # a refusal is never a loss
+    assert 'edge 0.34x of 1.00x' in signals.why(sig)
+
+
+def test_CONTROL_a_stretch_nothing_refused_settles_as_not_confirmed():
+    """...and says why in the Algo's terms, not as a refusal."""
+    sig = signals.new_signal('A|B', signals.ALGO, 'SELL', 0.0, 2.6, PARAMS)
+    signals.settle_unentered(sig, 60.0, 'came back through the window '
+                                        'before a fresh price confirmed it')
     assert sig['outcome'] == signals.NO_ENTRY
-    assert sig['entered_at'] is None
+    assert signals.why(sig).startswith('came back through the window')
+
+
+def test_marking_decides_nothing():
+    """A price past the stop does NOT close the row here. When a trade
+    comes off is the Algo's decision; this used to carry its own stop
+    check, and a copy of a rule is a rule that drifts."""
+    sig = entered('SELL', be=13.0, tp=12.5, sl=13.4)
+    signals.mark(sig, 13.9, 3.5, 120.0)        # far past the stop
+    assert sig['state'] == signals.OPEN and sig['outcome'] is None
+    assert sig['trough_net'] == -45.0          # but the worst is kept
 
 
 def test_the_best_and_worst_point_are_both_kept():
-    sig = armed_then_entered('SELL', tp=11.0, sl=15.0)
-    for spread, at in ((13.2, 60.0), (12.6, 120.0), (13.1, 180.0)):
-        signals.watch(sig, spread, 1.0, at, 86400)
-    assert sig['trough_net'] == -10.0      # 13.2 against a 13.0 break-even
-    assert sig['peak_net'] == 20.0         # 12.6, sold
+    sig = entered('SELL', be=13.0)
+    signals.mark(sig, 12.8, 1.0, 120.0)        # +10
+    signals.mark(sig, 13.2, 2.2, 180.0)        # -10
+    signals.mark(sig, 13.0, 1.6, 240.0)
+    assert sig['peak_net'] == 10.0 and sig['trough_net'] == -10.0
 
 
-def test_an_unpriced_signal_is_watched_without_inventing_a_number():
-    """No break-even or no k means no net — never a zero."""
-    sig = signals.new_signal('A|B', signals.ALGO, 'SELL', 0.0, 2.6, PARAMS)
-    signals.enter(sig, 0.0, 2.6, {'entry': 13.0, 'break_even': None,
-                                  'tp': None, 'sl': None}, None)
-    signals.watch(sig, 12.0, 0.1, 600.0, 86400)
-    assert signals.net_at(sig, 12.0) is None
-    assert sig['peak_net'] is None
-    assert sig['outcome'] is None          # nothing to reach
+def test_coming_back_to_the_mean_is_recorded_beside_the_outcome():
+    sig = entered('SELL', at=0.0)
+    signals.mark(sig, 12.9, 0.4, 600.0)
+    assert not sig['reverted']
+    signals.mark(sig, 12.8, -0.1, 1380.0)      # crossed: 22 min after entry
+    assert sig['reverted'] and sig['revert_min'] == 22.0
 
 
-# -- the counts above the table ----------------------------------------------
+def test_an_unpriced_trade_is_marked_without_inventing_a_number():
+    sig = entered('SELL', be=None, units=None)
+    signals.mark(sig, 12.8, 0.4, 120.0)
+    assert sig['peak_net'] is None and sig['trough_net'] is None
+
+
+def test_the_algos_exit_closes_the_row_in_its_own_words():
+    sig = entered('SELL', be=13.0)
+    signals.close(sig, 660.0, 'PROFIT_TARGET', 12.4, 0.1)
+    assert sig['outcome'] == signals.TP
+    assert sig['exit_reason'] == 'profit target (after costs)'
+    assert sig['exit_spread'] == 12.4
+    # break-even 13.0, sold, closed at 12.4, k of 50
+    assert sig['net_pnl'] == 30.0
+    assert sig['held_min'] == 10.0
+
+
+def test_only_the_target_and_the_stop_say_a_level_was_reached_live():
+    """The Algo's other exits closed the trade for another reason
+    entirely; calling them a take-profit would overstate the page."""
+    for reason, outcome in (('STOP_LOSS', signals.SL),
+                            ('Z_STOP', signals.EXIT),
+                            ('MEAN_REVERSION', signals.EXIT),
+                            ('TIME_STOP', signals.EXIT)):
+        sig = entered('SELL')
+        signals.close(sig, 660.0, reason, 12.9, 0.4)
+        assert sig['outcome'] == outcome, reason
+    assert sig['exit_reason'] == 'time stop'
+
 
 def test_the_tally_counts_armed_entered_and_how_they_ended():
     rows = []
     for outcome, net in ((signals.TP, 30.0), (signals.TP, 18.0),
-                         (signals.SL, -44.0), (signals.EXPIRED, -3.0)):
-        sig = armed_then_entered('SELL', tp=12.5, sl=13.4)
+                         (signals.SL, -44.0), (signals.EXIT, -3.0)):
+        sig = entered('SELL', tp=12.5, sl=13.4)
         sig['state'], sig['outcome'] = signals.CLOSED, outcome
         sig['net_pnl'] = net
         sig['reverted'] = outcome != signals.SL
         rows.append(sig)
     never = signals.new_signal('A|B', signals.ALGO, 'SELL', 0.0, 2.6,
                                PARAMS)
-    signals.abandon(never, 10.0)
+    signals.settle_unentered(never, 10.0, 'not confirmed')
     rows.append(never)
     body = signals.tally(rows)
     assert body['armed'] == 5 and body['entered'] == 4
     assert body['no_entry'] == 1 and body['settled'] == 4
-    # Won and lost are by MONEY: the expired trade closed at -$3.
-    assert body['tp'] == 2 and body['sl'] == 2 and body['expired'] == 1
+    # Won and lost are by MONEY: the trade the Algo's time stop closed
+    # at -$3 is a loss, however it got out.
+    assert body['tp'] == 2 and body['sl'] == 2
     assert body['win_rate'] == 50.0
     assert body['reverted'] == 3 and body['revert_rate'] == 75.0
 
 
 def test_nothing_settled_is_a_dash_and_never_a_zero_per_cent():
     """A win rate of 0% on no trades is a statement nobody measured."""
-    sig = armed_then_entered('SELL', tp=12.5, sl=13.4)
+    sig = entered('SELL', tp=12.5, sl=13.4)
     body = signals.tally([sig])
     assert body['entered'] == 1 and body['settled'] == 0
     assert body['win_rate'] is None and body['revert_rate'] is None
@@ -241,9 +191,12 @@ def test_only_the_target_and_the_stop_say_a_level_was_reached():
                                'A|B', PARAMS)['outcome'] == signals.TP
     assert signals.from_replay(replay_trade(reason='STOP_LOSS'),
                                'A|B', PARAMS)['outcome'] == signals.SL
-    for other in ('Z_STOP', 'MEAN_REVERSION', 'TIME_STOP', 'session cutoff'):
-        assert signals.from_replay(replay_trade(reason=other), 'A|B',
-                                   PARAMS)['outcome'] == signals.EXPIRED
+    for other in ('Z_STOP', 'MEAN_REVERSION', 'TIME_STOP'):
+        row = signals.from_replay(replay_trade(reason=other), 'A|B', PARAMS)
+        assert row['outcome'] == signals.EXIT
+        assert row['exit_reason'] == signals.EXIT_WORDS[other]
+        # Decided by the Algo's own code: the backtest runs AlgoSignal.
+        assert row['decided_by'] == signals.DECIDED_BY
 
 
 def test_a_replay_that_ran_out_of_candles_is_open_not_a_result():
@@ -277,19 +230,11 @@ def test_a_trade_whose_pnl_was_never_measured_is_in_neither_count():
 
 
 def test_the_tally_says_how_many_rows_were_measured_and_how_many_derived():
-    live = armed_then_entered('SELL', tp=12.5, sl=13.4)
+    live = entered('SELL', tp=12.5, sl=13.4)
     live['state'], live['outcome'], live['net_pnl'] = 'CLOSED', 'TP', 20.0
     rows = [live, signals.from_replay(replay_trade(), 'A|B', PARAMS)]
     body = signals.tally(rows)
     assert body['live'] == 1 and body['replayed'] == 1
-
-
-def test_a_live_close_records_what_it_would_have_made():
-    sig = armed_then_entered('SELL', tp=12.5, sl=13.4)
-    signals.watch(sig, 12.4, 0.1, 600.0, 86400)
-    assert sig['outcome'] == signals.TP
-    # break-even 13.0, sold, closed at 12.4, k of 50
-    assert sig['net_pnl'] == 30.0
 
 
 # -- the signal journal ------------------------------------------------------
@@ -377,7 +322,7 @@ def test_a_close_records_the_spread_it_came_off_at():
                   {'leg_a_side': 'BUY', 'leg_a_entry': 101.118,
                    'leg_b_side': 'SELL', 'leg_b_entry': 115.554}, 1.0)
     assert signal['leg_a_entry'] == 101.118 and signal['quantity'] == 1.0
-    signals.watch(signal, 71.6, 3.1, 12.0, 0)
+    signals.close(signal, 12.0, 'STOP_LOSS', 71.6, 3.1)
     assert signal['outcome'] == signals.SL
     assert signal['exit_spread'] == 71.6
 
@@ -424,24 +369,9 @@ def test_nothing_triggered_is_no_furthest_z_rather_than_zero():
     assert t['peak_z'] is None and t['trough_z'] is None
 
 
-def test_a_second_poke_at_the_band_is_not_a_second_trigger():
-    """The whole reason the arming machine exists, now visible as a
-    count: one stretch out and back is ONE trigger, however many times
-    z pushes at the band on the way."""
-    arming = signals.AlgoArming()
-    params = {'entry_z': 2.5, 'reentry_back': 0.5, 'max_entry_z': 0}
-    rows = []
-    for z in (2.6, 2.1, 2.7, 2.55, 3.0):
-        armed, _entered = arming.observe(z, params)
-        if armed:
-            rows.append(a_signal(armed_z=z, entry_z=2.5, side='SELL'))
-    assert signals.tally(rows)['triggered'] == 1
-    # CONTROL: back through the floor, then out again, IS a second one.
-    arming.observe(0.2, params)
-    armed, _entered = arming.observe(2.8, params)
-    assert armed == 'SELL'
-    rows.append(a_signal(armed_z=2.8, entry_z=2.5, side='SELL'))
-    assert signals.tally(rows)['triggered'] == 2
+# A second poke at the band is not a second trigger: that is the Algo's
+# own arming, and it is tested through the engine, on the Algo's own
+# code, in test_signal_journal.py.
 
 
 def test_a_page_of_refusals_has_no_running_total_rather_than_zero():
@@ -468,3 +398,21 @@ def test_the_total_is_real_from_the_first_priced_row_on():
     # Newest first on the screen.
     assert [r['cum_pnl'] for r in signals.journal(rows)] == \
         [-205.0, -205.0, None]
+
+
+def test_a_blocked_signal_is_never_counted_as_a_loss():
+    """147 refusals read as 147 losses and -$53,245 of P&L that never
+    happened. A refusal is not a trade."""
+    rows = []
+    for _ in range(3):
+        row = signals.new_signal('A|B', signals.ALGO, 'SELL', 0.0, 2.6, {})
+        signals.note_block(row, 'edge filter: capture 0.02x the cost',
+                           {'ratio': 0.02, 'required': 1.5})
+        signals.settle_unentered(row, 10.0)
+        rows.append(row)
+    body = signals.tally(rows)
+    assert body['armed'] == 3 and body['blocked'] == 3
+    assert body['entered'] == 0 and body['settled'] == 0
+    assert body['sl'] == 0 and body['tp'] == 0
+    assert body['net_pnl'] is None            # never measured, never zero
+    assert body['win_rate'] is None

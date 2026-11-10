@@ -4637,10 +4637,28 @@
 
   var SIGNAL_OUTCOME = {
     TP: ['took profit', 'up'], SL: ['stopped out', 'down'],
-    EXPIRED: ['neither', ''], NO_ENTRY: ['never came back', ''],
+    EXPIRED: ['neither', ''],
+    // Engaged, and let go before its confirmation was met. Nothing
+    // refused it; the spread simply did not stay.
+    NO_ENTRY: ['not confirmed', ''],
     // A refusal, NOT a result: the Algo looked and declined.
     BLOCKED: ['blocked', 'hint']
   };
+
+  //: How a signal row reads in the Outcome column. EXIT is closed by one
+  //: of the Algo's OTHER exits - its z-stop, its time stop, back to the
+  //: mean in profit - and says which, coloured by what it made. A row
+  //: still armed and being held back says so, rather than 'armed'.
+  function signalOutcome(r) {
+    if (r.outcome === 'EXIT') {
+      return [escapeHtml(r.exit_reason || 'closed by the Algo'),
+              anSign(r.net_pnl)];
+    }
+    if (SIGNAL_OUTCOME[r.outcome]) { return SIGNAL_OUTCOME[r.outcome]; }
+    if (r.state === 'OPEN') { return ['running', '']; }
+    return [r.block_reason ? 'held back' : 'armed',
+            r.block_reason ? 'hint' : ''];
+  }
 
   //: The three numbers the page exists to answer: how often these
   //: settings would have signalled, how many of those would have paid,
@@ -4834,8 +4852,7 @@
         'signal in this range</td></tr>';
     }
     rows.forEach(function (r) {
-      var out = SIGNAL_OUTCOME[r.outcome] ||
-        [r.state === 'OPEN' ? 'running' : 'armed', ''];
+      var out = signalOutcome(r);
       var onLevel = r.outcome === 'SL' ? 'sl'
         : (r.outcome === 'TP' ? 'tp' : null);
       html += '<tr><td>' + anClock(r.armed_at) + '</td>' +
@@ -4872,7 +4889,14 @@
         '</td></tr>';
     });
     html += '</tbody></table>' +
-      '<div class="note">Recorded off the LIVE book as it happened: the ' +
+      '<div class="note">Every row is decided by the <b>Algo\u2019s own ' +
+      'code</b> \u2014 its arming, its filters, its one trade at a time, ' +
+      'its cooldown, its day\u2019s limits and its exits \u2014 run ' +
+      'beside the desk with nothing to send. With the Algo LIVE it ' +
+      'decides as the desk does, at the price the Algo decided on (a ' +
+      'real fill can differ by its slippage); a manual position, which ' +
+      'holds the live Algo back, does not hold this back. Recorded off ' +
+      'the LIVE book as it happened: the ' +
       'z, the executable prices and the two legs are what the market ' +
       'was showing at that moment, on the settings in force then, with ' +
       'the Algo on or off. What did not happen is the ORDER — ' +
