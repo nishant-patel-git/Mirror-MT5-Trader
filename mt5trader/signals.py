@@ -47,11 +47,6 @@ reach an order. It takes numbers and returns numbers.
 
 import math
 
-#: How far back inside a stretch must come before the same side can
-#: arm again. 1.0 is the mean zone `zones.MEAN`, so "re-armed" and
-#: "back to the mean" mean one thing across this page.
-REARM_INSIDE = 1.0
-
 #: Stamped on every row. One rule now, but the column stays: rows
 #: written when there were three must still read back.
 ALGO = 'ALGO'
@@ -95,77 +90,28 @@ NO_ENTRY = 'NO_ENTRY'    # armed, then disarmed without ever entering
 #: edge filter refusing them - which is the filter doing its job - is
 #: invisible.
 BLOCKED = 'BLOCKED'
-OUTCOMES = (TP, SL, EXPIRED, NO_ENTRY, BLOCKED)
+#: Closed by one of the Algo's OTHER exits - its z-stop, its time stop,
+#: back to the mean in profit. `exit_reason` names which, in its words.
+EXIT = 'EXIT'
+OUTCOMES = (TP, SL, EXPIRED, NO_ENTRY, BLOCKED, EXIT)
+#: Outcomes that are a trade the Algo took and closed.
+SETTLED = (TP, SL, EXPIRED, EXIT)
 
+#: Stamped on every row the Algo's OWN code decided - live through
+#: `shadow.ShadowAlgo`, or replayed through `backtest.run`. Its column
+#: was added with a purge: rows written before it came from a copy of
+#: the Algo's rules that did not match the Algo.
+DECIDED_BY = 'algo'
 
-def reentry_window(entry_z, reentry_back, window_pct):
-    """(enters at, window floor) as |z| — the Algo's own arithmetic.
-
-    Kept here rather than imported so this module stays arithmetic on
-    numbers it is handed; `tests/test_signals.py` asserts it agrees
-    with `algo.reentry_window` so the two can never drift.
-    """
-    back_at = float(entry_z) - float(reentry_back)
-    return back_at, back_at * (1.0 - float(window_pct) / 100.0)
-
-
-class AlgoArming:
-    """The ladder's own arm-then-enter machine, mirroring
-    `algo.AlgoSignal._count`.
-
-    Armed when the stretch reaches `entry_z`; ENTERS on the way back
-    into `(floor, back_at]`; disarmed if it falls through the floor
-    first. With re-entry off it enters at the stretch itself.
-    """
-
-    def __init__(self, state=None):
-        state = dict(state or {})
-        self.armed = {'SELL': bool(state.get('SELL')),
-                      'BUY': bool(state.get('BUY'))}
-        self.armed_z = dict(state.get('armed_z') or {})
-
-    def to_dict(self):
-        return dict(self.armed, armed_z=dict(self.armed_z))
-
-    def observe(self, z, params):
-        """Returns (armed_side, entered_side); either may be None."""
-        if z is None or not math.isfinite(z):
-            return None, None
-        entry_z = float(params.get('entry_z') or 0.0)
-        if entry_z <= 0:
-            return None, None
-        if not params.get('reentry_on', True):
-            # No window: the stretch itself is the entry, and the same
-            # re-arm discipline keeps a second poke from counting twice.
-            side = None
-            if z >= entry_z and not self.armed['SELL']:
-                self.armed['SELL'], side = True, 'SELL'
-            elif z <= -entry_z and not self.armed['BUY']:
-                self.armed['BUY'], side = True, 'BUY'
-            if abs(z) < REARM_INSIDE:
-                self.armed = {'SELL': False, 'BUY': False}
-            return side, side
-        back_at, floor = reentry_window(entry_z,
-                                        params.get('reentry_back') or 0.0,
-                                        params.get('reentry_window_pct') or 0)
-        armed_side = entered = None
-        if z >= entry_z:
-            if not self.armed['SELL']:
-                self.armed['SELL'], armed_side = True, 'SELL'
-                self.armed_z['SELL'] = round(z, 3)
-        elif z <= floor:
-            self.armed['SELL'] = False
-        if z <= -entry_z:
-            if not self.armed['BUY']:
-                self.armed['BUY'], armed_side = True, 'BUY'
-                self.armed_z['BUY'] = round(z, 3)
-        elif z >= -floor:
-            self.armed['BUY'] = False
-        if self.armed['SELL'] and floor < z <= back_at:
-            entered = 'SELL'
-        elif self.armed['BUY'] and -back_at <= z < -floor:
-            entered = 'BUY'
-        return armed_side, entered
+#: The Algo's own exit words, so a row says what the Algo would say.
+#: Kept as data here (not imported) so this module stays arithmetic.
+EXIT_WORDS = {
+    'STOP_LOSS': 'stop loss',
+    'PROFIT_TARGET': 'profit target (after costs)',
+    'Z_STOP': 'z-stop',
+    'MEAN_REVERSION': 'back to the mean, in profit',
+    'TIME_STOP': 'time stop',
+}
 
 
 def new_signal(pair_key, basis, side, at, z, params, broker_day=None,
@@ -198,6 +144,7 @@ def new_signal(pair_key, basis, side, at, z, params, broker_day=None,
         #: is a win however it got out.
         'net_pnl': None,
         'source': LIVE, 'exit_reason': None,
+        'decided_by': DECIDED_BY,
         #: WHY the Algo refused it, in its own words, and the edge
         #: reading at that moment. An edge of 0.02x against the 1.5x
         #: required is the single most useful number on a page about
@@ -233,30 +180,38 @@ def enter(signal, at, z, prices, units, legs=None, quantity=None):
     return signal
 
 
-def block(signal, at, reason, edge=None):
-    """The stretch came back and the Algo REFUSED it.
+def note_block(signal, reason, edge=None):
+    """The Algo held this stretch back - in its own words, with the
+    edge reading it was judged at.
 
-    A refusal is not a trade and must never be counted as one - but it
-    is the most informative row on the page, because it says what the
-    settings are actually doing. The reason is the Algo's own words.
+    The row stays ARMED. A block that clears before the stretch is
+    over - a cooldown running out, a stale feed coming back - can still
+    be followed by the entry, and then it is the entry that counts.
+    Only a stretch that ENDS unentered settles as BLOCKED, with the last
+    reason it was held back for.
     """
-    edge = dict(edge or {})
-    signal['state'] = CLOSED
-    signal['outcome'] = BLOCKED
-    signal['closed_at'] = float(at)
     signal['block_reason'] = reason
-    signal['edge_ratio'] = edge.get('ratio')
-    signal['edge_required'] = edge.get('required')
+    if edge:
+        signal['edge_ratio'] = edge.get('ratio')
+        signal['edge_required'] = edge.get('required')
     return signal
 
 
-def abandon(signal, at):
-    """Armed, then disarmed without ever entering. Not a failure — a
-    trend rides the band and never comes back, and the Algo declining
-    to chase it is the filter working."""
+def settle_unentered(signal, at, why_not=None):
+    """The stretch is over and the Algo never entered it.
+
+    BLOCKED if it was held back - a refusal, never a loss - with the
+    reason already on the row. NO_ENTRY if nothing refused it and it
+    simply never confirmed: back through the window's floor before the
+    Algo's confirmation was met. `why_not` says which, in words.
+    """
     signal['state'] = CLOSED
-    signal['outcome'] = NO_ENTRY
     signal['closed_at'] = float(at)
+    if signal.get('block_reason'):
+        signal['outcome'] = BLOCKED
+    else:
+        signal['outcome'] = NO_ENTRY
+        signal['exit_reason'] = why_not
     return signal
 
 
@@ -272,46 +227,18 @@ def net_at(signal, closing_spread):
     return move * float(signal['units'])
 
 
-def _hit_target(signal, spread):
-    """Reached the take-profit — the direction the trade PROFITS in.
+def mark(signal, closing_spread, z, at):
+    """Mark an OPEN signal forward: its best and its worst, and whether
+    the spread has come back to its mean.
 
-    A long is in profit as the spread rises, a short as it falls.
-    """
-    level = signal.get('tp')
-    if spread is None or level is None:
-        return False
-    return (spread >= level) if signal['side'] == 'BUY' else (spread <= level)
-
-
-def _hit_stop(signal, spread):
-    """Reached the stop — the OTHER direction, and the one that is easy
-    to get backwards.
-
-    A long's stop sits BELOW its break-even and a short's sits ABOVE,
-    so this is not the target's test with another level passed in. It
-    was written that way first, and every short closed as a stop on
-    its first poll.
-    """
-    level = signal.get('sl')
-    if spread is None or level is None:
-        return False
-    return (spread <= level) if signal['side'] == 'BUY' else (spread >= level)
-
-
-def watch(signal, closing_spread, z, at, window_sec):
-    """Mark one open signal against the price it would close at.
-
-    The ORDER matters: the stop is checked before the target. Inside
-    one poll both can look reached, and booking the happier of the two
-    is how a simulation flatters itself — a desk reading this would
-    size up on a number that never happened.
-
-    Returns True when anything changed.
+    It decides nothing. When a trade comes off is the Algo's decision
+    (`algo.AlgoSignal._judge_exit`, run by the shadow) - this used to
+    carry its own stop and target checks, and a copy of a rule is a
+    rule that drifts. Returns True when anything changed.
     """
     if signal.get('state') != OPEN:
         return False
     changed = False
-    minutes = round(max(0.0, at - signal['entered_at']) / 60.0, 1)
     net = net_at(signal, closing_spread)
     if net is not None:
         if signal['peak_net'] is None or net > signal['peak_net']:
@@ -320,36 +247,37 @@ def watch(signal, closing_spread, z, at, window_sec):
         if signal['trough_net'] is None or net < signal['trough_net']:
             signal['trough_net'] = round(net, 2)
             changed = True
-    if z is not None and math.isfinite(z) and not signal['reverted']:
+    if z is not None and math.isfinite(z) and not signal.get('reverted') \
+            and signal.get('entered_at') is not None:
         # "It came back": the stretch crossed the mean. A separate
         # question from whether it paid, so it is recorded beside the
         # outcome rather than as one.
         if (signal['side'] == 'SELL' and z <= 0) or \
                 (signal['side'] == 'BUY' and z >= 0):
             signal['reverted'] = True
-            signal['revert_min'] = minutes
+            signal['revert_min'] = round(
+                max(0.0, at - signal['entered_at']) / 60.0, 1)
             changed = True
-    if _hit_stop(signal, closing_spread):
-        return _close(signal, SL, at, z, minutes, net, closing_spread)
-    if _hit_target(signal, closing_spread):
-        return _close(signal, TP, at, z, minutes, net, closing_spread)
-    if window_sec and at - signal['entered_at'] >= float(window_sec):
-        return _close(signal, EXPIRED, at, z, minutes, net,
-                      closing_spread) or True
     return changed
 
 
-def _close(signal, outcome, at, z, minutes, net=None, closing_spread=None):
+def close(signal, at, reason, closing_spread, z):
+    """The Algo's own exit, as it decided it: which rule, at what
+    spread, and what that is worth. TP and SL say a level was REACHED;
+    any other of the Algo's exits settles as EXIT, named."""
     signal['state'] = CLOSED
-    signal['outcome'] = outcome
+    signal['outcome'] = EXIT_OUTCOME.get(reason, EXIT)
+    signal['exit_reason'] = EXIT_WORDS.get(reason, reason)
     signal['closed_at'] = float(at)
     signal['closed_z'] = None if z is None else round(float(z), 3)
-    signal['held_min'] = minutes
     if closing_spread is not None:
         signal['exit_spread'] = float(closing_spread)
-    if net is not None:
-        signal['net_pnl'] = round(float(net), 2)
-    return True
+    if signal.get('entered_at') is not None:
+        signal['held_min'] = round(
+            max(0.0, at - signal['entered_at']) / 60.0, 1)
+    net = net_at(signal, closing_spread)
+    signal['net_pnl'] = None if net is None else round(float(net), 2)
+    return signal
 
 
 def from_replay(trade, pair_key, params, broker_day=None, units=None):
@@ -372,7 +300,8 @@ def from_replay(trade, pair_key, params, broker_day=None, units=None):
                      broker_day=broker_day,
                      threshold=params.get('entry_z'))
     row['source'] = REPLAY
-    row['exit_reason'] = reason
+    row['decided_by'] = DECIDED_BY
+    row['exit_reason'] = EXIT_WORDS.get(reason, reason)
     row['entered_at'] = opened
     row['entered_z'] = None if z_in is None else round(float(z_in), 3)
     row['entry'] = trade.get('entry')
@@ -386,7 +315,9 @@ def from_replay(trade, pair_key, params, broker_day=None, units=None):
         row['state'] = OPEN
         return row
     row['state'] = CLOSED
-    row['outcome'] = EXIT_OUTCOME.get(reason, EXPIRED)
+    # The Algo's own exit: TP and SL say a level was reached, any other
+    # of its rules is EXIT, named.
+    row['outcome'] = EXIT_OUTCOME.get(reason, EXIT)
     row['closed_at'] = closed
     row['exit_spread'] = trade.get('exit')
     row['held_min'] = round(max(0.0, closed - opened) / 60.0, 1)
@@ -405,7 +336,7 @@ def tally(rows):
     """
     mine = list(rows or ())
     entered = [r for r in mine if r.get('entered_at') is not None]
-    settled = [r for r in entered if r.get('outcome') in (TP, SL, EXPIRED)]
+    settled = [r for r in entered if r.get('outcome') in SETTLED]
     blocked = [r for r in mine if r.get('outcome') == BLOCKED]
     # WON and LOST are measured in money, not by which level was
     # touched. An exit on the mean reversion in profit is a win however
@@ -496,6 +427,10 @@ def why(row):
             parts.append(said)
         return ' \u00b7 '.join(parts) or None
     if outcome == NO_ENTRY:
+        # The Algo's own reason it never confirmed, written when the
+        # stretch ended. A row from before that was kept has none.
+        if row.get('exit_reason'):
+            return str(row['exit_reason'])
         said = 'never back inside the window'
         if row.get('entry_z') is not None:
             said += f' (enters {float(row["entry_z"]):.2f}\u03c3'
@@ -504,6 +439,10 @@ def why(row):
             said += ')'
         return said
     if row.get('entered_at') is None:
+        # Still armed, and being held back right now: say by what, so a
+        # stretch the edge filter is refusing does not read as waiting.
+        if row.get('state') == ARMED and row.get('block_reason'):
+            return 'held back: ' + str(row['block_reason'])
         return None
     if row.get('reverted'):
         minutes = row.get('revert_min')
@@ -526,12 +465,20 @@ def journal(rows):
                      key=lambda r: (r.get('closed_at')
                                     or r.get('entered_at')
                                     or r.get('armed_at') or 0.0))
-    running = 0.0
+    # None, not 0.0, until something has actually been priced.
+    # UNMEASURED IS NOT ZERO: a page of refusals and stretches that
+    # never entered has no running total, and printing $0.00 down the
+    # column reads as 'it broke even', which is a measurement nobody
+    # made. Once one row carries money the total is real, and a later
+    # unpriced row leaves it where it was.
+    running = None
     out = []
     for row in ordered:
         pnl = row.get('net_pnl')
         if pnl is not None:
-            running += float(pnl)
-        out.append(dict(row, why=why(row), cum_pnl=round(running, 2)))
+            running = float(pnl) + (running or 0.0)
+        out.append(dict(row, why=why(row),
+                        cum_pnl=None if running is None
+                        else round(running, 2)))
     out.reverse()
     return out

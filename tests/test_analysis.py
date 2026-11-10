@@ -504,3 +504,19 @@ def test_control_a_genuine_second_stretch_is_still_counted():
     for at, z in enumerate((0.3, 2.5), start=10):
         again.tally(z, at)
     assert again.counts['touch_2_up'] == 3
+
+
+def test_the_trade_journal_has_no_running_total_before_anything_is_priced():
+    """The same rule as the signal journal: a first trade whose P&L
+    could not be read printed $0.00, which reads as 'it broke even'."""
+    rows = [closed(None, 1, peak=1.0, trough=-1.0),
+            closed(None, 2, peak=1.0, trough=-1.0)]
+    assert [r['cum_pnl'] for r in analysis.journal(rows)] == [None, None]
+
+
+def test_and_a_real_total_from_the_first_priced_trade_on():
+    rows = [closed(None, 1, peak=1.0, trough=-1.0),
+            closed(-205.0, 2, peak=1.0, trough=-1.0),
+            closed(None, 3, peak=1.0, trough=-1.0)]
+    assert [r['cum_pnl'] for r in analysis.journal(rows)] == \
+        [-205.0, -205.0, None]

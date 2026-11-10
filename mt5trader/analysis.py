@@ -514,12 +514,16 @@ def journal(positions, entry_z=None, exit_z=None):
     closed = sorted((r for r in positions or ()
                      if r.get('closed_at') is not None),
                     key=lambda r: r['closed_at'])
-    running = 0.0
+    # None, not 0.0, until something has actually been priced - the
+    # same rule the rest of this file follows. A first trade whose P&L
+    # could not be read used to print a running total of $0.00, which
+    # reads as 'it broke even' rather than as 'nobody measured it'.
+    running = None
     out = []
     for row in closed:
         pnl = _pnl(row)
         if pnl is not None:
-            running += pnl
+            running = pnl + (running or 0.0)
         legs = {}
         for leg in ('a', 'b'):
             fill = row.get('leg_' + leg) or {}
@@ -557,7 +561,7 @@ def journal(positions, entry_z=None, exit_z=None):
             'gross_pnl': None if gross is None else round(gross, 2),
             'fees': (None if gross is None or pnl is None
                      else round(gross - pnl, 2)),
-            'cum_pnl': round(running, 2)})
+            'cum_pnl': None if running is None else round(running, 2)})
     out.reverse()
     return out
 

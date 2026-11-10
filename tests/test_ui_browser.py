@@ -5759,7 +5759,9 @@ def test_a_derive_that_found_nothing_says_what_held_it_back(page):
     assert 'derived 0 signal(s) over 30 days' in note
     # The counts, biggest first, and the total so the size of it reads.
     assert 'held back 412 time(s)' in note
-    assert 'edge filter 400' in note and 'trend 12' in note
+    # The count is in brackets, not run on after the reason: a reason
+    # that ends in a word made "under the nx required 1" of it.
+    assert 'edge filter (400)' in note and 'trend (12)' in note
     assert note.index('edge filter') < note.index('trend')
     page.evaluate('() => { window.fetch = window.__realFetch; }')
 
@@ -5972,4 +5974,55 @@ def test_two_ladders_that_disagree_name_no_band_on_the_tile(page):
     page.wait_for_selector('.monitor .analysis .an-tiles', timeout=WAIT)
     text = page.text_content('.monitor .analysis')
     assert 'z triggered' in text and 'σ' not in text.split('Blocked')[0]
+    assert page.errors == []
+
+
+def test_a_derive_that_found_nothing_reads_as_a_sentence(page):
+    """The engine groups held-back reasons with their NUMBERS taken
+    out, writing '#' where they were. On a live desk that reached the
+    screen as 'edge filter: capture #x the cost, under the #x required
+    1' — which reads as a fault, and runs the count straight on
+    after the word 'required'."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .an-derive', timeout=WAIT)
+    page.evaluate("""() => {
+        // An earlier test in this module leaves its own note behind,
+        // and it also says 'held back'.
+        window.MT5Trader.state.deriveNote = null;
+        window.MT5Trader.state.deriving = false;
+        window.MT5Trader.render();
+        window.__realFetch = window.fetch;
+        const json = (b) => Promise.resolve(new Response(JSON.stringify(b),
+            {status: 200, headers: {'Content-Type': 'application/json'}}));
+        window.fetch = function (url, options) {
+            const at = String(url);
+            if (at.indexOf('/api/command') >= 0) {
+                return json({ok: true, id: 'cmd1'});
+            }
+            if (at.indexOf('/api/result/') >= 0) {
+                return json({ok: true, data: {
+                    ok: true, days: 30, written: 0,
+                    pairs: {'A|B': {ok: true, derived: 0, replaced: 0}},
+                    held: {'edge filter: capture #x the cost, under the #x required': 1}}});
+            }
+            return window.__realFetch(url, options);
+        };
+    }""")
+    page.click('.monitor .an-derive')
+    for _ in range(40):
+        note = page.text_content('.monitor .an-derive-out')
+        if 'held back' in note:
+            break
+        page.wait_for_timeout(100)
+    note = page.text_content('.monitor .an-derive-out')
+    assert 'capture nx the cost, under the nx required (1)' in note
+    assert '#' not in note
+    assert 'required 1' not in note
+    page.evaluate('() => { window.fetch = window.__realFetch; }')
     assert page.errors == []
