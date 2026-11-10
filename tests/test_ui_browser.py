@@ -952,6 +952,59 @@ def test_the_exchanges_page_carries_connect_test_and_diagnose(page):
     assert 'Exchanges' in page.text_content('.window.settings .accounts h3')
 
 
+def test_an_accounts_metatrader_is_PICKED_and_fixed_on_the_screen(
+        page, tmp_path, monkeypatch):
+    """A desk would not start because the MetaTrader path had been pasted
+    with Windows' quotes, and the person at it does not open config
+    files. The row says what is wrong; the installed terminals are a list
+    to pick from; the pick survives the page's own repaint; Save fixes
+    it."""
+    from mt5trader import config as cfg
+    root = tmp_path / 'Program Files'
+    (root / 'CFI2 MetaTrader 5 Terminal').mkdir(parents=True)
+    exe = root / 'CFI2 MetaTrader 5 Terminal' / 'terminal64.exe'
+    exe.write_text('', encoding='utf-8')
+    monkeypatch.setattr(cfg, 'terminal_roots', lambda: [str(root)])
+
+    page.click('#open-settings')
+    page.wait_for_selector('.window.settings')
+    page.evaluate("""async (gone) => {
+        await fetch('/api/accounts/CFI Spot', {method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({terminal_path: gone})});
+        await window.MT5Settings.refresh();
+    }""", '"' + str(tmp_path / 'gone' / 'terminal64.exe') + '"')
+    row = page.locator('tr[data-account="CFI Spot"]')
+    problem = page.locator('tr[data-account="CFI Spot"] + tr.problem')
+    page.wait_for_selector('tr[data-account="CFI Spot"] .f-terminal-pick',
+                           timeout=WAIT)
+    # Said on the line under the row, in words, with what to do.
+    assert 'no MetaTrader 5 at' in problem.text_content()
+    assert 'Pick' in problem.text_content()
+
+    row.locator('.f-terminal-pick').select_option(str(exe))
+    assert row.locator('.f-terminal').input_value() == str(exe)
+    # The page repaints itself every few seconds; an unsaved pick must
+    # not be wiped by it.
+    page.evaluate('() => window.MT5Settings.render()')
+    row = page.locator('tr[data-account="CFI Spot"]')
+    assert row.locator('.f-terminal').input_value() == str(exe)
+
+    page.wait_for_selector('.toast.ok:has-text("press Save")', timeout=WAIT)
+    row.locator('.save-account').click()
+    page.wait_for_selector('.toast.ok:has-text("restarts by itself")',
+                           timeout=WAIT)
+    stored = json.load(open(page.paths['config'], encoding='utf-8'))
+    assert stored['accounts']['CFI Spot']['terminal_path'] == str(exe)
+    page.evaluate('() => window.MT5Settings.refresh()')
+    page.wait_for_timeout(200)
+    row = page.locator('tr[data-account="CFI Spot"]')
+    assert page.locator(
+        'tr[data-account="CFI Spot"] + tr.problem').count() == 0
+    assert 'this account' in row.locator(
+        '.f-terminal-pick option:checked').text_content()
+
+
 def test_the_exit_costs_belong_to_ONE_LADDER_and_the_override_CLEARS(page):
     """Commission, the allowance, the nights and the target are not one
     trade repeated: a gold basis and an oil differential are charged
