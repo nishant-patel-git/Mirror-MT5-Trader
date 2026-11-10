@@ -5429,9 +5429,14 @@
       // its last file, against no file at all. Both were called ENGINE
       // DOWN, and the first one is the one where every price on the
       // screen is a photograph.
+      // WAITING is a third case, and the only one a trader can fix
+      // themselves: the launcher is holding the engine on something in
+      // the setup - a MetaTrader 5 that is not where an account says -
+      // and the note names it and says to open Exchanges.
       return {state: 'bad',
-              text: snapshot.engine === 'stalled' ? 'ENGINE STALLED'
-                : 'ENGINE DOWN',
+              text: (snapshot.engine_held || []).length ? 'ENGINE WAITING'
+                : (snapshot.engine === 'stalled' ? 'ENGINE STALLED'
+                  : 'ENGINE DOWN'),
               detail: snapshot.engine_note || 'the coordinator is not running'};
     }
     var health = (snapshot.account_health || {}).accounts || {};

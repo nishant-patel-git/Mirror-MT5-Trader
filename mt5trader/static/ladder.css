@@ -1519,6 +1519,9 @@ table.grid-form input,
 table.grid-form select { font: 11px var(--font); width: 100%; padding: 1px 2px; }
 table.grid-form tr.new td { background: #f4f9ff; }
 table.grid-form td.actions { white-space: nowrap; width: 1%; }
+/* The installed MetaTrader 5s, under the path they fill: pick, then
+ * Save. Under it rather than beside it, so the path stays readable. */
+table.grid-form .f-terminal-pick { display: block; margin-top: 2px; }
 table.grid-form td.actions .btn { margin-right: 3px; }
 
 /* Is the system connected — the first thing on the page, and the one
