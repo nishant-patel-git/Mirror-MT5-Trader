@@ -12,6 +12,7 @@ so Chrome refused to submit and fired no event at all.
 """
 
 import json
+import math
 import re
 import os
 import threading
@@ -5949,6 +5950,52 @@ def test_the_signal_journal_reads_like_the_trade_journal(page):
     # Recorded, not simulated: the word that was wrong is gone.
     assert 'hypothetical' not in text.lower()
     assert 'recorded off the live book' in text.lower()
+    assert page.errors == []
+
+
+def test_the_chart_opens_and_closes_from_the_ladder(page):
+    """Arrow-statarb's two charts for one ladder - the Algo's z between
+    its entry lines, and the spread - opened by the trader and closed by
+    the trader, from the ladder's own title bar."""
+    from mt5trader import chart
+    key = 'XAUUSD_|GC1226'
+    tape = chart.SpreadTape()
+    start = time.time() - 600
+    for i in range(300):
+        tape.observe(key, start + i * 2,
+                     {'mid_spread': 59.1 + 0.1 * math.sin(i / 20.0)},
+                     {'z_mid': 3.0 * math.sin(i / 20.0), 'mean': 59.1,
+                      'sigma': 0.1, 'ready': True, 'count': 20,
+                      'needed': 20},
+                     {'entry_z': 2.5, 'stop_z': 4.0, 'stop_z_on': True})
+    tape.write(chart.chart_path(page.paths['status']), time.time(),
+               force=True)
+    page.errors.clear()
+    button = page.locator('.ladder[data-pair="%s"] .chart-btn' % key)
+    assert page.locator('.window.chartwin').count() == 0
+    button.click()
+    page.wait_for_selector('.window.chartwin .cw-z svg', timeout=WAIT)
+    win = page.locator('.window.chartwin')
+    assert 'Gold basis' in win.locator('.cw-pair').text_content()
+    # The z line, both entry lines and both stop lines.
+    assert win.locator('.cw-z .cw-line').count() == 1
+    assert win.locator('.cw-z .cw-entry-up').count() == 1
+    assert win.locator('.cw-z .cw-entry-down').count() == 1
+    assert win.locator('.cw-z .cw-stop').count() == 2
+    assert win.locator('.cw-spread .cw-line').count() == 1
+    assert 'Min:' in win.text_content() and 'Max:' in win.text_content()
+    assert 'on' in button.get_attribute('class')
+    # Closed by the trader: the same button...
+    button.click()
+    page.wait_for_timeout(200)
+    assert page.locator('.window.chartwin').count() == 0
+    assert 'on' not in button.get_attribute('class').split()
+    # ...or the window's own close.
+    button.click()
+    page.wait_for_selector('.window.chartwin', timeout=WAIT)
+    page.click('.window.chartwin .close')
+    page.wait_for_timeout(200)
+    assert page.locator('.window.chartwin').count() == 0
     assert page.errors == []
 
 

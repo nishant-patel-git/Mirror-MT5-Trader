@@ -47,6 +47,9 @@
     // a tick-by-tick record, and a day of them is the usual read.
     zoneDays: 1, zoneDate: '', deriving: false, deriveNote: null,
     showUnconfirmed: false,
+    //: The pair charts: the last series read, when, and how much of
+    //: the session each one draws.
+    charts: {}, chartFetch: {}, chartMinutes: {},
     analysisBt: null, analysisBtDays: 5,
     // What the Reconciler tab's adopt form has selected. IN STATE, not
     // in the DOM: that pane is re-rendered from innerHTML on every
@@ -412,6 +415,8 @@
     return node.classList.contains('market-grid') ? panelId('grid')
       : node.classList.contains('monitor') ? panelId('monitor')
         : node.classList.contains('settings') ? panelId('settings')
+          : node.classList.contains('chartwin')
+            ? panelId('chart', node.dataset.pair)
           : node.classList.contains('fairwin')
             ? panelId('fair', node.dataset.pair)
             : node.classList.contains('algowin')
@@ -647,6 +652,26 @@
     writeLayout();
   }
 
+  function chartFloatByDefault(node, id) {
+    /* A chart is wide and short: two plots one above the other, beside
+     * the ladders where there is room, stepped so a second one does
+     * not land on the first. Dragged and resized like anything else. */
+    var desktop = desktopBox();
+    if (!desktop.width) { return; }
+    var wanted = size(node, Math.min(660, desktop.width - 16),
+                      Math.min(520, desktop.height - 16));
+    var open = document.querySelectorAll('.window.chartwin').length;
+    var left = Math.max(el('desktop').scrollLeft + desktop.width -
+                        wanted.w - 12 - (open - 1) * 24, 8);
+    var top = Math.min(30 + (open - 1) * 24,
+                       Math.max(desktop.height - wanted.h - 8, 0));
+    var at = place(node, left, top);
+    node.style.zIndex = nextZ();
+    layout[id] = {left: at.left, top: at.top, z: topZ,
+                  w: wanted.w, h: wanted.h, auto: false};
+    writeLayout();
+  }
+
   function applyLayout(node) {
     /* Put a window back where it was left. Called for every window on
      * every render, because panels are created lazily — the monitor
@@ -665,6 +690,9 @@
       else if (node.classList.contains('fairwin') ||
                node.classList.contains('algowin')) {
         fairFloatByDefault(node, id);
+      }
+      else if (node.classList.contains('chartwin')) {
+        chartFloatByDefault(node, id);
       }
       return;
     }
@@ -906,9 +934,222 @@
     renderFair(node, row, renderAlgo(node, row));
   }
 
+  // -- the pair chart -------------------------------------------------
+  //
+  // Arrow-statarb's two charts, for one ladder: the Algo's z with its
+  // entry and stop lines, and the spread. Drawn here in SVG - the page
+  // loads nothing from outside - from the series the engine writes
+  // beside the status file. The z is the ALGO'S OWN, read off the
+  // candles it trades on, so the line crosses the entry exactly where
+  // the Algo armed.
+
+  function chartOpen(key) {
+    return state.open.indexOf(panelId('chart', key)) >= 0;
+  }
+
+  function toggleChart(key) {
+    var id = panelId('chart', key);
+    if (chartOpen(key)) { closePanel(id); } else { openPanel(id); }
+  }
+
+  function chartNode(key) {
+    var existing = document.querySelector(
+      '.chartwin[data-pair="' + cssEscape(key) + '"]');
+    if (existing) { return existing; }
+    var node = el('chart-template').content.firstElementChild.cloneNode(true);
+    node.dataset.pair = key;
+    node.querySelector('.close').addEventListener('click', function () {
+      closePanel(panelId('chart', key));
+    });
+    var minutes = node.querySelector('.cw-minutes');
+    minutes.value = String(state.chartMinutes[key] || 60);
+    minutes.addEventListener('change', function (e) {
+      state.chartMinutes[key] = parseInt(e.target.value, 10) || 60;
+      delete state.charts[key];
+      fetchChart(key, true);
+    });
+    el('desktop').appendChild(node);
+    return node;
+  }
+
+  function fetchChart(key, now) {
+    var held = state.chartFetch[key] || {};
+    var at = Date.now();
+    if (held.busy || (!now && held.at && at - held.at < 2000)) { return; }
+    state.chartFetch[key] = {busy: true, at: at};
+    var minutes = state.chartMinutes[key] || 60;
+    fetch('/api/chart/' + encodeURIComponent(key) + '?minutes=' + minutes)
+      .then(function (r) { return r.json(); })
+      .then(function (body) {
+        state.charts[key] = body;
+        state.chartFetch[key] = {busy: false, at: Date.now()};
+        var node = document.querySelector(
+          '.chartwin[data-pair="' + cssEscape(key) + '"]');
+        if (node) { drawChart(node, key); }
+      })
+      .catch(function () {
+        state.chartFetch[key] = {busy: false, at: Date.now()};
+      });
+  }
+
+  function renderChartWindow(key, row) {
+    var node = chartNode(key);
+    var title = node.querySelector('.cw-pair');
+    title.textContent = (row.name || key) + ' · Chart';
+    title.title = key + ' — leg A ' + (row.symbol_a || '?') +
+      ', leg B ' + (row.symbol_b || '?');
+    fetchChart(key, false);
+    drawChart(node, key);
+  }
+
+  function chartClock(t) {
+    var d = new Date(t * 1000);
+    function two(n) { return (n < 10 ? '0' : '') + n; }
+    return two(d.getHours()) + ':' + two(d.getMinutes());
+  }
+
+  //: The colours of Arrow-statarb's charts, which the desk asked for.
+  var CHART = {z: '#0d6efd', zFill: 'rgba(13,110,253,.10)',
+               up: '#dc3545', down: '#198754', stop: '#6c757d',
+               spread: '#6f42c1', spreadFill: 'rgba(111,66,193,.10)',
+               grid: 'rgba(128,128,128,.25)', text: '#6c757d'};
+
+  function svgPlot(box, points, value, lines, colours, digits) {
+    /* One plot: `points` along x by time, `value(p)` up the y axis,
+     * filled under the line, with horizontal `lines` [{y, colour,
+     * dash, label}]. Drawn at the box's own pixel size, so the labels
+     * are crisp and never stretched. */
+    var w = Math.max(box.clientWidth, 200);
+    var h = Math.max(box.clientHeight, 120);
+    var left = 52, right = 8, top = 8, bottom = 18;
+    var shown = points.filter(function (p) {
+      return value(p) !== null && value(p) !== undefined;
+    });
+    var ys = shown.map(value);
+    lines.forEach(function (line) { ys.push(line.y); });
+    var lo = Math.min.apply(null, ys), hi = Math.max.apply(null, ys);
+    if (!isFinite(lo) || !isFinite(hi)) { lo = -1; hi = 1; }
+    if (hi - lo < 1e-9) { hi += 1; lo -= 1; }
+    var pad = (hi - lo) * 0.08;
+    lo -= pad; hi += pad;
+    var t0 = shown.length ? shown[0].t : 0;
+    var t1 = shown.length ? shown[shown.length - 1].t : 1;
+    if (t1 - t0 < 1e-9) { t1 = t0 + 1; }
+    function X(t) { return left + (t - t0) / (t1 - t0) * (w - left - right); }
+    function Y(v) { return top + (hi - v) / (hi - lo) * (h - top - bottom); }
+    var svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' +
+      w + ' ' + h + '" xmlns="http://www.w3.org/2000/svg">';
+    // The y axis: five values, so the eye has a scale.
+    for (var i = 0; i <= 4; i++) {
+      var v = lo + (hi - lo) * i / 4;
+      svg += '<line x1="' + left + '" x2="' + (w - right) + '" y1="' +
+        Y(v).toFixed(1) + '" y2="' + Y(v).toFixed(1) + '" stroke="' +
+        CHART.grid + '" stroke-width="1"/>' +
+        '<text x="' + (left - 4) + '" y="' + (Y(v) + 3).toFixed(1) +
+        '" text-anchor="end" font-size="10" fill="' + CHART.text + '">' +
+        v.toFixed(digits) + '</text>';
+    }
+    lines.forEach(function (line) {
+      svg += '<line class="' + (line.cls || '') + '" x1="' + left +
+        '" x2="' + (w - right) + '" y1="' + Y(line.y).toFixed(1) +
+        '" y2="' + Y(line.y).toFixed(1) + '" stroke="' + line.colour +
+        '" stroke-width="1" stroke-dasharray="' + line.dash + '"/>';
+    });
+    if (shown.length) {
+      var path = shown.map(function (p, k) {
+        return (k ? 'L' : 'M') + X(p.t).toFixed(1) + ' ' +
+          Y(value(p)).toFixed(1);
+      }).join(' ');
+      var base = Y(Math.max(lo, Math.min(hi, colours.base)));
+      svg += '<path d="' + path + ' L' + X(t1).toFixed(1) + ' ' +
+        base.toFixed(1) + ' L' + X(t0).toFixed(1) + ' ' + base.toFixed(1) +
+        ' Z" fill="' + colours.fill + '" stroke="none"/>' +
+        '<path class="cw-line" d="' + path + '" fill="none" stroke="' +
+        colours.line + '" stroke-width="2" stroke-linejoin="round"/>';
+      svg += '<text x="' + left + '" y="' + (h - 4) + '" font-size="10" ' +
+        'fill="' + CHART.text + '">' + chartClock(t0) + '</text>' +
+        '<text x="' + (w - right) + '" y="' + (h - 4) + '" font-size="10" ' +
+        'text-anchor="end" fill="' + CHART.text + '">' + chartClock(t1) +
+        '</text>';
+    }
+    return svg + '</svg>';
+  }
+
+  function drawChart(node, key) {
+    var body = state.charts[key];
+    var zBox = node.querySelector('.cw-z');
+    var sBox = node.querySelector('.cw-spread');
+    // Not redrawn three times a second for nothing: only when the data
+    // or the room it is drawn in has changed.
+    var stamp = body ? [body.at, body.minutes, (body.points || []).length,
+                        zBox.clientWidth, zBox.clientHeight,
+                        sBox.clientWidth, sBox.clientHeight].join('|') : '';
+    if (node.dataset.drawn === stamp && stamp) { return; }
+    node.dataset.drawn = stamp;
+    var points = (body && body.points) || [];
+    var note = node.querySelector('.cw-note');
+    var nowBox = node.querySelector('.cw-now');
+    if (!points.length) {
+      var waiting = '<div class="cw-empty">Waiting for price data…</div>';
+      zBox.innerHTML = waiting;
+      sBox.innerHTML = waiting;
+      nowBox.textContent = '';
+      note.textContent = (body && body.note) || 'reading the chart…';
+      node.querySelector('.cw-min').textContent = 'Min: —';
+      node.querySelector('.cw-max').textContent = 'Max: —';
+      return;
+    }
+    var entry = body.entry_z, stop = body.stop_z;
+    var zLines = [{y: 0, colour: CHART.grid, dash: '0'}];
+    if (entry !== null && entry !== undefined) {
+      zLines.push({y: entry, colour: CHART.up, dash: '5 5',
+                   cls: 'cw-entry-up'});
+      zLines.push({y: -entry, colour: CHART.down, dash: '5 5',
+                   cls: 'cw-entry-down'});
+    }
+    if (stop !== null && stop !== undefined) {
+      zLines.push({y: stop, colour: CHART.stop, dash: '2 3',
+                   cls: 'cw-stop'});
+      zLines.push({y: -stop, colour: CHART.stop, dash: '2 3',
+                   cls: 'cw-stop'});
+    }
+    node.querySelector('.cw-key-stop').hidden =
+      stop === null || stop === undefined;
+    zBox.innerHTML = svgPlot(zBox, points, function (p) { return p.z; },
+                             zLines, {line: CHART.z, fill: CHART.zFill,
+                                      base: 0}, 2);
+    var spreads = points.map(function (p) { return p.s; });
+    sBox.innerHTML = svgPlot(sBox, points, function (p) { return p.s; },
+                             [], {line: CHART.spread,
+                                  fill: CHART.spreadFill,
+                                  base: Math.min.apply(null, spreads)}, 4);
+    node.querySelector('.cw-min').textContent = 'Min: ' +
+      fmt(body.spread_min, 4);
+    node.querySelector('.cw-max').textContent = 'Max: ' +
+      fmt(body.spread_max, 4);
+    var last = points[points.length - 1];
+    nowBox.textContent = 'now: z ' + (last.z === null ? '—'
+      : (last.z > 0 ? '+' : '') + last.z.toFixed(2)) +
+      ' · spread ' + fmt(last.s, 4);
+    note.textContent = body.ready
+      ? 'z is the Algo’s own, measured on its candles as it read ' +
+        'it at the time; entry ±' + fmt(entry, 2) +
+        (stop !== null && stop !== undefined ? ', stop ±' + fmt(stop, 2)
+          : ', z-stop off') + '. A price the jump guard held back is ' +
+        'not drawn.'
+      : 'The Algo’s band is still filling (' + (body.count || 0) +
+        '/' + (body.needed || '?') + ' candles) — no z until it is; ' +
+        'the spread is drawn meanwhile.';
+  }
+
   function wireLadder(node, key) {
     node.querySelector('.close').addEventListener('click', function () {
       closePanel(panelId('ladder', key));
+    });
+    // The chart: one click opens it, the next closes it.
+    node.querySelector('.chart-btn').addEventListener('click', function (e) {
+      e.stopPropagation();
+      toggleChart(key);
     });
     wireAlgoSwitch(node, key);
     node.querySelector('.order-type').addEventListener('change', function (e) {
@@ -5725,6 +5966,15 @@
       // The Algo's window: open while the Algo is on, gone when it is
       // off. Turned on, it opens even if it was closed before — turning
       // it on IS asking to see it.
+      var chartId = panelId('chart', key);
+      if (wanted[chartId]) {
+        renderChartWindow(key, snapshot.pairs[key]);
+      }
+      var ladderBox = document.querySelector(
+        '.ladder[data-pair="' + cssEscape(key) + '"] .chart-btn');
+      if (ladderBox) {
+        ladderBox.classList.toggle('on', !!wanted[chartId]);
+      }
       var algoId = panelId('algo', key);
       if (snapshot.pairs[key].algo_on) {
         if (state.open.indexOf(algoId) < 0 && !state.closed[algoId]) {
@@ -5897,6 +6147,7 @@
       var label = parts[0] === 'ladder' ? pairName
         : parts[0] === 'algo' ? pairName + ' · Algo'
           : parts[0] === 'fair' ? pairName + ' · Fair'
+          : parts[0] === 'chart' ? pairName + ' · Chart'
             : parts[0] === 'grid' ? 'Market Grid'
               : parts[0] === 'settings' ? 'Exchanges' : 'Positions';
       var badge = '';

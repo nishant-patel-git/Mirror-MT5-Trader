@@ -342,7 +342,7 @@ body {
    window is narrow enough for the title to fill the bar — the ladders.
    The wide Exchanges window put its close button against the title, on
    the left, where every other window on the screen has none. */
-.titlebar .winbtns { margin-left: auto; }
+.titlebar .winbtns { margin-left: auto; white-space: nowrap; flex-shrink: 0; }
 .winbtn {
   background: var(--chrome);
   border: 1px solid #666;
@@ -2241,3 +2241,51 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
 .ladder .price .lvl-tag.be { background: #8a6d00; }
 .ladder .price .lvl-tag.tp { background: #1a7f37; }
 .ladder .price .lvl-tag.sl { background: #b42318; }
+
+/* -- the pair chart ------------------------------------------------------
+ * Arrow-statarb's two charts for one ladder: the Algo's z between its
+ * entry and stop lines, and the spread. A window like any other -
+ * dragged, resized, closed - opened from the ladder's Chart button. */
+.window.chartwin { display: flex; flex-direction: column; }
+.window.chartwin .cw-body {
+  flex: 1; display: flex; flex-direction: column; gap: 6px;
+  padding: 6px 8px; overflow: auto; min-height: 0;
+}
+.window.chartwin .cw-bar { font-size: 12px; display: flex; gap: 6px;
+  align-items: center; }
+.window.chartwin .cw-now { margin-left: auto; font-weight: 600; }
+.window.chartwin .cw-card { flex: 1; display: flex; flex-direction: column;
+  min-height: 140px; border: 1px solid rgba(128,128,128,.35);
+  border-radius: 3px; background: var(--panel-bg, #fff); }
+.window.chartwin .cw-head { font-size: 12px; font-weight: 600;
+  padding: 3px 6px; border-bottom: 1px solid rgba(128,128,128,.25);
+  display: flex; align-items: center; gap: 8px; }
+.window.chartwin .cw-key { font-weight: 400; color: #6c757d;
+  margin-left: auto; display: flex; gap: 6px; align-items: center; }
+.window.chartwin .cw-key i { display: inline-block; width: 14px; height: 0;
+  border-top: 2px solid; vertical-align: middle; margin-right: 2px; }
+.window.chartwin .cw-key .k-z { border-color: #0d6efd; }
+.window.chartwin .cw-key .k-up { border-top: 1px dashed #dc3545; }
+.window.chartwin .cw-key .k-down { border-top: 1px dashed #198754; }
+.window.chartwin .cw-key .k-stop { border-top: 1px dotted #6c757d; }
+.window.chartwin .cw-badges { margin-left: auto; display: flex; gap: 4px; }
+.window.chartwin .cw-badge { font-weight: 600; font-size: 11px;
+  padding: 1px 6px; border-radius: 3px; color: #212529; }
+.window.chartwin .cw-min { background: #6edff6; }
+.window.chartwin .cw-max { background: #ffda6a; }
+.window.chartwin .cw-plot { flex: 1; position: relative; min-height: 110px;
+  overflow: hidden; }
+.window.chartwin .cw-plot svg { position: absolute; inset: 0; }
+.window.chartwin .cw-empty { position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center; color: #6c757d;
+  font-size: 12px; }
+.window.chartwin .cw-note { font-size: 11px; }
+/* The ladder's Chart button: lit while its chart is open. Styled like
+ * the Algo switch beside it, and never allowed to push the window's own
+ * buttons onto a second line. */
+.window.ladder .chart-btn { font: 700 10px var(--font); padding: 0 6px;
+  margin-left: 4px; border: 1px solid rgba(0, 0, 0, .25); border-radius: 2px;
+  background: var(--chrome); cursor: pointer; white-space: nowrap;
+  flex-shrink: 0; }
+.window.ladder .chart-btn.on { background: #0d6efd; color: #fff;
+  border-color: #0d6efd; }
