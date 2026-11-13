@@ -1928,13 +1928,18 @@ class Coordinator:
             units = (self._algo_cost(pair).get('k') or 0.0) \
                 * params['algo_qty']
             offset = self._offset_of(pair.account_a)
+            # The accounts and brokers the replay was read from: MT5's
+            # bars off these two terminals, as they are now.
+            legs = self._leg_identity(pair)
             rows = []
             for trade in answer.get('trades') or ():
                 opened = trade.get('opened_at')
-                rows.append(signals.from_replay(
+                row = signals.from_replay(
                     trade, key, params,
                     broker_day=backtest._broker_day(opened, offset),
-                    units=units or None))
+                    units=units or None)
+                row.update(legs)
+                rows.append(row)
             try:
                 dropped = self.store.drop_replayed(key)
                 for row in rows:

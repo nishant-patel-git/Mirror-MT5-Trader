@@ -240,6 +240,25 @@ def test_the_derived_rows_carry_their_outcome_and_their_money(config, pair,
     assert all(r['entered_at'] is not None for r in closed)
 
 
+def test_a_derived_row_names_its_accounts_and_its_edge(config, pair, legs,
+                                                      tmp_path):
+    """A replayed row says what it was read off - each leg's account
+    and broker - and the edge filter's reading at its entry, as a live
+    row does."""
+    coordinator, store = backfill_engine(config, legs, tmp_path)
+    coordinator.backfill_signals(pair.key, days=30)
+    rows = store.signals(pair.key)
+    assert rows
+    for row in rows:
+        assert (row['leg_a_account'], row['leg_b_account']) == \
+            (pair.account_a, pair.account_b)
+        assert row['leg_a_broker'] == 'FakeServer'
+        assert row['leg_b_broker'] == 'FakeServer'
+        assert row['edge_ratio'] is not None and row['edge_ratio'] > 0
+        assert row['edge_required'] is not None
+        assert row['edge_on'] is not None
+
+
 def test_a_ladder_with_no_history_says_so_and_writes_nothing(config, pair,
                                                              legs, tmp_path):
     from mt5trader.coordinator import Coordinator
