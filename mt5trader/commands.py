@@ -340,6 +340,16 @@ class CommandRunner:
         return self.coordinator.algo_backtest(payload['pair'],
                                               payload.get('days', 5))
 
+    def _do_backfill_signals(self, payload):
+        """DERIVE the last N days of signals from MT5's own bars.
+
+        A reading, and it says so: the rows it writes are stamped
+        REPLAY. It sends nothing — `backtest.run` cannot reach an
+        order, and this only writes down what it answers.
+        """
+        return self.coordinator.backfill_signals(
+            payload.get('pair') or None, payload.get('days'))
+
     def _do_reset_excursions(self, payload):
         """Zero the Analysis tab's z-score excursion counters."""
         return self.coordinator.reset_excursions(payload.get('pair') or None)

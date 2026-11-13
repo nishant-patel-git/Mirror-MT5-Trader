@@ -12,6 +12,7 @@ so Chrome refused to submit and fired no event at all.
 """
 
 import json
+import math
 import re
 import os
 import threading
@@ -950,6 +951,59 @@ def test_the_exchanges_page_carries_connect_test_and_diagnose(page):
     for name in ('connect-account', 'test-account', 'diagnose-account'):
         assert row.locator('.' + name).count() == 1
     assert 'Exchanges' in page.text_content('.window.settings .accounts h3')
+
+
+def test_an_accounts_metatrader_is_PICKED_and_fixed_on_the_screen(
+        page, tmp_path, monkeypatch):
+    """A desk would not start because the MetaTrader path had been pasted
+    with Windows' quotes, and the person at it does not open config
+    files. The row says what is wrong; the installed terminals are a list
+    to pick from; the pick survives the page's own repaint; Save fixes
+    it."""
+    from mt5trader import config as cfg
+    root = tmp_path / 'Program Files'
+    (root / 'CFI2 MetaTrader 5 Terminal').mkdir(parents=True)
+    exe = root / 'CFI2 MetaTrader 5 Terminal' / 'terminal64.exe'
+    exe.write_text('', encoding='utf-8')
+    monkeypatch.setattr(cfg, 'terminal_roots', lambda: [str(root)])
+
+    page.click('#open-settings')
+    page.wait_for_selector('.window.settings')
+    page.evaluate("""async (gone) => {
+        await fetch('/api/accounts/CFI Spot', {method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({terminal_path: gone})});
+        await window.MT5Settings.refresh();
+    }""", '"' + str(tmp_path / 'gone' / 'terminal64.exe') + '"')
+    row = page.locator('tr[data-account="CFI Spot"]')
+    problem = page.locator('tr[data-account="CFI Spot"] + tr.problem')
+    page.wait_for_selector('tr[data-account="CFI Spot"] .f-terminal-pick',
+                           timeout=WAIT)
+    # Said on the line under the row, in words, with what to do.
+    assert 'no MetaTrader 5 at' in problem.text_content()
+    assert 'Pick' in problem.text_content()
+
+    row.locator('.f-terminal-pick').select_option(str(exe))
+    assert row.locator('.f-terminal').input_value() == str(exe)
+    # The page repaints itself every few seconds; an unsaved pick must
+    # not be wiped by it.
+    page.evaluate('() => window.MT5Settings.render()')
+    row = page.locator('tr[data-account="CFI Spot"]')
+    assert row.locator('.f-terminal').input_value() == str(exe)
+
+    page.wait_for_selector('.toast.ok:has-text("press Save")', timeout=WAIT)
+    row.locator('.save-account').click()
+    page.wait_for_selector('.toast.ok:has-text("restarts by itself")',
+                           timeout=WAIT)
+    stored = json.load(open(page.paths['config'], encoding='utf-8'))
+    assert stored['accounts']['CFI Spot']['terminal_path'] == str(exe)
+    page.evaluate('() => window.MT5Settings.refresh()')
+    page.wait_for_timeout(200)
+    row = page.locator('tr[data-account="CFI Spot"]')
+    assert page.locator(
+        'tr[data-account="CFI Spot"] + tr.problem').count() == 0
+    assert 'this account' in row.locator(
+        '.f-terminal-pick option:checked').text_content()
 
 
 def test_the_exit_costs_belong_to_ONE_LADDER_and_the_override_CLEARS(page):
@@ -5709,3 +5763,422 @@ def test_your_position_is_marked_on_the_ladder_and_named_yours(page):
         publisher.algo = 'NONE'
         publisher.algo_block = None
         publisher.publish()
+
+
+def test_a_derive_that_found_nothing_says_what_held_it_back(page):
+    """'derived 0 signal(s)' on its own reads as a broken replay.
+
+    This is the whole reason the engine now returns the reasons: the
+    note has to say that the Algo LOOKED and declined, and why, or the
+    screen cannot tell a filter doing its job from a derive that never
+    ran.
+    """
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .an-derive', timeout=WAIT)
+    page.evaluate("""() => {
+        // Stand in for the engine: the command log and its result.
+        window.__realFetch = window.fetch;
+        const json = (body) => Promise.resolve(new Response(
+            JSON.stringify(body),
+            {status: 200, headers: {'Content-Type': 'application/json'}}));
+        window.fetch = function (url, options) {
+            const at = String(url);
+            if (at.indexOf('/api/command') >= 0) {
+                return json({ok: true, id: 'cmd1'});
+            }
+            if (at.indexOf('/api/result/') >= 0) {
+                return json({ok: true, data: {
+                    ok: true, days: 30, written: 0,
+                    pairs: {'XAUUSD_|GC1226': {
+                        ok: true, derived: 0, replaced: 0,
+                        held: {'edge filter': 400, 'trend': 12}}},
+                    held: {'edge filter': 400, 'trend': 12}}});
+            }
+            return window.__realFetch(url, options);
+        };
+    }""")
+    page.click('.monitor .an-derive')
+    page.wait_for_selector('.monitor .an-derive-out', timeout=WAIT)
+    for _ in range(40):
+        note = page.text_content('.monitor .an-derive-out')
+        if 'held back' in note:
+            break
+        page.wait_for_timeout(100)
+    note = page.text_content('.monitor .an-derive-out')
+    assert 'derived 0 signal(s) over 30 days' in note
+    # The counts, biggest first, and the total so the size of it reads.
+    assert 'held back 412 time(s)' in note
+    # The count is in brackets, not run on after the reason: a reason
+    # that ends in a word made "under the nx required 1" of it.
+    assert 'edge filter (400)' in note and 'trend (12)' in note
+    assert note.index('edge filter') < note.index('trend')
+    page.evaluate('() => { window.fetch = window.__realFetch; }')
+
+
+def test_the_journal_puts_the_levels_in_columns(page):
+    """'Algo: stop loss' on its own cannot tell a stop that was hit
+    from a stop that was set in the wrong place \u2014 and a prose line
+    under the row cannot be compared with the row above it."""
+    page.errors.clear()      # earlier tests raise on purpose
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {count: 1, closed: 1, net_pnl: -205.0, win_rate: 0.0,
+                    wins: 0, losses: 1},
+          drawdown: {}, calibration: {}, shadow: {}, excursion: [],
+          signals: [],
+          journal: [{position_id: 'P1', pair_key: 'A|B', side: 'SELL',
+            closed_at: 1762600000, source: 'ALGO', quantity: 1.0,
+            exit_reason: 'Algo: stop loss',
+            exit: {break_even: 71.20, tp: 70.55, sl: 71.40,
+                   on_level: 'sl',
+                   sized_by: '2% of margin (4,720.00/spread)',
+                   level_money: -205.0, gap: 0.06, gap_word: 'past',
+                   note: null},
+            entry_spread: 71.0, exit_spread: 71.46, held_sec: 900,
+            entry_z: 2.6, exit_z: 3.1,
+            leg_a: {side: 'BUY', entry: 101.118},
+            leg_b: {side: 'SELL', entry: 115.554},
+            pnl: -205.0, cum_pnl: -205.0}]};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis table', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    for heading in ('Break-even', 'Target', 'Stop', 'vs level'):
+        assert heading in text, heading
+    assert '71.2000' in text and '70.5500' in text and '71.4000' in text
+    assert '0.0600' in text and 'past' in text
+    # The one that fired is marked, and only that one.
+    assert page.locator('.monitor .analysis td.on-level').count() == 1
+    marked = page.text_content('.monitor .analysis td.on-level')
+    assert '71.4000' in marked
+    # The setting that put it there is a tooltip, not a column of prose.
+    assert '2% of margin' in page.get_attribute(
+        '.monitor .analysis td.on-level', 'title')
+    # And no prose line survives under the row.
+    assert page.locator('.monitor .analysis tr.detail').count() == 0
+    assert page.errors == []
+
+
+def test_a_level_nobody_recorded_is_a_dash_not_a_number(page):
+    """CONTROL. Unmeasured is not zero and is not today's settings."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {}, drawdown: {}, calibration: {}, shadow: {},
+          excursion: [], signals: [],
+          journal: [{position_id: 'P9', pair_key: 'A|B', side: 'SELL',
+            closed_at: 1762600000, source: 'ALGO', quantity: 1.0,
+            exit_reason: 'Algo: stop loss',
+            exit: {break_even: null, tp: null, sl: null, on_level: 'sl',
+                   sized_by: null, level_money: null, gap: null,
+                   gap_word: null,
+                   note: 'the level it was measured against was not ' +
+                         'recorded \u2014 kept from this version on'},
+            entry_spread: 71.0, exit_spread: 71.46, held_sec: 900,
+            leg_a: {side: 'BUY', entry: 101.118},
+            leg_b: {side: 'SELL', entry: 115.554},
+            pnl: -205.0, cum_pnl: -205.0}]};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis table', timeout=WAIT)
+    assert page.locator('.monitor .analysis td.on-level').count() == 0
+    titles = page.locator('.monitor .analysis td.hint[title]')
+    assert titles.count() >= 3          # all three levels say why
+    assert 'not recorded' in titles.first.get_attribute('title')
+    assert page.errors == []
+
+
+def test_the_signal_journal_reads_like_the_trade_journal(page):
+    """The same columns in the same order, so the two halves of the
+    page can be read against each other \u2014 and the signals are
+    recorded off the live book, not simulated."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {}, drawdown: {}, calibration: {}, shadow: {},
+          excursion: [], journal: [],
+          signal_tally: {armed: 2, blocked: 1, entered: 1, no_entry: 0,
+                         tp: 0, sl: 1, win_rate: 0.0, net_pnl: -205.0,
+                         live: 2, replayed: 0, priced: 1, settled: 1},
+          signals: [
+            {pair_key: 'A|B', side: 'SELL', source: 'LIVE', state: 'CLOSED',
+             outcome: 'SL', armed_at: 1762600000, armed_z: 2.61,
+             closed_z: 3.12, entry: 71.0, exit_spread: 71.46,
+             break_even: 71.20, tp: 70.55, sl: 71.40,
+             quantity: 1.0, held_min: 15.0,
+             leg_a_side: 'BUY', leg_a_entry: 101.118,
+             leg_b_side: 'SELL', leg_b_entry: 115.554,
+             net_pnl: -205.0, cum_pnl: -205.0,
+             why: 'never came back to the mean'},
+            {pair_key: 'A|B', side: 'SELL', source: 'LIVE', state: 'CLOSED',
+             outcome: 'BLOCKED', armed_at: 1762500000, armed_z: 2.55,
+             break_even: null, tp: null, sl: null,
+             net_pnl: null, cum_pnl: -205.0,
+             why: 'edge filter: capture is 0.02x the round trip \u00b7 ' +
+               'edge 0.02x of 1.50x'}]};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis table', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    for heading in ('Size', 'Leg A in', 'Leg B in', 'Running', 'Why',
+                    'Break-even'):
+        assert heading in text, heading
+    assert 'BUY 101.118' in text and 'SELL 115.554' in text
+    assert '2.61' in text and '3.12' in text
+    # The levels as columns, with the one that fired marked.
+    assert '71.2000' in text and '70.5500' in text and '71.4000' in text
+    assert page.locator('.monitor .analysis td.on-level').count() == 1
+    # The refusal keeps its words, in the WHY column.
+    assert 'edge 0.02x of 1.50x' in text
+    # Recorded, not simulated: the word that was wrong is gone.
+    assert 'hypothetical' not in text.lower()
+    assert 'recorded off the live book' in text.lower()
+    assert page.errors == []
+
+
+def test_the_chart_opens_and_closes_from_the_ladder(page):
+    """Arrow-statarb's two charts for one ladder - the Algo's z between
+    its entry lines, and the spread - opened by the trader and closed by
+    the trader, from the ladder's own title bar."""
+    from mt5trader import chart
+    key = 'XAUUSD_|GC1226'
+    tape = chart.SpreadTape()
+    start = time.time() - 600
+    for i in range(300):
+        tape.observe(key, start + i * 2,
+                     {'mid_spread': 59.1 + 0.1 * math.sin(i / 20.0)},
+                     {'z_mid': 3.0 * math.sin(i / 20.0), 'mean': 59.1,
+                      'sigma': 0.1, 'ready': True, 'count': 20,
+                      'needed': 20},
+                     {'entry_z': 2.5, 'stop_z': 4.0, 'stop_z_on': True})
+    tape.write(chart.chart_path(page.paths['status']), time.time(),
+               force=True)
+    page.errors.clear()
+    button = page.locator('.ladder[data-pair="%s"] .chart-btn' % key)
+    assert page.locator('.window.chartwin').count() == 0
+    button.click()
+    page.wait_for_selector('.window.chartwin .cw-z svg', timeout=WAIT)
+    win = page.locator('.window.chartwin')
+    assert 'Gold basis' in win.locator('.cw-pair').text_content()
+    # Candles, both entry lines and both stop lines - 2 s points over
+    # 10 minutes at the 1-hour range's 1-minute candles.
+    assert win.locator('.cw-z .cw-candle').count() >= 10
+    assert win.locator('.cw-z .cw-candle.up').count() >= 1
+    assert win.locator('.cw-z .cw-candle.down').count() >= 1
+    assert '1m candles' in win.locator('.cw-size').text_content()
+    assert win.locator('.cw-z .cw-entry-up').count() == 1
+    assert win.locator('.cw-z .cw-entry-down').count() == 1
+    assert win.locator('.cw-z .cw-stop').count() == 2
+    assert win.locator('.cw-spread .cw-candle').count() >= 10
+    # A shorter range draws finer candles.
+    win.locator('.cw-minutes').select_option('15')
+    page.wait_for_function(
+        "document.querySelector('.chartwin .cw-size').textContent"
+        ".indexOf('20s') === 0", timeout=WAIT)
+    assert 'Min:' in win.text_content() and 'Max:' in win.text_content()
+    assert 'on' in button.get_attribute('class')
+    # Closed by the trader: the same button...
+    button.click()
+    page.wait_for_timeout(200)
+    assert page.locator('.window.chartwin').count() == 0
+    assert 'on' not in button.get_attribute('class').split()
+    # ...or the window's own close.
+    button.click()
+    page.wait_for_selector('.window.chartwin', timeout=WAIT)
+    page.click('.window.chartwin .close')
+    page.wait_for_timeout(200)
+    assert page.locator('.window.chartwin').count() == 0
+    assert page.errors == []
+
+
+def test_the_signal_journal_names_the_accounts_the_edge_and_hides_the_unconfirmed(
+        page):
+    """Each row says which account at which broker each leg was on and
+    what the edge filter read; a stretch armed and let go without ever
+    confirming is not a signal, so it is not listed until asked for."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.showUnconfirmed = false;
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {}, drawdown: {}, calibration: {}, shadow: {},
+          excursion: [], journal: [],
+          signal_tally: {armed: 2, blocked: 1, entered: 0, no_entry: 1},
+          signals: [
+            {pair_key: 'A|B', side: 'SELL', source: 'LIVE', state: 'CLOSED',
+             outcome: 'BLOCKED', armed_at: 1762500000, armed_z: 2.55,
+             leg_a_account: 'CFI', leg_a_broker: 'CFI Financial Group',
+             leg_b_account: 'FxPro', leg_b_broker: 'FxPro Financial',
+             edge_ratio: 0.42, edge_required: 1.5, edge_on: true,
+             net_pnl: null, cum_pnl: null, why: 'edge filter'},
+            {pair_key: 'A|B', side: 'BUY', source: 'LIVE', state: 'CLOSED',
+             outcome: 'NO_ENTRY', armed_at: 1762400000, armed_z: -7.73,
+             edge_ratio: 2.1, edge_required: 1.5, edge_on: false,
+             net_pnl: null, cum_pnl: null, why: 'came back'}]};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis table', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    assert 'A: CFI · CFI Financial Group' in text
+    assert 'B: FxPro · FxPro Financial' in text
+    assert '0.42× / 1.50×' in text
+    # The unconfirmed stretch is counted, not listed...
+    assert '-7.73' not in text
+    assert '1 stretch armed and let go without confirming' in text
+    # ...and one click lists it, with its edge and the filter said OFF.
+    page.click('.monitor .an-toggle-unconfirmed')
+    text = page.text_content('.monitor .analysis')
+    assert '-7.73' in text
+    assert '2.10× / 1.50× (off)' in text
+    page.click('.monitor .an-toggle-unconfirmed')
+    assert '-7.73' not in page.text_content('.monitor .analysis')
+    assert page.errors == []
+
+
+def test_the_monitor_takes_the_room_there_is(page):
+    """A flat 560px default left the bottom third of the screen as bare
+    desktop under a tab that is several screens long."""
+    page.evaluate("""() => {
+        window.localStorage.removeItem('mt5trader.windows.v1');
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis', timeout=WAIT)
+    room = page.evaluate("""() => {
+        const w = document.querySelector('.window.monitor');
+        const d = document.getElementById('desktop');
+        return d.getBoundingClientRect().bottom -
+               w.getBoundingClientRect().bottom;
+    }""")
+    # Within one window's furniture of the foot of the desktop, not a
+    # third of the screen away.
+    assert 0 <= room < 120, room
+
+
+def test_the_z_trigger_count_is_on_the_page_with_its_threshold(page):
+    """'How many times did the z trigger' — split by side, with the
+    band it was counted against named rather than left to be guessed."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {}, drawdown: {}, calibration: {}, shadow: {},
+          excursion: [], journal: [], signals: [],
+          signal_tally: {armed: 9, triggered: 9, triggered_up: 6,
+                         triggered_down: 3, threshold_z: 2.5,
+                         peak_z: 3.41, trough_z: -2.88,
+                         blocked: 2, entered: 5, no_entry: 2, tp: 3, sl: 2,
+                         win_rate: 60.0, net_pnl: 410.0, live: 9,
+                         replayed: 0, priced: 5, settled: 5}};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis .an-tiles', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    assert 'z triggered ±2.50σ' in text
+    assert '↑ above' in text and '↓ below' in text
+    assert 'Furthest z' in text and '3.41σ' in text
+    # The two sides add up to the total, on the screen as in the engine.
+    assert '9' in text and '6' in text and '3' in text
+    assert page.errors == []
+
+
+def test_two_ladders_that_disagree_name_no_band_on_the_tile(page):
+    """CONTROL. Printing either threshold would be wrong on half the
+    rows, so the tile names none."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {}, summary: {}, drawdown: {},
+          calibration: {}, shadow: {}, excursion: [], journal: [],
+          signals: [],
+          signal_tally: {armed: 4, triggered: 4, triggered_up: 2,
+                         triggered_down: 2, threshold_z: null,
+                         peak_z: null, trough_z: null, blocked: 0,
+                         entered: 0, no_entry: 0, tp: 0, sl: 0,
+                         win_rate: null, net_pnl: null, live: 4,
+                         replayed: 0, priced: 0, settled: 0}};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis .an-tiles', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    assert 'z triggered' in text and 'σ' not in text.split('Blocked')[0]
+    assert page.errors == []
+
+
+def test_a_derive_that_found_nothing_reads_as_a_sentence(page):
+    """The engine groups held-back reasons with their NUMBERS taken
+    out, writing '#' where they were. On a live desk that reached the
+    screen as 'edge filter: capture #x the cost, under the #x required
+    1' — which reads as a fault, and runs the count straight on
+    after the word 'required'."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .an-derive', timeout=WAIT)
+    page.evaluate("""() => {
+        // An earlier test in this module leaves its own note behind,
+        // and it also says 'held back'.
+        window.MT5Trader.state.deriveNote = null;
+        window.MT5Trader.state.deriving = false;
+        window.MT5Trader.render();
+        window.__realFetch = window.fetch;
+        const json = (b) => Promise.resolve(new Response(JSON.stringify(b),
+            {status: 200, headers: {'Content-Type': 'application/json'}}));
+        window.fetch = function (url, options) {
+            const at = String(url);
+            if (at.indexOf('/api/command') >= 0) {
+                return json({ok: true, id: 'cmd1'});
+            }
+            if (at.indexOf('/api/result/') >= 0) {
+                return json({ok: true, data: {
+                    ok: true, days: 30, written: 0,
+                    pairs: {'A|B': {ok: true, derived: 0, replaced: 0}},
+                    held: {'edge filter: capture #x the cost, under the #x required': 1}}});
+            }
+            return window.__realFetch(url, options);
+        };
+    }""")
+    page.click('.monitor .an-derive')
+    for _ in range(40):
+        note = page.text_content('.monitor .an-derive-out')
+        if 'held back' in note:
+            break
+        page.wait_for_timeout(100)
+    note = page.text_content('.monitor .an-derive-out')
+    assert 'capture nx the cost, under the nx required (1)' in note
+    assert '#' not in note
+    assert 'required 1' not in note
+    page.evaluate('() => { window.fetch = window.__realFetch; }')
+    assert page.errors == []

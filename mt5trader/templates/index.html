@@ -221,6 +221,45 @@
   </section>
 </template>
 
+<!-- The pair's chart: the Algo's z with its entry and stop lines, and
+     the spread, over time. Opened and closed from the Chart button on
+     the ladder's title bar. Reads only. -->
+<template id="chart-template">
+  <section class="window chartwin">
+    <div class="titlebar">
+      <span class="swatch"></span>
+      <span class="title cw-pair"></span>
+      <span class="winbtns"><button class="winbtn close" title="Close the chart">&times;</button></span>
+    </div>
+    <div class="cw-body">
+      <div class="cw-bar">
+        over the last
+        <select class="cw-minutes" title="How much of the session to draw">
+          <option value="15">15 min</option>
+          <option value="30">30 min</option>
+          <option value="60" selected>1 hour</option>
+          <option value="120">2 hours</option>
+        </select>
+        <span class="cw-size hint"></span>
+        <span class="cw-now"></span>
+      </div>
+      <div class="cw-card">
+        <div class="cw-head">Z-Score
+          <span class="cw-key"><b class="k-candle up"></b><b class="k-candle down"></b>z <i class="k-up"></i>+entry <i class="k-down"></i>&minus;entry <span class="cw-key-stop"><i class="k-stop"></i>&plusmn;stop</span></span>
+        </div>
+        <div class="cw-plot cw-z"></div>
+      </div>
+      <div class="cw-card">
+        <div class="cw-head">Spread History
+          <span class="cw-badges"><span class="cw-badge cw-min">Min: &mdash;</span><span class="cw-badge cw-max">Max: &mdash;</span></span>
+        </div>
+        <div class="cw-plot cw-spread"></div>
+      </div>
+      <div class="cw-note hint"></div>
+    </div>
+  </section>
+</template>
+
 <!-- The Algo, one window per ladder while it is on: SIGNAL & POSITION,
      STATISTICS, FILTERS. Filled from the engine's Algo block on every
      poll; nothing in it trades — the switch is on the ladder's title
@@ -273,6 +312,7 @@
           <button type="button" data-algo="ALGO_LIVE" class="live">LIVE — it trades</button>
         </span>
       </span>
+      <button type="button" class="chart-btn" title="Open or close this ladder&#8217;s chart: the Algo&#8217;s z with its entry and stop lines, and the spread">Chart</button>
       <span class="winbtns"><button class="winbtn ladder-cog" title="This ladder's own settings — mode, exit costs, carry, Algo">&#9881;</button><button class="winbtn close" title="Close this ladder">&times;</button></span>
     </div>
     <div class="quotestrip">
@@ -601,7 +641,7 @@
           <label class="lsf" title="No new entry signal for this long after an exit signal or a close.">
             <span>Cooldown (min)</span>
             <input class="ls-az-cooldown" type="number" min="0" step="1"></label>
-          <label class="lsf" title="No entry until the Algo has watched this many minutes of LIVE prices since it was turned on — even when MT5's history fills the band at once. Time with no price does not count. Dry run counts: warm up in Dry run, then switch to LIVE. 0 = off.">
+          <label class="lsf" title="No entry until the Algo has watched this many minutes of LIVE prices since it was turned on — even when MT5's history fills the band at once. Time with no price does not count. Signals counts: warm up in Signals, then switch to LIVE. 0 = off.">
             <span>Warm-up (min)</span>
             <input class="ls-az-warmup" type="number" min="0" step="1"></label>
           <label class="lsf check-row" title="Also signal EXIT if the spread runs against the position to this |z|.">

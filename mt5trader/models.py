@@ -303,6 +303,14 @@ class SpreadPosition:
         self.peak_min = None
         self.trough_pnl = None
         self.trough_min = None
+        #: The levels this position was being JUDGED against on the last
+        #: pass that priced it: break-even, take-profit, stop, and which
+        #: setting produced each. Refreshed while it is open, so the set
+        #: left on a closed position is the one its exit was decided on
+        #: - which is the only way the Analysis tab can say WHY a stop
+        #: fired and at what number. None until priced, and None for
+        #: every position closed before this was kept.
+        self.exit_levels = None
 
     @property
     def is_open(self):
@@ -415,6 +423,7 @@ class SpreadPosition:
             'entry_atr': self.entry_atr,
             'peak_pnl': self.peak_pnl, 'peak_min': self.peak_min,
             'trough_pnl': self.trough_pnl, 'trough_min': self.trough_min,
+            'exit_levels': self.exit_levels,
             'leg_a': self.leg_a.to_dict() if self.leg_a else None,
             'leg_b': self.leg_b.to_dict() if self.leg_b else None,
         }
@@ -447,7 +456,8 @@ class SpreadPosition:
         position.source = raw.get('source') or MANUAL
         position.entry_margin = raw.get('entry_margin')
         position.entry_atr = raw.get('entry_atr')
-        for name in ('peak_pnl', 'peak_min', 'trough_pnl', 'trough_min'):
+        for name in ('peak_pnl', 'peak_min', 'trough_pnl', 'trough_min',
+                     'exit_levels'):
             setattr(position, name, raw.get(name))
         #: Recovered from disk rather than seen happen. The monitor says
         #: so until the reconciler has confirmed both legs at the broker.

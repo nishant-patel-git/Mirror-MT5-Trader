@@ -173,14 +173,26 @@ class ZExcursions:
         self.min_z = data.get('min_z')
         self.since = data.get('since') or now
         self.events = list(data.get('events') or [])
-        self._prev = None
-        self._arm = {'2u': True, '3u': True, '2d': True, '3d': True}
-        self._open_up = self._open_down = False
+        #: WHERE IT HAD GOT TO, restored - not reset.
+        #:
+        #: These four used to live only in memory. Every restart
+        #: therefore re-armed all four bands, and a spread parked
+        #: beyond +2 sigma logged a fresh touch on the first poll
+        #: after it: six restarts, six touches, one stretch. The
+        #: counts were saved and the reason they were safe to add to
+        #: was not.
+        self._prev = data.get('prev')
+        self._arm = dict({'2u': True, '3u': True, '2d': True, '3d': True},
+                         **(data.get('arm') or {}))
+        self._open_up = bool(data.get('open_up'))
+        self._open_down = bool(data.get('open_down'))
 
     def to_dict(self):
         return {'counts': dict(self.counts), 'max_z': self.max_z,
                 'min_z': self.min_z, 'since': self.since,
-                'events': self.events[-self.MAX_EVENTS:]}
+                'events': self.events[-self.MAX_EVENTS:],
+                'prev': self._prev, 'arm': dict(self._arm),
+                'open_up': self._open_up, 'open_down': self._open_down}
 
     def _event(self, kind, z, at):
         self.counts[kind] += 1
@@ -312,6 +324,109 @@ def drawdown(positions):
             'best_trade': round(max(_pnl(r) for r in closed), 2)}
 
 
+def _num(value, places=4):
+    """A spread price as the screen prints it, or None.
+
+    Trailing zeros are trimmed back to two decimals: an oil spread is
+    quoted in cents and `71.4000` reads as four digits of precision
+    this system does not have, while an FX spread genuinely needs them.
+    """
+    if value is None:
+        return None
+    try:
+        text = f'{float(value):,.{places}f}'
+    except (TypeError, ValueError):
+        return None
+    if '.' not in text:
+        return text
+    whole, _, decimals = text.partition('.')
+    decimals = decimals.rstrip('0')
+    while len(decimals) < 2:
+        decimals += '0'
+    return f'{whole}.{decimals}'
+
+
+def _lots(leg):
+    """One leg's volume, or None. `leg` is the stored JSON dict."""
+    if not isinstance(leg, dict):
+        return None
+    volume = leg.get('volume')
+    return None if volume is None else float(volume)
+
+
+#: The exit reasons the Algo itself signals, and which level each one
+#: was measured against. Anything else - a cutoff, a kill, a close by
+#: hand, a force-clear - is not a level being touched and is left in
+#: its own words.
+_LEVEL_OF_EXIT = (('stop loss', 'sl'), ('profit target', 'tp'))
+
+
+def exit_columns(row):
+    """WHY this trade ended, as COLUMNS rather than a sentence.
+
+    'Algo: stop loss' on its own does not say what the stop was, how it
+    was arrived at, or how far past it the close went - which is the
+    difference between a stop that was hit and a stop that was set in
+    the wrong place. These were written as one prose line under each
+    row first; a journal is a table, and numbers that matter belong in
+    columns where they line up down the page and can be compared at a
+    glance.
+
+    The levels are the ones the position was last judged against. A
+    trade closed before they were kept has none and says so, rather
+    than guessing a level from today's settings.
+    """
+    levels = row.get('exit_levels') or {}
+    reason = (row.get('close_reason') or '').lower()
+    side = row.get('side')
+    sign = 1.0 if side == 'BUY' else -1.0
+    which = None
+    for words, name in _LEVEL_OF_EXIT:
+        if words in reason:
+            which = name
+    out = {'break_even': levels.get('break_even'),
+           'tp': levels.get('tp'), 'sl': levels.get('sl'),
+           # Which level this exit was measured against, so the screen
+           # can mark that one cell rather than all three.
+           'on_level': which,
+           'sized_by': _how_the_level_was_set(which, levels)
+           if which else None,
+           'level_money': (levels.get('sl_money') if which == 'sl' else
+                           levels.get('tp_money') if which == 'tp' else None),
+           'gap': None, 'gap_word': None, 'note': None}
+    level = levels.get(which) if which else None
+    exit_spread = row.get('exit_spread')
+    if which and level is None:
+        out['note'] = ('the level it was measured against was not '
+                       'recorded \u2014 kept from this version on')
+    elif which and exit_spread is not None:
+        past = sign * (float(exit_spread) - float(level))
+        past = past if which == 'tp' else -past
+        out['gap'] = round(abs(past), 6)
+        out['gap_word'] = 'past' if past >= 0 else 'short of'
+    return out
+
+
+def _how_the_level_was_set(which, levels):
+    """The SETTING behind a stop or a target, in its own numbers."""
+    mode = levels.get('stop_mode' if which == 'sl' else 'target_mode')
+    if mode == 'ATR':
+        mult = levels.get('atr_stop_mult' if which == 'sl'
+                          else 'atr_target_mult')
+        atr = levels.get('entry_atr')
+        if mult is not None and atr is not None:
+            return f'{mult:g} \u00d7 ATR {_num(atr)}'
+        return 'ATR at entry, not measured'
+    pct = levels.get('stop_loss_pct' if which == 'sl' else 'tp_pct')
+    margin = levels.get('entry_margin')
+    if pct is None:
+        return None
+    said = f'{float(pct):g}% of margin'
+    if margin is not None:
+        said += f' ({margin:,.2f}/spread)'
+    return said
+
+
 def excursion_row(row):
     """One closed trade: how bad it got, how good it got, and how much
     of its best it kept (utilisation)."""
@@ -325,6 +440,14 @@ def excursion_row(row):
             'source': row.get('source') or 'MANUAL',
             'closed_at': row.get('closed_at'),
             'exit_reason': row.get('close_reason'),
+            # Entry, exit and the size are NOT repeated here: the
+            # trade journal below carries them for the same trades, and
+            # one page saying the same thing twice is one page nobody
+            # reads twice. This table is about the EXTREMES.
+            'entry_spread': row.get('entry_spread'),
+            'exit_spread': row.get('exit_spread'),
+            'lots_a': _lots(row.get('leg_a')),
+            'lots_b': _lots(row.get('leg_b')),
             'mae': None if mae is None else round(mae, 2),
             'mfe': None if mfe is None else round(mfe, 2),
             'pnl': None if pnl is None else round(pnl, 2),
@@ -391,18 +514,23 @@ def journal(positions, entry_z=None, exit_z=None):
     closed = sorted((r for r in positions or ()
                      if r.get('closed_at') is not None),
                     key=lambda r: r['closed_at'])
-    running = 0.0
+    # None, not 0.0, until something has actually been priced - the
+    # same rule the rest of this file follows. A first trade whose P&L
+    # could not be read used to print a running total of $0.00, which
+    # reads as 'it broke even' rather than as 'nobody measured it'.
+    running = None
     out = []
     for row in closed:
         pnl = _pnl(row)
         if pnl is not None:
-            running += pnl
+            running = pnl + (running or 0.0)
         legs = {}
         for leg in ('a', 'b'):
             fill = row.get('leg_' + leg) or {}
             legs[leg] = {'side': fill.get('side'),
                          'volume': fill.get('volume'),
                          'entry': fill.get('price'),
+                         'exit': fill.get('exit_price'),
                          'symbol': fill.get('symbol')}
         opened = row.get('opened_at')
         gross = _gross(row)
@@ -420,6 +548,12 @@ def journal(positions, entry_z=None, exit_z=None):
             'exit_z': exit_z.get(row.get('position_id')),
             'leg_a': legs['a'], 'leg_b': legs['b'],
             'exit_reason': row.get('close_reason'),
+            # ...and the NUMBERS behind that reason, as their own
+            # columns: the three levels, which one it came off on, the
+            # setting that put it there, and how far past it the close
+            # went. 'Algo: stop loss' alone cannot tell a stop that was
+            # hit from a stop that was in the wrong place.
+            'exit': exit_columns(row),
             'pnl': None if pnl is None else round(pnl, 2),
             # The spread's move times k, before commission; the fees
             # are what lies between that and the net. Either is None
@@ -427,7 +561,7 @@ def journal(positions, entry_z=None, exit_z=None):
             'gross_pnl': None if gross is None else round(gross, 2),
             'fees': (None if gross is None or pnl is None
                      else round(gross - pnl, 2)),
-            'cum_pnl': round(running, 2)})
+            'cum_pnl': None if running is None else round(running, 2)})
     out.reverse()
     return out
 

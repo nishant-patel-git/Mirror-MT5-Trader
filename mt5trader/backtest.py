@@ -62,6 +62,18 @@ def _side_levels(p, closes, width, base):
     return target, stop, None
 
 
+
+def _edge_at(z, stats, filters, p):
+    """`shadow.ShadowAlgo`'s edge reading, on a candle: what the move
+    back is worth against its costs, and what the filter requires."""
+    sigma = stats.get('sigma') if stats.get('ready') else None
+    if z is None or sigma is None:
+        return None
+    cost = ((filters or {}).get('cost') or {}).get('total')
+    return algofilters.edge(z, sigma, (filters or {}).get('k'),
+                            p['algo_qty'], cost, p['edge_capture_frac'],
+                            p['edge_multiple'])
+
 def run(rows, params, width, cost_in, levels, offset_sec=None,
         cutoff=(16, 55)):
     """Replay `rows` [(bucket, mid close), ...] through the Algo.
@@ -126,7 +138,7 @@ def run(rows, params, width, cost_in, levels, offset_sec=None,
                 None if not k else
                 sign * (closing - pos['entry_spread']) * k * qty
                 - commission)))
-        _, check = judge_filters(p, md, stats, closes, cost_in)
+        filters, check = judge_filters(p, md, stats, closes, cost_in)
         # The stop and target THIS entry would get - from the ATR on the
         # candles CLOSED before this one, as live - and the same guard:
         # none until the ATR is measured, none with a stop inside the
@@ -166,7 +178,12 @@ def run(rows, params, width, cost_in, levels, offset_sec=None,
                        else be + sign * trade_target,
                        'sl': None if trade_stop is None
                        else be - sign * trade_stop,
-                       'entry_z': intent.get('z')}
+                       'entry_z': intent.get('z'),
+                       # The edge filter's reading at this entry,
+                       # priced exactly as the live journal prices it,
+                       # switched on or not.
+                       'edge': _edge_at(intent.get('z'), stats, filters,
+                                        p)}
                 open_[pid] = pos
                 day['trades'] += 1
             elif intent['position_id'] in open_:
@@ -182,12 +199,14 @@ def run(rows, params, width, cost_in, levels, offset_sec=None,
                 trades.append({
                     'side': pos['side'], 'opened_at': pos['opened_at'],
                     'entry': pos['entry_spread'], 'entry_z': pos['entry_z'],
+                    'edge': pos.get('edge'),
                     'closed_at': now, 'exit': exit_at,
                     'reason': intent.get('reason'), 'pnl': pnl})
     for pos in open_.values():
         trades.append({'side': pos['side'], 'opened_at': pos['opened_at'],
                        'entry': pos['entry_spread'],
-                       'entry_z': pos['entry_z'], 'closed_at': None,
+                       'entry_z': pos['entry_z'], 'edge': pos.get('edge'),
+                       'closed_at': None,
                        'exit': None, 'reason': 'still open', 'pnl': None})
     return {'trades': trades, 'held': held,
             'summary': summarise(trades, rows, tf),

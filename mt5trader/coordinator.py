@@ -18,20 +18,24 @@ import logging
 import os
 import threading
 import time
+from types import SimpleNamespace
 from datetime import datetime
 
-from . import algo as algo_module, analysis, atomicfile, carry, costs, \
-    config as config_module, depth as depth_book, fairvalue, hedgeratio, \
-    sizing, takeprofit
+from . import algo as algo_module, algofilters, analysis, atomicfile, \
+    backtest, bands, carry, costs, config as config_module, \
+    depth as depth_book, fairvalue, hedgeratio, signals, sizing, \
+    takeprofit
 from . import book as book_module
 from .algodesk import AlgoDesk
 from .algoexec import LiveSink
 from .book import Book
+from .chart import SpreadTape, chart_path
 from .database import Store
 from .executor import PairExecutor, mark_position
 from .models import (ALGO_SOURCE, MAGIC_NUMBER, MANUAL, LegFill, OrderType,
                      SpreadPosition, SpreadSide)
 from .quoter import Quoter, quoting_leg
+from .shadow import ShadowAlgo
 from .reconcile import Reconciler
 from .session import (PairSession, SessionClock, day_orders,
                       overnight_action)
@@ -48,6 +52,19 @@ HOT_SETTINGS = (
 )
 
 
+
+def priced(tick):
+    """Does this tick carry a price? MT5 answers 0.0 for a side it has
+    no price for - right after a re-subscribe, before the terminal has
+    heard from the server, it is 0.0/0.0. That is NO price, not a price
+    of zero: put into the spread it read as a thousand-sigma stretch.
+    Unmeasured is not zero, so the leg is dark until a real one comes."""
+    try:
+        return float(tick.get('bid') or 0) != 0.0 and \
+            float(tick.get('ask') or 0) != 0.0
+    except (TypeError, ValueError, AttributeError):
+        return False
+
 class Coordinator:
     def __init__(self, config, legs, status_path='status.json',
                  clock=time.time, sleep=time.sleep,
@@ -60,6 +77,9 @@ class Coordinator:
         self.leg_factory = leg_factory
         self._last_leg_try = None
         self.status_path = status_path
+        #: Each ladder's spread and the Algo's z, for the chart window.
+        self.tape = SpreadTape()
+        self.chart_path = chart_path(status_path)
         self.clock = clock
         self.sleep = sleep
         self.book = Book()
@@ -99,6 +119,38 @@ class Coordinator:
         self._shadow_saved = {}
         self._excursions = {}
         self._excursions_saved = {}
+        #: The ANALYSIS band, one per ladder: the same candles and the
+        #: same arithmetic the Algo's band uses, kept whether its Algo
+        #: is on, off, dry or live.
+        #:
+        #: It exists because the z track used to be fed from the Algo's
+        #: own body, and `_work_algo` returns None for a ladder whose
+        #: Algo is off — which is EVERY ladder after every restart,
+        #: since LIVE is off at every start. So the tab that is meant
+        #: to tell a trader whether the Algo is worth switching on
+        #: recorded nothing until they had switched it on.
+        #:
+        #: It measures and it is read by the Analysis tab. It cannot
+        #: reach an order: `_track` is the only caller, and nothing in
+        #: it returns a signal (`tests/test_algo.py` fails the build if
+        #: anything but `algoexec` sends).
+        self._bands = {}
+        #: The zone last RECORDED per (ladder, timeframe), read back
+        #: from the database at first use so a restart does not record
+        #: the zone the spread is already sitting in.
+        self._zone_last = None
+        #: Live signals per ladder, and where each ladder's arming had
+        #: got to. Both reopened from the database at first use: a
+        #: forward watch that is lost on a restart never settles, and
+        #: arming that is lost re-arms on a spread that has not moved.
+        self._signals = None
+        self._arming = {}
+        #: Each ladder's SHADOW ALGO (`shadow.ShadowAlgo`) - the Algo's
+        #: own code, run without an executor, whose decisions are the
+        #: signal journal - and the stretch each side is in.
+        self._shadow_algos = {}
+        self._episodes = {}
+        self._shadow_algo_saved = {}
         #: What recovery found at startup, and what it could not claim.
         self.recovery = {'recovered': 0, 'unclaimed': [], 'complete': False}
         self._last_journal = None
@@ -610,7 +662,7 @@ class Coordinator:
             if leg is None or not symbol:
                 continue
             tick = leg.tick(symbol)
-            if tick:
+            if tick and priced(tick):
                 ticks[(account, symbol)] = tick
         return ticks
 
@@ -1062,16 +1114,31 @@ class Coordinator:
             settings = pair.exit_settings(self.config.settings)
             self._track_positions(pair, md, settings, now)
             self._track_shadows(pair, md, now)
-            self._track_excursions(pair, md, body, now)
+            # ONE band reading per pass, shared by the counters and the
+            # zone track, so the two can never disagree about what z
+            # was. The Algo's own numbers when its Algo is on; the
+            # analysis band's when it is off.
+            reading = self._band_reading(pair, md, body, now)
+            self._track_excursions(pair, md, reading, now)
+            self._track_signals(pair, md, body, reading, settings, now)
         except Exception as e:
             logging.exception('[ANALYSIS %s] skipped this pass: %s',
                               pair.key, e)
 
     def _track_positions(self, pair, md, settings, now):
         open_ids = set()
+        # The levels every open position is being JUDGED against on
+        # this pass, kept ON the position. Computed here rather than
+        # taken from the Algo's body because the body is None for a
+        # ladder whose Algo is off - and a trade closed by hand still
+        # has to be able to say what its stop was.
+        levels = self._level_marks(pair, md)
         for position in self.book.positions(pair.key):
             open_ids.add(position.position_id)
             _gross, net, _closing = mark_position(position, md, settings)
+            mark = levels.get(position.position_id)
+            if mark:
+                position.exit_levels = mark
             if analysis.observe_extremes(position, net, now):
                 last = self._extremes_saved.get(position.position_id)
                 if last is None or now - last >= self.ANALYSIS_SAVE_SEC:
@@ -1086,6 +1153,38 @@ class Coordinator:
                 continue
             self.remember(position)          # its final extremes
             self._arm_shadow(pair, position, settings, now)
+
+    #: The fields of an Algo position row that are kept ON the position
+    #: as its exit levels. Only the numbers the Analysis tab words an
+    #: exit from - not the whole row, which carries this poll's mark and
+    #: would be rewritten on disk every ten seconds for no reason.
+    LEVEL_MARKS = ('break_even', 'tp', 'sl', 'tp_money', 'sl_money',
+                   'stop_mode', 'target_mode', 'atr_stop_mult',
+                   'atr_target_mult', 'tp_pct', 'stop_loss_pct',
+                   'entry_margin', 'entry_atr', 'stop_points',
+                   'spread_units')
+
+    def _level_marks(self, pair, md):
+        """{position_id: the levels it is judged against}, or {}.
+
+        Never raises and never decides anything: a ladder that cannot
+        be priced simply keeps the levels it last had, which are the
+        ones its exit was decided on.
+        """
+        if md is None:
+            return {}
+        try:
+            rows = self._algo_positions(pair, md)
+        except Exception as e:
+            logging.debug('[ANALYSIS %s] no exit levels this pass: %s',
+                          pair.key, e)
+            return {}
+        marks = {}
+        for row in rows:
+            mark = {name: row.get(name) for name in self.LEVEL_MARKS}
+            if any(value is not None for value in mark.values()):
+                marks[row['position_id']] = mark
+        return marks
 
     def _arm_shadow(self, pair, position, settings, now):
         fees = costs.mark_fees(
@@ -1151,16 +1250,83 @@ class Coordinator:
             tracker = self._excursions[key] = analysis.ZExcursions(saved, now)
         return tracker
 
-    def _track_excursions(self, pair, md, body, now):
-        """z on the Algo's OWN band — so only while its Algo is on."""
-        if not body or not md or md.get('mid_spread') is None \
-                or md.get('jump_reason'):
-            return
-        mean, sigma = body.get('mean'), body.get('sigma')
+    def _band(self, pair):
+        """This ladder's ANALYSIS band: the Algo's candles and the Algo's
+        arithmetic, kept whether or not its Algo is on.
+
+        Seeded from the saved candles — the same table the Algo fills,
+        keyed the same way — so after a restart it measures at once
+        instead of waiting `length` candles for a band it already had.
+        A new timeframe, length or beta is a different series and starts
+        again, exactly as the Algo's does.
+        """
+        signature = AlgoDesk._signature(pair)
+        held = self._bands.get(pair.key)
+        if held is not None and held[0] == signature:
+            return held[1]
+        params = algo_module.clean_params(getattr(pair, 'algo_params', None))
+        anchor = bands.round_offset(self._offset_of(pair.account_a)) or 0.0
+        candles = bands.SpreadCandles(params['timeframe_min'] * 60.0,
+                                      params['length'], anchor)
+        if self.store is not None:
+            try:
+                candles.seed(self.store.analysis_candles(
+                    pair.key, params['timeframe_min'] * 60.0,
+                    pair.hedge_ratio or 1.0,
+                    limit=params['length'] * bands.KEEP_MULTIPLE))
+            except Exception as e:
+                logging.error('[ANALYSIS %s] saved candles unreadable: %s',
+                              pair.key, e)
+        self._bands[pair.key] = (signature, candles)
+        return candles
+
+    def _band_reading(self, pair, md, body, now):
+        """One z for this pass, and where it came from.
+
+        The Algo's own mean and sigma when its Algo is on, so the tab
+        and the desk can never quote different numbers for the same
+        moment; the analysis band's when it is off — which is every
+        ladder after every restart, LIVE being off at every start.
+
+        None when there is nothing to measure: no price, a print the
+        jump guard is holding back (one bad close moves sigma for N
+        candles), or a band that is not full yet.
+        """
+        if not md or md.get('mid_spread') is None or md.get('jump_reason'):
+            return None
+        candles = self._band(pair)
+        closed = candles.observe(now, md['mid_spread'])
+        if closed is not None and self.store is not None:
+            try:
+                # ITS OWN TABLE, never `algo_candles` — see
+                # `Store.save_analysis_candles`. A reading must not be
+                # able to change what the Algo decides.
+                self.store.save_analysis_candles(
+                    pair.key, candles.timeframe_sec,
+                    pair.hedge_ratio or 1.0, [closed])
+            except Exception as e:
+                logging.error('[ANALYSIS %s] could not save a candle: %s',
+                              pair.key, e)
+        stats = candles.stats()
+        mean, sigma, source = None, None, 'analysis'
+        if body and body.get('mean') is not None and body.get('sigma'):
+            mean, sigma, source = body['mean'], body['sigma'], 'algo'
+        elif stats.get('ready'):
+            mean, sigma = stats['mean'], stats['sigma']
         if mean is None or not sigma:
+            return {'z': None, 'mean': mean, 'sigma': sigma, 'stats': stats,
+                    'source': source, 'candles': candles}
+        return {'z': (md['mid_spread'] - mean) / sigma, 'mean': mean,
+                'sigma': sigma, 'stats': stats, 'source': source,
+                'candles': candles}
+
+    def _track_excursions(self, pair, md, reading, now):
+        """The ±2 / ±3 sigma counters. Fed from the shared reading, so
+        they count with the Algo off as well as on."""
+        if not reading or reading.get('z') is None:
             return
         tracker = self._excursion(pair.key, now)
-        what = tracker.tally((md['mid_spread'] - mean) / sigma, now)
+        what = tracker.tally(reading['z'], now)
         last = self._excursions_saved.get(pair.key)
         if what == 'event' or (what and (
                 last is None or now - last >= self.ANALYSIS_SAVE_SEC)):
@@ -1173,6 +1339,377 @@ class Coordinator:
                 self.store.save_excursions(key, tracker.to_dict())
             except Exception as e:
                 logging.error('could not save the excursions: %s', e)
+
+    #: How long a hypothetical trade is watched forward before it is
+    #: called EXPIRED. A mean reversion that has not happened in a day
+    #: is not the trade that was signalled.
+    SIGNAL_WATCH_HOURS = 24.0
+
+    def broker_day(self):
+        """Today on the BROKER's clock, as YYYY-MM-DD.
+
+        The same day the Algo counts its trades over (`_algo_gates`),
+        so "5 Nov" on the Analysis tab and "5 Nov" in the day limits
+        are one day and not two. None where the offset is unmeasured —
+        and unmeasured is not "use this machine's date", which would
+        file a row under a day it did not happen on.
+        """
+        now = self.session_clock.broker_now()
+        return None if now is None else now.date().isoformat()
+
+    def _signal_store(self):
+        """This process's live signals, per ladder, reopened from the
+        database at first use so a restart keeps watching what it was
+        watching."""
+        if self._signals is None:
+            self._signals = {}
+            self._arming = {}
+            if self.store is not None:
+                try:
+                    for row in self.store.open_signals():
+                        self._signals.setdefault(row['pair_key'],
+                                                 []).append(row)
+                    self._arming = self.store.signal_arming()
+                except Exception as e:
+                    logging.error('could not reopen the signals: %s', e)
+        return self._signals
+
+    def _shadow_for(self, pair, now):
+        """This ladder's shadow Algo, restored from what was saved, with
+        the stretches that were armed when the process stopped."""
+        self._signal_store()
+        shadow = self._shadow_algos.get(pair.key)
+        if shadow is None:
+            saved = (self._arming.get(pair.key) or {}).get('shadow')
+            shadow = ShadowAlgo(getattr(pair, 'algo_params', None), saved,
+                                now=now)
+            self._shadow_algos[pair.key] = shadow
+            self._episodes[pair.key] = {
+                row['side']: {'row': row}
+                for row in self._signals.get(pair.key, [])
+                if row['state'] == signals.ARMED}
+        return shadow
+
+    def _save_shadow_algo(self, pair_key, now, force=False):
+        """The shadow's arming, cooldown, day and warm-up, so a restart
+        neither re-arms a spread that has not moved nor forgets the day's
+        count. Every ten seconds for the warm-up; at once on a decision."""
+        if self.store is None:
+            return
+        shadow = self._shadow_algos.get(pair_key)
+        if shadow is None:
+            return
+        last = self._shadow_algo_saved.get(pair_key)
+        if not force and last is not None and \
+                now - last < self.ANALYSIS_SAVE_SEC:
+            return
+        self._shadow_algo_saved[pair_key] = now
+        body = {'shadow': shadow.to_dict(now)}
+        self._arming[pair_key] = body
+        try:
+            self.store.save_signal_arming(pair_key, body)
+        except Exception as e:
+            logging.error('could not save the shadow Algo: %s', e)
+
+    def _write_signal(self, row):
+        if self.store is None:
+            return row
+        try:
+            row['id'] = self.store.save_signal(row)
+        except Exception as e:
+            logging.error('could not record the signal: %s', e)
+        return row
+
+    @staticmethod
+    def _shadow_ref(row):
+        """The id the shadow knows an open row's trade by. Rebuilt from
+        the row itself, so it survives a restart without a column."""
+        return f"sig:{row['side']}:{float(row['entered_at']):.3f}"
+
+    def _shadow_position(self, pair, md, row, params, settings):
+        """An open journal row as the Algo reads a position - priced on
+        THIS pass by `_position_levels`, exactly as a live position is,
+        with the margin and ATR it froze at entry. The levels are kept on
+        the row, so the journal shows what the Algo is judging it on."""
+        trade = SimpleNamespace(side=SpreadSide(row['side']),
+                                entry_spread=row.get('entry'),
+                                quantity=row.get('quantity') or 1.0,
+                                spread_units=row.get('units'))
+        lv = self._position_levels(pair, md, trade, params, settings,
+                                   row.get('entry_margin'),
+                                   row.get('entry_atr'))
+        row['break_even'], row['tp'], row['sl'] = \
+            lv['break_even'], lv['tp'], lv['sl']
+        closing = self._closing_spread(md, row['side'])
+        return {'position_id': self._shadow_ref(row), 'side': row['side'],
+                'entry_spread': row.get('entry'),
+                'opened_at': row.get('entered_at'),
+                'break_even': row['break_even'],
+                'tp': row['tp'], 'sl': row['sl'],
+                'net_pnl': signals.net_at(row, closing)}
+
+    def _track_signals(self, pair, md, body, reading, settings, now):
+        """Journal what the Algo decides - with the Algo on or off.
+
+        THE ALGO'S OWN CODE DECIDES. Every row here is a decision of
+        `shadow.ShadowAlgo`: the live Algo's `AlgoSignal`, fed this
+        poll's market, the live desk's gates and the same filters, with
+        the journal's open rows as its positions. Nothing is sent.
+
+        This replaced a COPY of the Algo's rules that did not match the
+        Algo, and the differences were trades: one z off the mid for
+        both sides where the Algo reads each side's executable price; no
+        edge filter while the Algo was on; a new trade on every signal
+        where the Algo holds one; trading through a stale feed. On a
+        live desk it showed dozens of trades in an afternoon in which
+        the real Algo took none.
+
+        A STRETCH is one row: from the moment the Algo is engaged on a
+        side (armed, or confirming) until it lets go. It ends ENTERED,
+        BLOCKED - held back, in the Algo's words - or NO_ENTRY, never
+        confirmed. An entered row is closed by the Algo's own exit.
+        """
+        if not md:
+            return []
+        live = self._signal_store().setdefault(pair.key, [])
+        shadow = self._shadow_for(pair, now)
+        params = algo_module.clean_params(getattr(pair, 'algo_params', None))
+        shadow.retune(params)
+        # ONE BAND. The running Algo's own candles when it is on, so the
+        # journal and the desk read the same z; the analysis band when it
+        # is off - fed from the same MT5 bars, so they converge.
+        candles = self.algos.candles(pair.key) if body is not None else None
+        if candles is None:
+            candles = (reading or {}).get('candles') or self._band(pair)
+        closed = [candles.closed[b] for b in sorted(candles.closed)]
+        stats = candles.stats()
+        gates = self._algo_gates(pair, md)
+        if candles is not self.algos.candles(pair.key):
+            gates['levels'] = self._levels_gate(
+                pair, md, atr_for=lambda n: algofilters.atr(closed, n))
+        if body is not None and body.get('warmup'):
+            # The running Algo's warm-up: the two cannot disagree about
+            # whether the feed has been watched.
+            gates['warmup'] = body['warmup']
+        opened = [r for r in live if r['state'] == signals.OPEN
+                  and r.get('entered_at') is not None]
+        positions = [self._shadow_position(pair, md, r, params, settings)
+                     for r in opened]
+        decided = shadow.step(now, md, stats, candles.closes(), gates,
+                              gates.get('cost'), positions)
+
+        # The chart: this poll's spread, and the z the Algo's own code
+        # read off it.
+        self.tape.observe(pair.key, now, md, decided, params)
+
+        day = self.broker_day()
+        mode = self.algos.mode(pair.key) or 'OFF'
+        episodes = self._episodes.setdefault(pair.key, {})
+        z_of = {'SELL': decided.get('z_sell'), 'BUY': decided.get('z_buy')}
+        armed = decided.get('armed') or {}
+        streak = decided.get('streak') or {}
+        confirm = params['confirm_ticks']
+        changed, new_rows = False, []
+
+        def stretch(side):
+            """The row for the stretch this side is in, opening one."""
+            nonlocal changed
+            episode = episodes.get(side)
+            if episode is None:
+                row = signals.new_signal(
+                    pair.key, signals.ALGO, side, now,
+                    z_of[side] if z_of[side] is not None else 0.0, params,
+                    broker_day=day, threshold=params['entry_z'])
+                row['algo_mode'] = mode
+                row.update(self._leg_identity(pair))
+                # The edge filter's reading as the signal is recorded.
+                # Overwritten by the one it is ENTERED or held back at,
+                # which is the reading that decided it.
+                edge = (decided.get('edge_by_side') or {}).get(side) or {}
+                row['edge_ratio'] = edge.get('ratio')
+                row['edge_required'] = edge.get('required')
+                live.append(self._write_signal(row))
+                new_rows.append(row)
+                episode = episodes[side] = {'row': row}
+                changed = True
+            return episode
+
+        # 1. The Algo's own exits, on the trades it is in.
+        by_ref = {self._shadow_ref(r): r for r in opened}
+        for intent in decided['intents']:
+            if intent['action'] == 'ENTER':
+                continue
+            row = by_ref.get(intent.get('position_id'))
+            if row is None:
+                continue
+            signals.close(row, now, intent.get('reason'),
+                          intent.get('spread'), intent.get('z'))
+            shadow.scored(row.get('net_pnl'))
+            self._write_signal(row)
+            changed = True
+
+        # 2. Each side the Algo is engaged on is one stretch.
+        for side in ('SELL', 'BUY'):
+            engaged = bool(armed.get(side)) or (streak.get(side) or 0) > 0
+            if engaged:
+                episode = stretch(side)
+                row = episode.get('row')
+                if row is None or row['state'] != signals.ARMED:
+                    continue
+                if decided.get('blocked_side') == side:
+                    if row.get('block_reason') != decided.get('blocked'):
+                        signals.note_block(row, decided.get('blocked'),
+                                           decided.get('blocked_edge'))
+                        self._write_signal(row)
+                        changed = True
+                elif decided.get('state') in ('IN_POSITION', 'EXIT') and \
+                        (streak.get(side) or 0) >= confirm and \
+                        not row.get('block_reason'):
+                    # Confirmed while the Algo was already in a trade. It
+                    # holds one at a time, so this one is not taken.
+                    signals.note_block(row, 'one trade at a time - the '
+                                            'Algo was already in a trade')
+                    self._write_signal(row)
+                    changed = True
+
+        # 3. The Algo's entries.
+        for intent in decided['intents']:
+            if intent['action'] != 'ENTER':
+                continue
+            side = intent['side']
+            episode = stretch(side)
+            row = episode.get('row')
+            if row is None or row['state'] != signals.ARMED:
+                continue
+            row['block_reason'] = None        # it cleared: the entry counts
+            # Entered at the price the Algo's intent names - its own
+            # executable side - and sized as its order would be. Margin
+            # and ATR are FROZEN here, as a live position freezes them,
+            # and the levels come from the same arithmetic a live
+            # position's do (`_position_levels`).
+            qty = params['algo_qty']
+            one = sizing.spread_units(pair.clip_lots_b,
+                                      (pair.meta_b or {}).get('contract_size'))
+            side_params = algo_module.for_side(params, side)
+            row['entry_margin'] = (self.margin_detail(pair) or {}).get('money')
+            row['entry_atr'] = (
+                algofilters.atr(closed, side_params['atr_period'])
+                if 'ATR' in (side_params['stop_mode'],
+                             side_params['target_mode']) else None)
+            trade = SimpleNamespace(side=SpreadSide(side),
+                                    entry_spread=intent.get('spread'),
+                                    quantity=qty,
+                                    spread_units=(one * qty) if one else None)
+            lv = self._position_levels(pair, md, trade, params, settings,
+                                       row['entry_margin'], row['entry_atr'])
+            signals.enter(row, now, intent.get('z'),
+                          {'entry': intent.get('spread'),
+                           'break_even': lv['break_even'],
+                           'tp': lv['tp'], 'sl': lv['sl']},
+                          trade.spread_units, self._entry_legs(md, side),
+                          qty)
+            edge = intent.get('edge') or {}
+            row['edge_ratio'] = edge.get('ratio')
+            row['edge_required'] = edge.get('required')
+            self._write_signal(row)
+            # The arming is spent by the entry it gave; the stretch is
+            # over for the journal even while the spread sits in it.
+            episode['row'] = None
+            changed = True
+
+        # 4. A stretch the Algo has let go of without entering.
+        for side in ('SELL', 'BUY'):
+            engaged = bool(armed.get(side)) or (streak.get(side) or 0) > 0
+            episode = episodes.get(side)
+            if engaged or episode is None:
+                continue
+            row = episode.get('row')
+            del episodes[side]
+            if row is None or row['state'] != signals.ARMED:
+                continue
+            signals.settle_unentered(row, now, self._why_not_entered(params))
+            self._write_signal(row)
+            changed = True
+
+        # 5. Mark what is open: its best, its worst, whether it came back.
+        for row in opened:
+            if row['state'] != signals.OPEN:
+                continue
+            closing = self._closing_spread(md, row['side'])
+            # The z of the price it would close at - the Algo's own
+            # reading for that side.
+            z_close = z_of['BUY'] if row['side'] == 'SELL' else z_of['SELL']
+            if signals.mark(row, closing, z_close, now):
+                self._write_signal(row)
+                changed = True
+
+        self._signals[pair.key] = [r for r in live
+                                   if r['state'] != signals.CLOSED]
+        self._save_shadow_algo(pair.key, now, force=changed)
+        return new_rows
+
+    def _leg_identity(self, pair):
+        """Each leg's account, by the name it has on the Exchanges page,
+        and the broker that account is at - the terminal's own word for
+        it (its company, else its server), read live. None, not a guess,
+        when the terminal could not be read."""
+        out = {}
+        for leg, account in (('a', pair.account_a), ('b', pair.account_b)):
+            info = self.account_info(account) or {}
+            if not isinstance(info, dict):
+                info = getattr(info, '_asdict', lambda: {})()
+            broker = info.get('company') or info.get('server')
+            if not broker:
+                configured = self.config.accounts.get(account)
+                broker = getattr(configured, 'server', None)
+            out[f'leg_{leg}_account'] = account
+            out[f'leg_{leg}_broker'] = broker or None
+        return out
+
+    @staticmethod
+    def _why_not_entered(params):
+        """Why a stretch nothing refused was never entered, in the
+        Algo's terms."""
+        confirm = params['confirm_ticks']
+        needs = (f'{confirm} fresh prices in a row' if confirm > 1
+                 else 'a fresh price')
+        if params['reentry_on']:
+            back_at = params['entry_z'] - params['reentry_back']
+            floor = back_at * (1.0 - params['reentry_window_pct'] / 100.0)
+            return (f'came back through the window ({back_at:.2f}\u03c3 to '
+                    f'{floor:.2f}\u03c3) before {needs} confirmed it')
+        return (f'fell back inside {params["entry_z"]:.2f}\u03c3 before '
+                f'{needs} confirmed it')
+
+    @staticmethod
+    def _closing_spread(md, side):
+        """The spread a position on `side` would CLOSE at — the
+        opposite executable side, the same convention the ladder, the
+        mark and the slippage report use."""
+        if not md or side not in ('BUY', 'SELL'):
+            return None
+        return executable_spread(md, SpreadSide(side), closing=True)
+
+    @staticmethod
+    def _entry_legs(md, side):
+        """Each leg's executable price for an entry on `side`.
+
+        The spread is `B - beta x A`: selling it sells B and buys A, so
+        B crosses the bid and A the offer. Buying it is the mirror.
+        Unreadable stays None - a leg priced at 0 reads as a fill.
+        """
+        if not md or side not in ('BUY', 'SELL'):
+            return {'leg_a_side': None, 'leg_a_entry': None,
+                    'leg_b_side': None, 'leg_b_entry': None}
+        a_side = 'SELL' if side == 'BUY' else 'BUY'
+        b_side = side
+        return {
+            'leg_a_side': a_side,
+            'leg_a_entry': md.get('leg_a_bid' if a_side == 'SELL'
+                                  else 'leg_a_ask'),
+            'leg_b_side': b_side,
+            'leg_b_entry': md.get('leg_b_bid' if b_side == 'SELL'
+                                  else 'leg_b_ask')}
 
     def reset_excursions(self, pair_key=None):
         """Zero the z-score excursion counters (one ladder, or all)."""
@@ -1199,6 +1736,61 @@ class Coordinator:
             logging.exception('[ALGO %s] skipped this pass: %s', pair.key, e)
             return None
 
+    def _position_levels(self, pair, md, position, ladder_params,
+                         ladder_settings, margin, atr):
+        """The break-even, take-profit and stop the Algo judges ONE
+        position against, and the setting behind each.
+
+        One function for the live Algo's real positions and for the
+        signal journal's shadow trades, so the two are priced by the
+        same arithmetic. They were priced by two once, and with "TP %
+        of margin" at 0 the live position's target was break-even while
+        the journal's was none at all - its trade never closed, and the
+        shadow, holding it, refused the next signal.
+
+        `margin` and `atr` are the ones frozen at entry; a position-like
+        object needs `side`, `entry_spread`, `quantity`, `spread_units`.
+        """
+        nights = float(ladder_settings.get('BREAK_EVEN_NIGHTS', 0.0) or 0.0)
+        # THIS position's side's exits: the ladder's, with the side's
+        # own values over them where it has any.
+        params = algo_module.for_side(ladder_params, position.side)
+        settings = ladder_settings
+        if params['tp_pct'] is not None:
+            settings = dict(ladder_settings,
+                            TP_TARGET_PCT_OF_MARGIN=params['tp_pct'])
+        pct = settings.get('TP_TARGET_PCT_OF_MARGIN')
+        levels = takeprofit.for_position(
+            position, md, pair, settings, margin, nights=nights,
+            carry_for=self.holding_carry(pair, position.side.value,
+                                         nights)) or {}
+        tp = levels.get('tp')
+        if pct and not levels.get('target_points'):
+            # A target was asked for and could not be priced (no
+            # margin from the terminals yet). Break-even is not the
+            # target, so no profit exit is signalled on it.
+            tp = None
+        be = levels.get('break_even')
+        stop = self._algo_stop_points(
+            pair, position.quantity or 1.0,
+            takeprofit.one_spread_units(position), margin, params=params)
+        if params['stop_mode'] == 'ATR':
+            # A multiple of the ATR at entry; unmeasured stays
+            # unmeasured - never a stop placed on nothing.
+            stop = (params['atr_stop_mult'] * atr
+                    if params['stop_loss_on'] and atr else None)
+        if params['target_mode'] == 'ATR':
+            tp = None if not atr or be is None else (
+                be + params['atr_target_mult'] * atr
+                if position.side is SpreadSide.BUY
+                else be - params['atr_target_mult'] * atr)
+        sl = None
+        if stop is not None and be is not None:
+            sl = be - stop if position.side is SpreadSide.BUY \
+                else be + stop
+        return {'break_even': be, 'tp': tp, 'sl': sl, 'stop': stop,
+                'pct': pct, 'settings': settings, 'params': params}
+
     def _algo_positions(self, pair, md):
         """This ladder's open positions as the Algo reads them: each with
         the break-even and take-profit the Exit panel shows for it."""
@@ -1207,47 +1799,16 @@ class Coordinator:
         ladder_params = algo_module.clean_params(pair.algo_params)
         rows = []
         for position in self.book.positions(pair.key):
-            # THIS position's side's exits: the ladder's, with the side's
-            # own values over them where it has any.
             params = algo_module.for_side(ladder_params, position.side)
-            settings = ladder_settings
-            if params['tp_pct'] is not None:
-                settings = dict(ladder_settings,
-                                TP_TARGET_PCT_OF_MARGIN=params['tp_pct'])
-            pct = settings.get('TP_TARGET_PCT_OF_MARGIN')
             margin = self.entry_margin(pair, position)
-            levels = takeprofit.for_position(
-                position, md, pair, settings, margin, nights=nights,
-                carry_for=self.holding_carry(pair, position.side.value,
-                                             nights)) or {}
-            tp = levels.get('tp')
-            if pct and not levels.get('target_points'):
-                # A target was asked for and could not be priced (no
-                # margin from the terminals yet). Break-even is not the
-                # target, so no profit exit is signalled on it.
-                tp = None
-            _gross, net_pnl, _closing = mark_position(position, md, settings)
-            be = levels.get('break_even')
             atr = None
             if 'ATR' in (params['stop_mode'], params['target_mode']):
                 atr = self.entry_atr(pair, position)
-            stop = self._algo_stop_points(
-                pair, position.quantity or 1.0,
-                takeprofit.one_spread_units(position), margin, params=params)
-            if params['stop_mode'] == 'ATR':
-                # A multiple of the ATR at entry; unmeasured stays
-                # unmeasured - never a stop placed on nothing.
-                stop = (params['atr_stop_mult'] * atr
-                        if params['stop_loss_on'] and atr else None)
-            if params['target_mode'] == 'ATR':
-                tp = None if not atr or be is None else (
-                    be + params['atr_target_mult'] * atr
-                    if position.side is SpreadSide.BUY
-                    else be - params['atr_target_mult'] * atr)
-            sl = None
-            if stop is not None and be is not None:
-                sl = be - stop if position.side is SpreadSide.BUY \
-                    else be + stop
+            lv = self._position_levels(pair, md, position, ladder_params,
+                                       ladder_settings, margin, atr)
+            settings, pct, stop = lv['settings'], lv['pct'], lv['stop']
+            be, tp, sl = lv['break_even'], lv['tp'], lv['sl']
+            _gross, net_pnl, _closing = mark_position(position, md, settings)
             # What each level is worth to the WHOLE position, net: break
             # even is after every cost, so the distance from it times k
             # is the net P&L closing there. Unpriced stays None.
@@ -1274,6 +1835,16 @@ class Coordinator:
                          # THIS side's multiples, for the panel's note.
                          'atr_stop_mult': params['atr_stop_mult'],
                          'atr_target_mult': params['atr_target_mult'],
+                         # ...and the settings each level came OUT of,
+                         # so the Analysis tab can say which number in
+                         # the settings put the stop where it was.
+                         'tp_pct': pct,
+                         'stop_loss_pct': (params['stop_loss_pct']
+                                           if params['stop_loss_on']
+                                           else None),
+                         'entry_margin': margin,
+                         'stop_points': stop,
+                         'spread_units': units,
                          **self._leg_marks(position, md)})
         return rows
 
@@ -1322,6 +1893,86 @@ class Coordinator:
             out[f'leg_{leg}_side'] = side
             out[f'leg_{leg}_entry'] = entry
             out[f'leg_{leg}_now'] = now
+        return out
+
+    #: How far back a derived history reaches by default.
+    BACKFILL_DAYS = 30
+
+    def backfill_signals(self, pair_key=None, days=None):
+        """DERIVE the signals of the last `days` from MT5's own bars.
+
+        The live track only measures forward: it starts empty and fills
+        from the moment it is deployed, so it can say nothing about a
+        day that has already gone. This replays the ladder's own
+        settings back over MT5's history through `backtest.run` — the
+        same `algo.AlgoSignal` the live Algo runs, fed candles instead
+        of ticks — and writes what it would have traded as signal rows
+        stamped REPLAY.
+
+        It is a reading, not a measurement, and the difference is on
+        the screen: one look per candle cannot see a stop touched and
+        recovered inside one, and the bid-ask is today's width held
+        constant. Re-running replaces the derived rows rather than
+        adding a second copy of every trade; live rows are never
+        touched.
+
+        Sends nothing. It is `algo_backtest` with its answer written
+        down instead of drawn once.
+        """
+        days = max(1, min(int(days or self.BACKFILL_DAYS), 90))
+        keys = [pair_key] if pair_key else list(self.config.pairs)
+        out = {'ok': True, 'days': days, 'pairs': {}, 'written': 0,
+               'caveats': [], 'held': {}}
+        if self.store is None:
+            return {'ok': False, 'reason': 'no database to write to'}
+        for key in keys:
+            answer = self.algo_backtest(key, days=days, compare=False)
+            if not answer.get('ok'):
+                out['pairs'][key] = {'ok': False,
+                                     'reason': answer.get('reason')}
+                continue
+            pair = self.config.pairs[key]
+            params = algo_module.clean_params(pair.algo_params)
+            units = (self._algo_cost(pair).get('k') or 0.0) \
+                * params['algo_qty']
+            offset = self._offset_of(pair.account_a)
+            # The accounts and brokers the replay was read from: MT5's
+            # bars off these two terminals, as they are now.
+            legs = self._leg_identity(pair)
+            rows = []
+            for trade in answer.get('trades') or ():
+                opened = trade.get('opened_at')
+                row = signals.from_replay(
+                    trade, key, params,
+                    broker_day=backtest._broker_day(opened, offset),
+                    units=units or None)
+                row.update(legs)
+                rows.append(row)
+            try:
+                dropped = self.store.drop_replayed(key)
+                for row in rows:
+                    self.store.save_signal(row)
+            except Exception as e:
+                logging.error('[BACKFILL %s] could not write: %s', key, e)
+                out['pairs'][key] = {'ok': False, 'reason': str(e)}
+                continue
+            # WHY nothing was derived is the whole answer when
+            # nothing was: the replay ran, the Algo armed, and every
+            # entry was refused for a reason `backtest.run` counted.
+            # Dropping that dict left the screen saying '0 derived'
+            # with no way to tell a filter from a broken replay.
+            held = {str(reason): int(count) for reason, count
+                    in (answer.get('held') or {}).items()}
+            out['pairs'][key] = {'ok': True, 'derived': len(rows),
+                                 'replaced': dropped,
+                                 'candles': answer.get('summary', {}).get(
+                                     'candles'),
+                                 'held': held,
+                                 'note': answer.get('note')}
+            for reason, count in held.items():
+                out['held'][reason] = out['held'].get(reason, 0) + count
+            out['written'] += len(rows)
+            out['caveats'] = answer.get('caveats') or out['caveats']
         return out
 
     def algo_backtest(self, pair_key, days=5, compare=True):
@@ -1428,15 +2079,17 @@ class Coordinator:
                 'cost': self._algo_cost(pair), 'size': size,
                 'session': session, 'levels': self._levels_gate(pair, md)}
 
-    def _levels_gate(self, pair, md):
+    def _levels_gate(self, pair, md, atr_for=None):
         """The levels check for an entry, per SIDE when the sides have
         their own exits: {'SELL': reason, 'BUY': reason}. One reason (or
-        None) when both sides would get the same answer."""
-        sell = self._levels_check(pair, md, 'SELL')
-        buy = self._levels_check(pair, md, 'BUY')
+        None) when both sides would get the same answer. `atr_for`
+        (period -> ATR) reads the ATR off other candles than the running
+        Algo's - the signal journal's, with the Algo off."""
+        sell = self._levels_check(pair, md, 'SELL', atr_for)
+        buy = self._levels_check(pair, md, 'BUY', atr_for)
         return sell if sell == buy else {'SELL': sell, 'BUY': buy}
 
-    def _levels_check(self, pair, md, side=None):
+    def _levels_check(self, pair, md, side=None, atr_for=None):
         """Why the Algo's stop or target cannot be set for an entry NOW,
         in words, or None.
 
@@ -1452,7 +2105,8 @@ class Coordinator:
             params = algo_module.for_side(params, side)
         atr = None
         if 'ATR' in (params['stop_mode'], params['target_mode']):
-            atr = self.algos.atr(pair.key, params['atr_period'])
+            atr = (atr_for(params['atr_period']) if atr_for is not None
+                   else self.algos.atr(pair.key, params['atr_period']))
             if not atr:
                 return (f'levels: ATR({params["atr_period"]}) not measured '
                         f'yet - it needs {params["atr_period"] + 1} closed '
@@ -2913,6 +3567,13 @@ class Coordinator:
         with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(payload, f, default=str)
         atomicfile.replace(tmp, self.status_path)
+        try:
+            self.tape.write(self.chart_path, self.clock(),
+                            keys=list(self.config.pairs))
+        except Exception as e:
+            # The chart is a reading. A failure leaves the last file
+            # standing and never stops the screen being published.
+            logging.warning('could not write the chart file: %s', e)
 
     def serve_commands(self):
         """Drain clicks on their OWN thread, far faster than the poll.

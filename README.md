@@ -281,6 +281,85 @@ as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
   trades (10), losses in a row (3), and a daily loss limit (off until set). A
   refused entry waits out the cooldown; a failed exit is retried every 5s.
 
+## Telegram — the desk from a phone
+
+Optional. With a bot token in `.env` the web process also runs a Telegram
+bot, written the way Stat_Arb_W3 writes its own: a heading with the time
+(`OPEN POSITIONS  ·  14:02:11 UTC`), then a bold label and its value in a box
+for every figure, plain words, no icons and no monospace blocks. `/start` is
+the menu, with buttons and the commands (tap one to run it). The same
+commands are registered as Telegram's own menu: type `/` and each one is
+listed with what it does.
+
+- `/status` (or `/dashboard`): everything to watch on one screen - the system (engine,
+  broker time, cutoff, each account), then per ladder its feed, prices, Algo
+  mode and state, warm-up, stretch, entry and what is armed, filters, the
+  open position with TP / SL / BE, today, and the last blocked signal.
+- `/positions`: each open position in full - size and lots per leg,
+  notional, margin and leverage, entry and now per leg (with % change),
+  entry and current spread with z, the move with or against, net P&L, the
+  BE / TP / SL levels and what each is worth, age, slippage. **Close all**
+  per ladder.
+- `/trades`: the five most recent closed trades in full - exit reason,
+  time, duration, Algo or manual, each leg in, the spread in and out with z,
+  net P&L and the running total.
+- `/pnl`: closed trades, win rate, average win and loss, best and worst,
+  today's net, all-time net, max drawdown, and what is open now.
+- `/balance`: each account's balance, equity, margin used and free, margin
+  level, floating P&L.
+- `/settings`: every setting of every ladder with the key `/set` takes;
+  `/set <key> <value>` (or `/set <ladder> <key> <value>` with more than one
+  ladder) changes one, `/set mode off | dry | live` switches the Algo. The
+  **Settings** button does the same by sections: Algo mode, Entry, Filters,
+  Exits, Daily limits, Session and costs. A ladder's hours are
+  `/set session_open 01:05`, `/set session_close 23:45` and
+  `/set break 23:55-01:05` (or `none`), broker time.
+- `/alerts` on / off, `/ping`, and **KILL ALL**.
+
+Every message is laid out row for row as Stat_Arb_W3's bot lays it out
+- a bold label, the value in code type, blank lines between the same
+groups, W3's labels (Orders at / Filled at / Latency, Gross PnL / Est.
+Fees / Net PnL, Spread SD, Spread Mean, Half-Life, Regime) and W3's
+number styles (`$+3.85`, `-$0.40`, `$4,131.0300`, z to four places) -
+with the desk's own rows (the exits it holds, slippage, the analysis)
+after W3's, and the desk's words for a side (H to L / L to H). No
+monospace block anywhere.
+
+Alerts go to every allowed user, and only for what needs a person:
+**TRADE ENTRY** when a position opens (legs, notional, margin, entry spread
+and z, TP / SL / BE and what each is worth), **TRADE EXIT** when it closes
+(each leg in and out, the spread both ways, gross, commission, net,
+slippage, then an ANALYSIS: outcome, peak and trough with when, how much of
+the best it kept, hold time, z path), **ORDER FAILED / ORDER REFUSED** with
+the broker's words, **SYSTEM ERROR** (the engine stalling, an account
+dropping out), **ERROR**, **RECONCILER**, **FEED WARNING / RESTORED** (a
+stale or jumping price that lasts 20 s), **DAILY LIMIT**, **ALGO MODE**
+when a ladder goes into or out of LIVE (a restart included), and **END OF
+DAY** at each ladder's close. Signals - taken or held back - are not sent:
+in LIVE the trade is the news, in a dry run nothing happened, and the desk
+and the Dashboard keep every one.
+
+Every action asks Confirm / Cancel first; LIVE asks twice. Buttons expire
+after ten minutes. It goes through the web app's own routes, so every
+check and refusal is the one the screen gets — and it can switch, save
+and CLOSE, never open a position.
+
+Setting it up:
+
+1. In Telegram, talk to **@BotFather**, send `/newbot`, and copy the
+   token it gives you.
+2. Get your numeric user id from **@userinfobot**.
+3. In `.env` (never in `config.json`):
+   ```
+   TELEGRAM_BOT_TOKEN="123456:ABC..."
+   TELEGRAM_ALLOWED_USERS="111111111, 222222222"
+   ```
+4. Restart `start.py`, open your bot in Telegram and send `/start`.
+
+Only the listed ids get an answer; anyone else is ignored and their id
+is written to the log once, so a colleague can be added by reading it.
+The bot connects OUT to Telegram — no port is opened on the machine.
+
 ## One click is one order
 
 That is the product, so it is the default and it is fast:
