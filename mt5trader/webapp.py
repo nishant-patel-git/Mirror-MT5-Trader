@@ -311,20 +311,21 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         body = read_json(chart_path(status_path)) or {}
         series = (body.get('pairs') or {}).get(key)
         if series is None:
-            return jsonify({'ok': True, 'points': [], 'minutes': minutes,
+            return jsonify({'ok': True, 'candles': [], 'minutes': minutes,
                             'note': 'no prices for this ladder yet \u2014 '
                                     'the chart fills while the engine '
                                     'runs'})
         at = body.get('at')
-        points = series.get('points') or []
+        candles = series.get('candles') or []
         if at is not None:
             since = float(at) - minutes * 60.0
-            points = [p for p in points if p.get('t', 0) >= since]
-        spreads = [p['s'] for p in points if p.get('s') is not None]
+            candles = [c for c in candles if c.get('t', 0) >= since]
+        lows = [c['l'] for c in candles if c.get('l') is not None]
+        highs = [c['h'] for c in candles if c.get('h') is not None]
         return jsonify(dict(series, ok=True, at=at, minutes=minutes,
-                            points=points,
-                            spread_min=min(spreads) if spreads else None,
-                            spread_max=max(spreads) if spreads else None))
+                            candles=candles,
+                            spread_min=min(lows) if lows else None,
+                            spread_max=max(highs) if highs else None))
 
     @app.get('/api/config')
     def api_config():

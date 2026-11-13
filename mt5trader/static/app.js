@@ -1008,38 +1008,61 @@
     return two(d.getHours()) + ':' + two(d.getMinutes());
   }
 
-  //: The colours of Arrow-statarb's charts, which the desk asked for.
-  var CHART = {z: '#0d6efd', zFill: 'rgba(13,110,253,.10)',
-               up: '#dc3545', down: '#198754', stop: '#6c757d',
-               spread: '#6f42c1', spreadFill: 'rgba(111,66,193,.10)',
+  //: Candle colours: up green, down red, the house style of every
+  //: chart a trader already reads; the entry lines keep Arrow-statarb's.
+  var CHART = {up: '#198754', down: '#dc3545', stop: '#6c757d',
                grid: 'rgba(128,128,128,.25)', text: '#6c757d'};
 
-  function svgPlot(box, points, value, lines, colours, digits) {
-    /* One plot: `points` along x by time, `value(p)` up the y axis,
-     * filled under the line, with horizontal `lines` [{y, colour,
-     * dash, label}]. Drawn at the box's own pixel size, so the labels
-     * are crisp and never stretched. */
+  //: The candle each range is drawn in: 45 to 60 candles whatever the
+  //: range, every one a whole number of the engine's 10-second candles.
+  var CANDLE_SEC = {15: 20, 30: 30, 60: 60, 120: 120};
+
+  function mergeCandles(fine, seconds, prefix) {
+    /* The engine's 10-second candles, merged into `seconds`-wide ones:
+     * the first open, the highest high, the lowest low, the last close.
+     * `prefix` '' is the spread, 'z' the Algo's z. */
+    var out = [], current = null;
+    fine.forEach(function (c) {
+      var o = c[prefix + 'o'];
+      if (o === null || o === undefined) { return; }
+      var start = c.t - c.t % seconds;
+      if (!current || current.t !== start) {
+        current = {t: start, o: o, h: c[prefix + 'h'], l: c[prefix + 'l'],
+                   c: c[prefix + 'c']};
+        out.push(current);
+        return;
+      }
+      current.h = Math.max(current.h, c[prefix + 'h']);
+      current.l = Math.min(current.l, c[prefix + 'l']);
+      current.c = c[prefix + 'c'];
+    });
+    return out;
+  }
+
+  function svgCandles(box, candles, seconds, lines, digits, t0, t1) {
+    /* One candlestick plot, at the box's own pixel size so the labels
+     * are crisp. `lines` [{y, colour, dash, cls}] are drawn across it;
+     * the y scale always includes them, so the entry and stop are on
+     * the chart even on a quiet hour. */
     var w = Math.max(box.clientWidth, 200);
     var h = Math.max(box.clientHeight, 120);
     var left = 52, right = 8, top = 8, bottom = 18;
-    var shown = points.filter(function (p) {
-      return value(p) !== null && value(p) !== undefined;
-    });
-    var ys = shown.map(value);
+    var ys = [];
+    candles.forEach(function (c) { ys.push(c.h, c.l); });
     lines.forEach(function (line) { ys.push(line.y); });
     var lo = Math.min.apply(null, ys), hi = Math.max.apply(null, ys);
     if (!isFinite(lo) || !isFinite(hi)) { lo = -1; hi = 1; }
     if (hi - lo < 1e-9) { hi += 1; lo -= 1; }
     var pad = (hi - lo) * 0.08;
     lo -= pad; hi += pad;
-    var t0 = shown.length ? shown[0].t : 0;
-    var t1 = shown.length ? shown[shown.length - 1].t : 1;
-    if (t1 - t0 < 1e-9) { t1 = t0 + 1; }
-    function X(t) { return left + (t - t0) / (t1 - t0) * (w - left - right); }
+    if (t1 - t0 < seconds) { t1 = t0 + seconds; }
+    var plotW = w - left - right;
+    function X(t) { return left + (t - t0) / (t1 - t0) * plotW; }
     function Y(v) { return top + (hi - v) / (hi - lo) * (h - top - bottom); }
+    var slot = seconds / (t1 - t0) * plotW;
+    var body = Math.max(1, Math.min(14, slot * 0.7));
     var svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' +
       w + ' ' + h + '" xmlns="http://www.w3.org/2000/svg">';
-    // The y axis: five values, so the eye has a scale.
     for (var i = 0; i <= 4; i++) {
       var v = lo + (hi - lo) * i / 4;
       svg += '<line x1="' + left + '" x2="' + (w - right) + '" y1="' +
@@ -1055,23 +1078,25 @@
         '" y2="' + Y(line.y).toFixed(1) + '" stroke="' + line.colour +
         '" stroke-width="1" stroke-dasharray="' + line.dash + '"/>';
     });
-    if (shown.length) {
-      var path = shown.map(function (p, k) {
-        return (k ? 'L' : 'M') + X(p.t).toFixed(1) + ' ' +
-          Y(value(p)).toFixed(1);
-      }).join(' ');
-      var base = Y(Math.max(lo, Math.min(hi, colours.base)));
-      svg += '<path d="' + path + ' L' + X(t1).toFixed(1) + ' ' +
-        base.toFixed(1) + ' L' + X(t0).toFixed(1) + ' ' + base.toFixed(1) +
-        ' Z" fill="' + colours.fill + '" stroke="none"/>' +
-        '<path class="cw-line" d="' + path + '" fill="none" stroke="' +
-        colours.line + '" stroke-width="2" stroke-linejoin="round"/>';
-      svg += '<text x="' + left + '" y="' + (h - 4) + '" font-size="10" ' +
-        'fill="' + CHART.text + '">' + chartClock(t0) + '</text>' +
-        '<text x="' + (w - right) + '" y="' + (h - 4) + '" font-size="10" ' +
-        'text-anchor="end" fill="' + CHART.text + '">' + chartClock(t1) +
-        '</text>';
-    }
+    candles.forEach(function (c) {
+      var up = c.c >= c.o;
+      var colour = up ? CHART.up : CHART.down;
+      var x = X(c.t + seconds / 2);
+      var yTop = Y(Math.max(c.o, c.c)), yBot = Y(Math.min(c.o, c.c));
+      svg += '<g class="cw-candle ' + (up ? 'up' : 'down') + '">' +
+        '<line x1="' + x.toFixed(1) + '" x2="' + x.toFixed(1) + '" y1="' +
+        Y(c.h).toFixed(1) + '" y2="' + Y(c.l).toFixed(1) + '" stroke="' +
+        colour + '" stroke-width="1"/>' +
+        '<rect x="' + (x - body / 2).toFixed(1) + '" y="' + yTop.toFixed(1) +
+        '" width="' + body.toFixed(1) + '" height="' +
+        Math.max(1, yBot - yTop).toFixed(1) + '" fill="' + colour +
+        '" stroke="' + colour + '"/></g>';
+    });
+    svg += '<text x="' + left + '" y="' + (h - 4) + '" font-size="10" ' +
+      'fill="' + CHART.text + '">' + chartClock(t0) + '</text>' +
+      '<text x="' + (w - right) + '" y="' + (h - 4) + '" font-size="10" ' +
+      'text-anchor="end" fill="' + CHART.text + '">' + chartClock(t1) +
+      '</text>';
     return svg + '</svg>';
   }
 
@@ -1081,15 +1106,20 @@
     var sBox = node.querySelector('.cw-spread');
     // Not redrawn three times a second for nothing: only when the data
     // or the room it is drawn in has changed.
-    var stamp = body ? [body.at, body.minutes, (body.points || []).length,
+    var fine = (body && body.candles) || [];
+    var stamp = body ? [body.at, body.minutes, fine.length,
                         zBox.clientWidth, zBox.clientHeight,
                         sBox.clientWidth, sBox.clientHeight].join('|') : '';
     if (node.dataset.drawn === stamp && stamp) { return; }
     node.dataset.drawn = stamp;
-    var points = (body && body.points) || [];
     var note = node.querySelector('.cw-note');
     var nowBox = node.querySelector('.cw-now');
-    if (!points.length) {
+    var minutes = (body && body.minutes) || state.chartMinutes[key] || 60;
+    var seconds = CANDLE_SEC[minutes] || Math.max(10, minutes);
+    node.querySelector('.cw-size').textContent =
+      seconds < 60 ? seconds + 's candles' : (seconds / 60) + 'm candles';
+    var spread = mergeCandles(fine, seconds, '');
+    if (!spread.length) {
       var waiting = '<div class="cw-empty">Waiting for price data…</div>';
       zBox.innerHTML = waiting;
       sBox.innerHTML = waiting;
@@ -1099,12 +1129,18 @@
       node.querySelector('.cw-max').textContent = 'Max: —';
       return;
     }
+    var z = mergeCandles(fine, seconds, 'z');
+    // ONE time axis for both, ending now: the two charts line up
+    // candle for candle, and an empty stretch on the right is the feed
+    // having said nothing, not the chart stopping early.
+    var t1 = Math.max(body.at || 0, fine[fine.length - 1].t + 10);
+    var t0 = t1 - minutes * 60;
     var entry = body.entry_z, stop = body.stop_z;
     var zLines = [{y: 0, colour: CHART.grid, dash: '0'}];
     if (entry !== null && entry !== undefined) {
-      zLines.push({y: entry, colour: CHART.up, dash: '5 5',
+      zLines.push({y: entry, colour: '#dc3545', dash: '5 5',
                    cls: 'cw-entry-up'});
-      zLines.push({y: -entry, colour: CHART.down, dash: '5 5',
+      zLines.push({y: -entry, colour: '#198754', dash: '5 5',
                    cls: 'cw-entry-down'});
     }
     if (stop !== null && stop !== undefined) {
@@ -1115,28 +1151,26 @@
     }
     node.querySelector('.cw-key-stop').hidden =
       stop === null || stop === undefined;
-    zBox.innerHTML = svgPlot(zBox, points, function (p) { return p.z; },
-                             zLines, {line: CHART.z, fill: CHART.zFill,
-                                      base: 0}, 2);
-    var spreads = points.map(function (p) { return p.s; });
-    sBox.innerHTML = svgPlot(sBox, points, function (p) { return p.s; },
-                             [], {line: CHART.spread,
-                                  fill: CHART.spreadFill,
-                                  base: Math.min.apply(null, spreads)}, 4);
+    zBox.innerHTML = z.length
+      ? svgCandles(zBox, z, seconds, zLines, 2, t0, t1)
+      : '<div class="cw-empty">no z yet — the Algo’s band is ' +
+        'still filling</div>';
+    sBox.innerHTML = svgCandles(sBox, spread, seconds, [], 4, t0, t1);
     node.querySelector('.cw-min').textContent = 'Min: ' +
       fmt(body.spread_min, 4);
     node.querySelector('.cw-max').textContent = 'Max: ' +
       fmt(body.spread_max, 4);
-    var last = points[points.length - 1];
-    nowBox.textContent = 'now: z ' + (last.z === null ? '—'
-      : (last.z > 0 ? '+' : '') + last.z.toFixed(2)) +
-      ' · spread ' + fmt(last.s, 4);
+    var last = spread[spread.length - 1];
+    var lastZ = z.length ? z[z.length - 1].c : null;
+    nowBox.textContent = 'now: z ' + (lastZ === null ? '—'
+      : (lastZ > 0 ? '+' : '') + lastZ.toFixed(2)) +
+      ' · spread ' + fmt(last.c, 4);
     note.textContent = body.ready
       ? 'z is the Algo’s own, measured on its candles as it read ' +
         'it at the time; entry ±' + fmt(entry, 2) +
         (stop !== null && stop !== undefined ? ', stop ±' + fmt(stop, 2)
-          : ', z-stop off') + '. A price the jump guard held back is ' +
-        'not drawn.'
+          : ', z-stop off') + '. Every price the engine saw is in a ' +
+        'candle; one the jump guard held back is not.'
       : 'The Algo’s band is still filling (' + (body.count || 0) +
         '/' + (body.needed || '?') + ' candles) — no z until it is; ' +
         'the spread is drawn meanwhile.';
