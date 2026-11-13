@@ -2264,7 +2264,11 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
   margin-left: auto; display: flex; gap: 6px; align-items: center; }
 .window.chartwin .cw-key i { display: inline-block; width: 14px; height: 0;
   border-top: 2px solid; vertical-align: middle; margin-right: 2px; }
-.window.chartwin .cw-key .k-z { border-color: #0d6efd; }
+.window.chartwin .cw-key .k-candle { display: inline-block; width: 5px;
+  height: 10px; vertical-align: middle; margin-right: 1px; }
+.window.chartwin .cw-key .k-candle.up { background: #198754; }
+.window.chartwin .cw-key .k-candle.down { background: #dc3545;
+  margin-right: 3px; }
 .window.chartwin .cw-key .k-up { border-top: 1px dashed #dc3545; }
 .window.chartwin .cw-key .k-down { border-top: 1px dashed #198754; }
 .window.chartwin .cw-key .k-stop { border-top: 1px dotted #6c757d; }

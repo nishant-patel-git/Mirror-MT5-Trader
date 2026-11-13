@@ -1,15 +1,19 @@
-"""The pair chart's series: each ladder's spread and the Algo's z, over
-time.
+"""The pair chart's series: each ladder's spread and the Algo's z, as
+CANDLES.
 
 Observes only. Fed from the poll the signal journal already runs - the
-Algo's OWN z, read off the same candles it trades on - so the line on
-the chart is the number the Algo decides on, not a second reckoning of
-it. Arrow-statarb computed its chart z against the window's own mean;
-here that would draw a z the Algo never saw.
+Algo's OWN z, read off the same candles it trades on - so the chart is
+the number the Algo decides on, not a second reckoning of it.
+Arrow-statarb computed its chart z against the window's own mean; here
+that would draw a z the Algo never saw.
+
+Every poll goes into a 10-second candle - open, high, low, close of the
+spread and of z - so a high or a low the poll saw is never thinned
+away. The screen merges these into the candle size its range wants.
 
 Written to a file of its own beside the status file, every couple of
 seconds: the status file is read several times a second and carrying
-two hours of points in it would make every one of those reads heavy.
+two hours of candles in it would make every one of those reads heavy.
 """
 
 import collections
@@ -18,14 +22,11 @@ import os
 
 from . import atomicfile
 
-#: One point a second at most: the poll is faster than that, and a
-#: chart of two hours does not need more.
-SAMPLE_EVERY_SEC = 1.0
+#: The finest candle kept. The screen's candles are whole multiples of
+#: it (20 s, 30 s, 1 min, 2 min).
+BUCKET_SEC = 10
 #: How much is kept, and how much the screen can ask for.
 KEEP_SEC = 2 * 60 * 60
-#: The most points one pair writes. Two hours at one a second is 7,200;
-#: a chart 600 pixels wide cannot show more than this anyway.
-MAX_POINTS = 720
 #: How often the file is rewritten.
 WRITE_EVERY_SEC = 2.0
 
@@ -41,11 +42,24 @@ def _round(value, places=6):
     return None if value is None else round(float(value), places)
 
 
+def _ohlc(candle, prefix, value):
+    """Fold one reading into a candle's open/high/low/close."""
+    if value is None:
+        return
+    if candle.get(prefix + 'o') is None:
+        candle[prefix + 'o'] = candle[prefix + 'h'] = \
+            candle[prefix + 'l'] = value
+    else:
+        candle[prefix + 'h'] = max(candle[prefix + 'h'], value)
+        candle[prefix + 'l'] = min(candle[prefix + 'l'], value)
+    candle[prefix + 'c'] = value
+
+
 class SpreadTape:
-    def __init__(self, keep_sec=KEEP_SEC, every_sec=SAMPLE_EVERY_SEC):
+    def __init__(self, keep_sec=KEEP_SEC, bucket_sec=BUCKET_SEC):
         self.keep_sec = keep_sec
-        self.every_sec = every_sec
-        self._points = {}            # key -> deque of (t, spread, z)
+        self.bucket_sec = bucket_sec
+        self._candles = {}           # key -> deque of candle dicts
         self._lines = {}             # key -> the Algo's levels now
         self._written = None
 
@@ -54,8 +68,8 @@ class SpreadTape:
         of it (`shadow.ShadowAlgo.step`); `params` its settings.
 
         A price the jump guard is holding back is not drawn: the candles
-        do not take it either, and a spike that was never a price is
-        what makes a chart lie."""
+        the Algo trades on do not take it either, and a wick that was
+        never a price is what makes a chart lie."""
         if not md or md.get('mid_spread') is None or md.get('jump_reason'):
             return
         body = body or {}
@@ -69,38 +83,36 @@ class SpreadTape:
             'ready': bool(body.get('ready')),
             'count': body.get('count'), 'needed': body.get('needed'),
         }
-        points = self._points.setdefault(key, collections.deque())
-        if points and now - points[-1][0] < self.every_sec:
-            return
-        points.append((float(now), float(md['mid_spread']),
-                       _round(body.get('z_mid'), 4)))
-        while points and now - points[0][0] > self.keep_sec:
-            points.popleft()
+        start = float(now) - float(now) % self.bucket_sec
+        candles = self._candles.setdefault(key, collections.deque())
+        if not candles or candles[-1]['t'] != start:
+            candles.append({'t': start})
+        candle = candles[-1]
+        _ohlc(candle, '', float(md['mid_spread']))
+        z = body.get('z_mid')
+        _ohlc(candle, 'z', None if z is None else float(z))
+        while candles and now - candles[0]['t'] > self.keep_sec:
+            candles.popleft()
 
     def forget(self, key):
-        self._points.pop(key, None)
+        self._candles.pop(key, None)
         self._lines.pop(key, None)
 
-    def series(self, key, max_points=MAX_POINTS):
-        """The pair's points, thinned evenly to `max_points` - the last
-        one always kept, so the right-hand end is now."""
-        points = list(self._points.get(key) or ())
-        step = max(1, -(-len(points) // max_points))
-        picked = points[::step]
-        if points and picked[-1] is not points[-1]:
-            picked.append(points[-1])
-        spreads = [p[1] for p in points]
+    def series(self, key):
+        candles = [{name: (_round(value, 6) if name != 't' else value)
+                    for name, value in candle.items()}
+                   for candle in self._candles.get(key) or ()]
         out = dict(self._lines.get(key) or {})
         out.update({
-            'points': [{'t': round(t, 1), 's': round(s, 6), 'z': z}
-                       for t, s, z in picked],
-            'spread_min': min(spreads) if spreads else None,
-            'spread_max': max(spreads) if spreads else None,
+            'bucket_sec': self.bucket_sec,
+            'candles': candles,
+            'spread_min': min((c['l'] for c in candles), default=None),
+            'spread_max': max((c['h'] for c in candles), default=None),
         })
         return out
 
     def snapshot(self, now, keys=None):
-        keys = self._points.keys() if keys is None else keys
+        keys = self._candles.keys() if keys is None else keys
         return {'at': now, 'keep_sec': self.keep_sec,
                 'pairs': {key: self.series(key) for key in keys}}
 

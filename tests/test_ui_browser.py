@@ -5977,12 +5977,21 @@ def test_the_chart_opens_and_closes_from_the_ladder(page):
     page.wait_for_selector('.window.chartwin .cw-z svg', timeout=WAIT)
     win = page.locator('.window.chartwin')
     assert 'Gold basis' in win.locator('.cw-pair').text_content()
-    # The z line, both entry lines and both stop lines.
-    assert win.locator('.cw-z .cw-line').count() == 1
+    # Candles, both entry lines and both stop lines - 2 s points over
+    # 10 minutes at the 1-hour range's 1-minute candles.
+    assert win.locator('.cw-z .cw-candle').count() >= 10
+    assert win.locator('.cw-z .cw-candle.up').count() >= 1
+    assert win.locator('.cw-z .cw-candle.down').count() >= 1
+    assert '1m candles' in win.locator('.cw-size').text_content()
     assert win.locator('.cw-z .cw-entry-up').count() == 1
     assert win.locator('.cw-z .cw-entry-down').count() == 1
     assert win.locator('.cw-z .cw-stop').count() == 2
-    assert win.locator('.cw-spread .cw-line').count() == 1
+    assert win.locator('.cw-spread .cw-candle').count() >= 10
+    # A shorter range draws finer candles.
+    win.locator('.cw-minutes').select_option('15')
+    page.wait_for_function(
+        "document.querySelector('.chartwin .cw-size').textContent"
+        ".indexOf('20s') === 0", timeout=WAIT)
     assert 'Min:' in win.text_content() and 'Max:' in win.text_content()
     assert 'on' in button.get_attribute('class')
     # Closed by the trader: the same button...
