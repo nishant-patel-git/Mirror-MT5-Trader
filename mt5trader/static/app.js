@@ -46,6 +46,7 @@
     // The SIGMA ZONE track's own range. A day by default: the rows are
     // a tick-by-tick record, and a day of them is the usual read.
     zoneDays: 1, zoneDate: '', deriving: false, deriveNote: null,
+    showUnconfirmed: false,
     analysisBt: null, analysisBtDays: 5,
     // What the Reconciler tab's adopt form has selected. IN STATE, not
     // in the DOM: that pane is re-rendered from innerHTML on every
@@ -4799,7 +4800,19 @@
   }
 
   function signalTable(a) {
-    var rows = a.signals || [];
+    var all = a.signals || [];
+    // A stretch the Algo armed on and let go of WITHOUT confirming is
+    // not a signal: it never said enter. Listed, a fast market buried
+    // the few real signals under a page of them - a spread that spikes
+    // past the entry z and is back inside the mean before the third
+    // fresh price arms and lets go many times a day. They carry no
+    // money, so hiding them moves no total; one click shows them.
+    var unconfirmed = all.filter(function (r) {
+      return r.outcome === 'NO_ENTRY';
+    }).length;
+    var rows = state.showUnconfirmed ? all : all.filter(function (r) {
+      return r.outcome !== 'NO_ENTRY';
+    });
     // `name` in `analysisPane` is local to it; this is module level,
     // so it resolves the ladder's name itself rather than reaching for
     // a helper that is not in scope.
@@ -4830,10 +4843,49 @@
     // same columns, in the same order, with the three levels as
     // columns and a running total down the right. A signal that was
     // refused carries no money and must not move that total.
-    var SIGNAL_COLS = 17;
+    var SIGNAL_COLS = 18;
+    // Which account, at which broker, each leg was on when the row was
+    // recorded. A replayed row has none: it never saw a terminal.
+    function legsOf(r) {
+      var parts = [['A', r.leg_a_account, r.leg_a_broker],
+                   ['B', r.leg_b_account, r.leg_b_broker]]
+        .filter(function (p) { return p[1] || p[2]; })
+        .map(function (p) {
+          return p[0] + ': ' + escapeHtml(p[1] || DASH) +
+            (p[2] ? ' \u00b7 ' + escapeHtml(p[2]) : '');
+        });
+      return parts.length ? '<div class="an-legs hint">' +
+        parts.join('<br>') + '</div>' : '';
+    }
+    // The edge filter's reading on the row: what the move back is worth
+    // against what it costs, and what the filter asks for. Said even
+    // with the filter off - it is the number that says whether
+    // switching it on would have changed this row.
+    function edgeOf(r) {
+      if (r.edge_ratio === null || r.edge_ratio === undefined) {
+        return '<td title="the edge could not be priced">' + DASH +
+          (r.edge_on === false ? ' <span class="hint">(off)</span>' : '') +
+          '</td>';
+      }
+      var short = r.edge_required !== null &&
+        r.edge_required !== undefined &&
+        r.edge_ratio < r.edge_required;
+      return '<td class="' + (short ? 'down' : 'up') + '" title="' +
+        'capture \u00f7 cost; the filter needs ' +
+        fmt(r.edge_required, 2) + '\u00d7' +
+        (r.edge_on === false ? ' \u2014 switched OFF on this ladder' : '') +
+        '">' + fmt(r.edge_ratio, 2) + '\u00d7 / ' +
+        fmt(r.edge_required, 2) + '\u00d7' +
+        (r.edge_on === false ? ' <span class="hint">(off)</span>' : '') +
+        '</td>';
+    }
     html += '<table class="an-table"><thead><tr><th>Signalled</th>' +
       '<th class="l">Pair</th><th class="l">Side</th>' +
       '<th class="l">From</th><th>Size</th>' +
+      '<th title="The edge filter when the signal was recorded: what ' +
+      'the move back to the mean is worth against its costs, and what ' +
+      'the filter requires. (off) when the filter is switched off on ' +
+      'that ladder">Edge</th>' +
       '<th>z in → out</th><th>Spread in → out</th>' +
       '<th title="After every cost. The level the other two are ' +
       'measured from">Break-even</th>' +
@@ -4856,7 +4908,7 @@
       var onLevel = r.outcome === 'SL' ? 'sl'
         : (r.outcome === 'TP' ? 'tp' : null);
       html += '<tr><td>' + anClock(r.armed_at) + '</td>' +
-        '<td class="l">' + label(r.pair_key) + '</td>' +
+        '<td class="l">' + label(r.pair_key) + legsOf(r) + '</td>' +
         '<td class="l">' + anSide(r.side) + '</td>' +
         '<td class="l' + (r.source === 'REPLAY' ? ' hint' : '') +
         '" title="' + (r.source === 'REPLAY' ?
@@ -4866,6 +4918,7 @@
         (r.source === 'REPLAY' ? 'replayed' : 'live') + '</td>' +
         '<td>' + (r.quantity === null || r.quantity === undefined ? DASH
                   : qty(r.quantity)) + '</td>' +
+        edgeOf(r) +
         '<td>' + fmt(r.armed_z, 2) + ' → ' + fmt(r.closed_z, 2) +
         '</td>' +
         '<td>' + fmt(r.entry, 4) + ' → ' + fmt(r.exit_spread, 4) +
@@ -4888,8 +4941,20 @@
         '<td class="' + anSign(r.cum_pnl) + '">' + money(r.cum_pnl) +
         '</td></tr>';
     });
-    html += '</tbody></table>' +
-      '<div class="note">Every row is decided by the <b>Algo\u2019s own ' +
+    html += '</tbody></table>';
+    if (unconfirmed) {
+      html += '<div class="hint an-unconfirmed">' +
+        (state.showUnconfirmed
+          ? 'Showing ' + unconfirmed + ' stretch' +
+            (unconfirmed === 1 ? '' : 'es') + ' that never confirmed. ' +
+            '<button class="btn an-toggle-unconfirmed">Hide them</button>'
+          : unconfirmed + ' stretch' + (unconfirmed === 1 ? '' : 'es') +
+            ' armed and let go without confirming ' +
+            '\u2014 not signals, so not listed. ' +
+            '<button class="btn an-toggle-unconfirmed">Show them</button>') +
+        '</div>';
+    }
+    html += '<div class="note">Every row is decided by the <b>Algo\u2019s own ' +
       'code</b> \u2014 its arming, its filters, its one trade at a time, ' +
       'its cooldown, its day\u2019s limits and its exits \u2014 run ' +
       'beside the desk with nothing to send. With the Algo LIVE it ' +
@@ -5372,6 +5437,11 @@
   function onMonitorClick(e) {
     var button = e.target.closest('button');
     if (!button) { return; }
+    if (button.classList.contains('an-toggle-unconfirmed')) {
+      state.showUnconfirmed = !state.showUnconfirmed;
+      render();
+      return;
+    }
     if (button.classList.contains('an-derive')) {
       deriveSignals();
       return;

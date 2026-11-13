@@ -511,7 +511,16 @@ class AlgoSignal:
             del self._exits_live[gone]
 
         fresh = self._fresh_quote(md)
-        self._count(body, fresh)
+        # A price the feed guards hold back - a stale leg, a spread that
+        # jumped - is not one the Algo may ARM on either. Arming is half
+        # the entry: a glitch that put one leg's old price against the
+        # other's new one read as a 7-sigma stretch, armed re-entry, and
+        # the first real price back inside the window would have been
+        # taken as the stretch coming back. It only ever withheld the
+        # ENTRY, so the arming survived the glitch.
+        trusted = bool(md) and not gates.get('health') and \
+            not md.get('jump_reason')
+        self._count(body, fresh, trusted)
 
         for pos in positions:
             body['positions'].append(self._judge_exit(now, md, pos, body))
@@ -548,7 +557,7 @@ class AlgoSignal:
         self._last_quote = quote
         return True
 
-    def _count(self, body, fresh):
+    def _count(self, body, fresh, trusted=True):
         p = self.params
         entry = p['entry_z']
         z_sell, z_buy = body['z_sell'], body['z_buy']
@@ -558,12 +567,16 @@ class AlgoSignal:
             # the window's far edge - it came back too far, too fast, to
             # leave anything worth trading (at 100 % that edge is the
             # mean, as it always was).
-            if z_sell is not None:
+            # Only on a price the desk would trade on: a guarded one
+            # neither arms nor disarms. It can still confirm an arming
+            # it did not make, and the entry it confirms is then held
+            # back by the same guard, in its words.
+            if z_sell is not None and trusted:
                 if z_sell >= entry:
                     self._armed['SELL'] = True
                 elif z_sell <= floor:
                     self._armed['SELL'] = False
-            if z_buy is not None:
+            if z_buy is not None and trusted:
                 if z_buy <= -entry:
                     self._armed['BUY'] = True
                 elif z_buy >= -floor:
