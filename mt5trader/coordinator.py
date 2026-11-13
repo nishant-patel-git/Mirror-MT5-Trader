@@ -29,6 +29,7 @@ from . import book as book_module
 from .algodesk import AlgoDesk
 from .algoexec import LiveSink
 from .book import Book
+from .chart import SpreadTape, chart_path
 from .database import Store
 from .executor import PairExecutor, mark_position
 from .models import (ALGO_SOURCE, MAGIC_NUMBER, MANUAL, LegFill, OrderType,
@@ -76,6 +77,9 @@ class Coordinator:
         self.leg_factory = leg_factory
         self._last_leg_try = None
         self.status_path = status_path
+        #: Each ladder's spread and the Algo's z, for the chart window.
+        self.tape = SpreadTape()
+        self.chart_path = chart_path(status_path)
         self.clock = clock
         self.sleep = sleep
         self.book = Book()
@@ -1493,6 +1497,10 @@ class Coordinator:
                      for r in opened]
         decided = shadow.step(now, md, stats, candles.closes(), gates,
                               gates.get('cost'), positions)
+
+        # The chart: this poll's spread, and the z the Algo's own code
+        # read off it.
+        self.tape.observe(pair.key, now, md, decided, params)
 
         day = self.broker_day()
         mode = self.algos.mode(pair.key) or 'OFF'
@@ -3559,6 +3567,13 @@ class Coordinator:
         with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(payload, f, default=str)
         atomicfile.replace(tmp, self.status_path)
+        try:
+            self.tape.write(self.chart_path, self.clock(),
+                            keys=list(self.config.pairs))
+        except Exception as e:
+            # The chart is a reading. A failure leaves the last file
+            # standing and never stops the screen being published.
+            logging.warning('could not write the chart file: %s', e)
 
     def serve_commands(self):
         """Drain clicks on their OWN thread, far faster than the poll.

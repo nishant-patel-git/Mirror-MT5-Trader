@@ -298,6 +298,34 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                             'auto_lock_sec': auto_lock_seconds()}
         return jsonify(snapshot)
 
+    @app.get('/api/chart/<path:key>')
+    def api_chart(key):
+        """One ladder's chart: its spread and the Algo's z over the
+        last `minutes`, as the engine last wrote them. Read-only."""
+        from .chart import chart_path
+        try:
+            minutes = max(1.0, min(float(request.args.get('minutes', 60)),
+                                   120.0))
+        except ValueError:
+            minutes = 60.0
+        body = read_json(chart_path(status_path)) or {}
+        series = (body.get('pairs') or {}).get(key)
+        if series is None:
+            return jsonify({'ok': True, 'points': [], 'minutes': minutes,
+                            'note': 'no prices for this ladder yet \u2014 '
+                                    'the chart fills while the engine '
+                                    'runs'})
+        at = body.get('at')
+        points = series.get('points') or []
+        if at is not None:
+            since = float(at) - minutes * 60.0
+            points = [p for p in points if p.get('t', 0) >= since]
+        spreads = [p['s'] for p in points if p.get('s') is not None]
+        return jsonify(dict(series, ok=True, at=at, minutes=minutes,
+                            points=points,
+                            spread_min=min(spreads) if spreads else None,
+                            spread_max=max(spreads) if spreads else None))
+
     @app.get('/api/config')
     def api_config():
         raw = cfg.load_raw(config_path)
