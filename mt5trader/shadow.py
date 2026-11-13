@@ -168,6 +168,10 @@ class ShadowAlgo:
                 p['edge_capture_frac'], p['edge_multiple']),
                 on=p['edge_on'])
 
+        # The edge filter's reading on each side NOW, switched on or not:
+        # what a signal recorded at this moment is stamped with.
+        body['edge_by_side'] = {'SELL': edge_at(body.get('z_sell')),
+                                'BUY': edge_at(body.get('z_buy'))}
         if body.get('blocked_side'):
             body['blocked_edge'] = edge_at(body.get('blocked_z'))
         for intent in body['intents']:

@@ -441,6 +441,31 @@ def test_the_rows_the_copy_wrote_are_purged_once(tmp_path):
     assert len(Store(path).signals('A|B')) == 1
 
 
+def test_the_rows_armed_on_untrusted_prices_are_purged_once(tmp_path):
+    """Rows from before the Algo refused to arm on a guarded price (and
+    before a 0.0 side was no price) include stretches it was never
+    really in. Cleared when the leg columns arrive - and only then."""
+    path = str(tmp_path / 'trader.db')
+    store = Store(path)
+    store.save_signal({'pair_key': 'A|B', 'basis': 'ALGO', 'side': 'SELL',
+                       'state': 'CLOSED', 'outcome': 'NO_ENTRY',
+                       'armed_at': 1.0, 'armed_z': -1006.9,
+                       'decided_by': 'algo'})
+    store.save_signal_arming('A|B', {'algo': {'SELL': True}})
+    with sqlite3.connect(path) as connection:
+        connection.execute('ALTER TABLE signal_events DROP COLUMN '
+                           'leg_a_account')
+    assert len(Store(path).signals('A|B')) == 0
+    assert Store(path).signal_arming() == {}
+    # CONTROL: with the column there, nothing is cleared.
+    store = Store(path)
+    store.save_signal({'pair_key': 'A|B', 'basis': 'ALGO', 'side': 'SELL',
+                       'state': 'ARMED', 'armed_at': 2.0, 'armed_z': 2.6,
+                       'decided_by': 'algo', 'leg_a_account': 'CFI'})
+    [row] = Store(path).signals('A|B')
+    assert row['leg_a_account'] == 'CFI'
+
+
 # -- the shadow, on its own ----------------------------------------------------
 
 def stats(mean=59.1, sigma=0.1):
@@ -490,3 +515,36 @@ def test_the_shadows_warm_up_and_day_survive_a_restart_only_if_recent():
     # And state from the copy it replaced is not read at all.
     old = shadow_module.ShadowAlgo(params, {'SELL': True}, now=300)
     assert old.armed == {'BUY': False, 'SELL': False}
+
+
+# -- what a row says it was measured against --------------------------------
+
+def test_a_row_names_each_legs_account_and_broker(config, pair, legs,
+                                                 tmp_path):
+    desk = Desk(config, pair, legs, tmp_path, edge_on=False, **REENTRY)
+    desk.push(HOME, ARM)
+    [row] = desk.rows()
+    assert (row['leg_a_account'], row['leg_b_account']) == \
+        (pair.account_a, pair.account_b)
+    # The terminal's own word for its broker, read live.
+    assert row['leg_a_broker'] == 'FakeServer'
+    assert row['leg_b_broker'] == 'FakeServer'
+
+
+def test_a_row_carries_the_edge_reading_it_was_recorded_at(
+        config, pair, legs, tmp_path):
+    """With the filter OFF too: it is the number that says whether
+    switching it on would have changed the row."""
+    desk = Desk(config, pair, legs, tmp_path, edge_on=False, **REENTRY)
+    desk.push(HOME, ARM)
+    [row] = desk.rows()
+    assert row['edge_on'] is False
+    assert row['edge_ratio'] is not None and row['edge_ratio'] > 0
+    assert row['edge_required'] is not None
+
+
+def test_CONTROL_the_filter_on_is_said_as_on(config, pair, legs, tmp_path):
+    desk = Desk(config, pair, legs, tmp_path, edge_on=True, **REENTRY)
+    desk.push(HOME, ARM)
+    [row] = desk.rows()
+    assert row['edge_on'] is True

@@ -5952,6 +5952,53 @@ def test_the_signal_journal_reads_like_the_trade_journal(page):
     assert page.errors == []
 
 
+def test_the_signal_journal_names_the_accounts_the_edge_and_hides_the_unconfirmed(
+        page):
+    """Each row says which account at which broker each leg was on and
+    what the edge filter read; a stretch armed and let go without ever
+    confirming is not a signal, so it is not listed until asked for."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.showUnconfirmed = false;
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {}, drawdown: {}, calibration: {}, shadow: {},
+          excursion: [], journal: [],
+          signal_tally: {armed: 2, blocked: 1, entered: 0, no_entry: 1},
+          signals: [
+            {pair_key: 'A|B', side: 'SELL', source: 'LIVE', state: 'CLOSED',
+             outcome: 'BLOCKED', armed_at: 1762500000, armed_z: 2.55,
+             leg_a_account: 'CFI', leg_a_broker: 'CFI Financial Group',
+             leg_b_account: 'FxPro', leg_b_broker: 'FxPro Financial',
+             edge_ratio: 0.42, edge_required: 1.5, edge_on: true,
+             net_pnl: null, cum_pnl: null, why: 'edge filter'},
+            {pair_key: 'A|B', side: 'BUY', source: 'LIVE', state: 'CLOSED',
+             outcome: 'NO_ENTRY', armed_at: 1762400000, armed_z: -7.73,
+             edge_ratio: 2.1, edge_required: 1.5, edge_on: false,
+             net_pnl: null, cum_pnl: null, why: 'came back'}]};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis table', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    assert 'A: CFI · CFI Financial Group' in text
+    assert 'B: FxPro · FxPro Financial' in text
+    assert '0.42× / 1.50×' in text
+    # The unconfirmed stretch is counted, not listed...
+    assert '-7.73' not in text
+    assert '1 stretch armed and let go without confirming' in text
+    # ...and one click lists it, with its edge and the filter said OFF.
+    page.click('.monitor .an-toggle-unconfirmed')
+    text = page.text_content('.monitor .analysis')
+    assert '-7.73' in text
+    assert '2.10× / 1.50× (off)' in text
+    page.click('.monitor .an-toggle-unconfirmed')
+    assert '-7.73' not in page.text_content('.monitor .analysis')
+    assert page.errors == []
+
+
 def test_the_monitor_takes_the_room_there_is(page):
     """A flat 560px default left the bottom third of the screen as bare
     desktop under a tab that is several screens long."""

@@ -51,6 +51,19 @@ HOT_SETTINGS = (
 )
 
 
+
+def priced(tick):
+    """Does this tick carry a price? MT5 answers 0.0 for a side it has
+    no price for - right after a re-subscribe, before the terminal has
+    heard from the server, it is 0.0/0.0. That is NO price, not a price
+    of zero: put into the spread it read as a thousand-sigma stretch.
+    Unmeasured is not zero, so the leg is dark until a real one comes."""
+    try:
+        return float(tick.get('bid') or 0) != 0.0 and \
+            float(tick.get('ask') or 0) != 0.0
+    except (TypeError, ValueError, AttributeError):
+        return False
+
 class Coordinator:
     def __init__(self, config, legs, status_path='status.json',
                  clock=time.time, sleep=time.sleep,
@@ -645,7 +658,7 @@ class Coordinator:
             if leg is None or not symbol:
                 continue
             tick = leg.tick(symbol)
-            if tick:
+            if tick and priced(tick):
                 ticks[(account, symbol)] = tick
         return ticks
 
@@ -1500,6 +1513,13 @@ class Coordinator:
                     z_of[side] if z_of[side] is not None else 0.0, params,
                     broker_day=day, threshold=params['entry_z'])
                 row['algo_mode'] = mode
+                row.update(self._leg_identity(pair))
+                # The edge filter's reading as the signal is recorded.
+                # Overwritten by the one it is ENTERED or held back at,
+                # which is the reading that decided it.
+                edge = (decided.get('edge_by_side') or {}).get(side) or {}
+                row['edge_ratio'] = edge.get('ratio')
+                row['edge_required'] = edge.get('required')
                 live.append(self._write_signal(row))
                 new_rows.append(row)
                 episode = episodes[side] = {'row': row}
@@ -1619,6 +1639,24 @@ class Coordinator:
                                    if r['state'] != signals.CLOSED]
         self._save_shadow_algo(pair.key, now, force=changed)
         return new_rows
+
+    def _leg_identity(self, pair):
+        """Each leg's account, by the name it has on the Exchanges page,
+        and the broker that account is at - the terminal's own word for
+        it (its company, else its server), read live. None, not a guess,
+        when the terminal could not be read."""
+        out = {}
+        for leg, account in (('a', pair.account_a), ('b', pair.account_b)):
+            info = self.account_info(account) or {}
+            if not isinstance(info, dict):
+                info = getattr(info, '_asdict', lambda: {})()
+            broker = info.get('company') or info.get('server')
+            if not broker:
+                configured = self.config.accounts.get(account)
+                broker = getattr(configured, 'server', None)
+            out[f'leg_{leg}_account'] = account
+            out[f'leg_{leg}_broker'] = broker or None
+        return out
 
     @staticmethod
     def _why_not_entered(params):

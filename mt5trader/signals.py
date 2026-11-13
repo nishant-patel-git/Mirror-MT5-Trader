@@ -133,6 +133,11 @@ def new_signal(pair_key, basis, side, at, z, params, broker_day=None,
         #: the spread would read as a fill nobody got.
         'leg_a_side': None, 'leg_a_entry': None,
         'leg_b_side': None, 'leg_b_entry': None,
+        #: Which account, at which broker, each leg is on - and whether
+        #: the edge filter was switched on - when the row was recorded.
+        'leg_a_account': None, 'leg_a_broker': None,
+        'leg_b_account': None, 'leg_b_broker': None,
+        'edge_on': params.get('edge_on'),
         'closed_at': None, 'closed_z': None,
         #: The spread it would have come off at. Together with `entry`
         #: this is the move the money is the product of.

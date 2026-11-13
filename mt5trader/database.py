@@ -394,6 +394,22 @@ class Store:
         # by the same arithmetic, and survive a restart.
         ('signal_events', 'entry_margin', 'REAL'),
         ('signal_events', 'entry_atr', 'REAL'),
+        # WHICH ACCOUNT, AT WHICH BROKER, each leg was on when the signal
+        # was recorded, and whether the edge filter was switched on: a
+        # row has to say what it was measured against.
+        #
+        # Adding it PURGES the signal rows before it, and the saved
+        # arming. Those were armed on prices the feed guards had
+        # already called untrusted - a leg a moment behind the other,
+        # or a side MT5 answered 0.0 for - and showed a page of
+        # stretches the Algo was never really in, one of them at z
+        # -1006.90. The page refills from the live feed and from
+        # `Derive 30 days`.
+        ('signal_events', 'leg_a_account', 'TEXT'),
+        ('signal_events', 'leg_a_broker', 'TEXT'),
+        ('signal_events', 'leg_b_account', 'TEXT'),
+        ('signal_events', 'leg_b_broker', 'TEXT'),
+        ('signal_events', 'edge_on', 'INTEGER'),
         ('positions', 'naked_ms', 'REAL'),
         # MANUAL or ALGO. NULL on a row written before it existed, which
         # reads back as MANUAL: nothing traded by itself then either.
@@ -429,7 +445,9 @@ class Store:
     #: migration must never touch those.
     PURGE_ON_ADD = {('signal_events', 'block_reason'): 'signal_events',
                     ('signal_events', 'decided_by'): ('signal_events',
-                                                      'signal_arming')}
+                                                      'signal_arming'),
+                    ('signal_events', 'leg_a_account'): ('signal_events',
+                                                         'signal_arming')}
 
     def _add_missing_columns(self, connection):
         for table, column, kind in self.LATER_COLUMNS:
@@ -902,7 +920,9 @@ class Store:
                       'edge_ratio', 'edge_required', 'exit_spread',
                       'quantity', 'leg_a_side', 'leg_a_entry',
                       'leg_b_side', 'leg_b_entry', 'entry_margin',
-                      'entry_atr', 'decided_by')
+                      'entry_atr', 'decided_by', 'leg_a_account',
+                      'leg_a_broker', 'leg_b_account', 'leg_b_broker',
+                      'edge_on')
 
     def save_signal(self, row):
         """Write a signal, or update the one `row['id']` names.
@@ -915,7 +935,7 @@ class Store:
         values = []
         for name in self.SIGNAL_COLUMNS:
             value = row.get(name)
-            if name == 'reverted' and value is not None:
+            if name in ('reverted', 'edge_on') and value is not None:
                 value = 1 if value else 0
             values.append(value)
         with self._connect() as connection:
@@ -937,6 +957,8 @@ class Store:
             body = {name: row[name] for name in self.SIGNAL_COLUMNS}
             body['id'] = row['id']
             body['reverted'] = bool(body['reverted'])
+            if body['edge_on'] is not None:
+                body['edge_on'] = bool(body['edge_on'])
             body['source'] = body['source'] or 'LIVE'
             out.append(body)
         return out
