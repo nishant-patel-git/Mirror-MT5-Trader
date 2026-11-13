@@ -306,6 +306,9 @@ def from_replay(trade, pair_key, params, broker_day=None, units=None):
                      threshold=params.get('entry_z'))
     row['source'] = REPLAY
     row['decided_by'] = DECIDED_BY
+    edge = trade.get('edge') or {}
+    row['edge_ratio'] = edge.get('ratio')
+    row['edge_required'] = edge.get('required')
     row['exit_reason'] = EXIT_WORDS.get(reason, reason)
     row['entered_at'] = opened
     row['entered_z'] = None if z_in is None else round(float(z_in), 3)
