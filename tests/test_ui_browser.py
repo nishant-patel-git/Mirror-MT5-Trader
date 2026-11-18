@@ -5953,47 +5953,74 @@ def test_the_signal_journal_reads_like_the_trade_journal(page):
     assert page.errors == []
 
 
-def test_the_chart_opens_and_closes_from_the_ladder(page):
-    """Arrow-statarb's two charts for one ladder - the Algo's z between
-    its entry lines, and the spread - opened by the trader and closed by
-    the trader, from the ladder's own title bar."""
+def write_chart_history(page, key, tf, count=150):
+    """What the engine writes when the chart asks for MT5's candles."""
     from mt5trader import chart
+    seconds = tf * 60
+    end = time.time() - time.time() % seconds
+    candles, x = [], 59.1
+    for i in range(count):
+        t = end - seconds * (count - 1 - i)
+        o = x
+        x += 0.02 * math.sin(i / 6.0) + (0.6 if i == count - 3 else 0)
+        candles.append({'t': t, 'o': o, 'h': max(o, x) + 0.01,
+                        'l': min(o, x) - 0.01, 'c': x})
+    path = chart.history_path(page.paths['status'])
+    try:
+        body = json.load(open(path, encoding='utf-8'))
+    except (OSError, ValueError):
+        body = {}
+    body[f'{key}#{tf}'] = {
+        'ok': True, 'pair': key, 'timeframe_min': tf, 'length': 20,
+        'entry_z': 2.5, 'stop_z': None, 'algo_timeframe_min': 15,
+        'anchor': 0.0, 'at': time.time(), 'candles': candles}
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(body, f)
+
+
+def test_the_chart_opens_and_closes_from_the_ladder(page):
+    """15m, 1h and 4h candles of the spread with the Algo's bands round
+    them - the mean, +-1 and +-2 sigma, and the entry - and the z of
+    each candle against its own band: whether the spread is past the
+    band, on the screen. Opened and closed from the ladder's title bar."""
     key = 'XAUUSD_|GC1226'
-    tape = chart.SpreadTape()
-    start = time.time() - 600
-    for i in range(300):
-        tape.observe(key, start + i * 2,
-                     {'mid_spread': 59.1 + 0.1 * math.sin(i / 20.0)},
-                     {'z_mid': 3.0 * math.sin(i / 20.0), 'mean': 59.1,
-                      'sigma': 0.1, 'ready': True, 'count': 20,
-                      'needed': 20},
-                     {'entry_z': 2.5, 'stop_z': 4.0, 'stop_z_on': True})
-    tape.write(chart.chart_path(page.paths['status']), time.time(),
-               force=True)
+    write_chart_history(page, key, 15)
+    write_chart_history(page, key, 60)
     page.errors.clear()
     button = page.locator('.ladder[data-pair="%s"] .chart-btn' % key)
     assert page.locator('.window.chartwin').count() == 0
     button.click()
-    page.wait_for_selector('.window.chartwin .cw-z svg', timeout=WAIT)
+    page.wait_for_selector('.window.chartwin .cw-spread svg', timeout=WAIT)
     win = page.locator('.window.chartwin')
     assert 'Gold basis' in win.locator('.cw-pair').text_content()
-    # Candles, both entry lines and both stop lines - 2 s points over
-    # 10 minutes at the 1-hour range's 1-minute candles.
-    assert win.locator('.cw-z .cw-candle').count() >= 10
-    assert win.locator('.cw-z .cw-candle.up').count() >= 1
-    assert win.locator('.cw-z .cw-candle.down').count() >= 1
-    assert '1m candles' in win.locator('.cw-size').text_content()
+    assert '15-minute candles' in win.locator('.cw-size').text_content()
+    assert 'on' in win.locator('.cw-tfs button[data-tf="15"]') \
+        .get_attribute('class')
+    # The spread: candles, the band's middle, +-1 and +-2 sigma, and the
+    # entry either side.
+    assert win.locator('.cw-spread .cw-candle').count() == 100
+    assert win.locator('.cw-spread .cw-mean').count() == 1
+    assert win.locator('.cw-spread .cw-band').count() == 4
+    assert win.locator('.cw-spread .cw-band-entry').count() == 2
+    # z against each candle's own band, with the same levels across.
+    assert win.locator('.cw-z .cw-candle').count() == 100
+    assert win.locator('.cw-z .cw-sd').count() == 4
     assert win.locator('.cw-z .cw-entry-up').count() == 1
     assert win.locator('.cw-z .cw-entry-down').count() == 1
-    assert win.locator('.cw-z .cw-stop').count() == 2
-    assert win.locator('.cw-spread .cw-candle').count() >= 10
-    # A shorter range draws finer candles.
-    win.locator('.cw-minutes').select_option('15')
-    page.wait_for_function(
-        "document.querySelector('.chartwin .cw-size').textContent"
-        ".indexOf('20s') === 0", timeout=WAIT)
+    assert win.locator('.cw-z .cw-stop').count() == 0     # the z-stop is off
+    # The jump near the end closes beyond the entry band, and is marked.
+    assert win.locator('.cw-z .cw-candle.beyond').count() >= 1
+    assert 'these are its bands' in win.locator('.cw-note').text_content()
     assert 'Min:' in win.text_content() and 'Max:' in win.text_content()
     assert 'on' in button.get_attribute('class')
+    # 1h candles: the same chart, read off the 1-hour history.
+    win.locator('.cw-tfs button[data-tf="60"]').click()
+    page.wait_for_function(
+        "document.querySelector('.chartwin .cw-size').textContent"
+        ".indexOf('1-hour') === 0", timeout=WAIT)
+    page.wait_for_function(
+        "document.querySelector('.chartwin .cw-note').textContent"
+        ".indexOf('the Algo itself reads 15-minute') >= 0", timeout=WAIT)
     # Closed by the trader: the same button...
     button.click()
     page.wait_for_timeout(200)

@@ -38,6 +38,14 @@ def chart_path(status_path):
                         'chart.json')
 
 
+def history_path(status_path):
+    """The 15m / 1h / 4h candle histories, beside the status file:
+    written only when one is fetched from MT5, read by the web process
+    when the chart window asks."""
+    return os.path.join(os.path.dirname(os.path.abspath(status_path)),
+                        'chart_history.json')
+
+
 def _round(value, places=6):
     return None if value is None else round(float(value), places)
 

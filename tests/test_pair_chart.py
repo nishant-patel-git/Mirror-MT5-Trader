@@ -142,3 +142,122 @@ def test_a_ladder_with_nothing_yet_says_so(client):
     body = client.get('/api/chart/A|B').get_json()
     assert body['ok'] and body['candles'] == []
     assert 'fills while the engine runs' in body['note']
+
+
+# -- 15m / 1h / 4h candles from MT5's own bars --------------------------------
+
+from mt5trader import bands  # noqa: E402
+
+
+def bar(stamp, close):
+    return {'time': stamp, 'close': close, 'spread': 0, 'point': 0.01}
+
+
+def test_a_candle_is_built_from_the_spreads_of_its_finer_bars():
+    """A spread's high is not leg B's high less leg A's: the two are
+    seldom the same minute. So a 15-minute candle is fifteen 1-minute
+    SPREADS, and its open, high, low and close are theirs."""
+    a = [bar(60 * i, 100.0) for i in range(30)]
+    b = [bar(60 * i, 105.0 + (i % 15) * (1 if i % 2 else -1) * 0.1)
+         for i in range(30)]
+    candles = bands.spread_ohlc(a, b, 1.0, 60, 900, 0, 0)
+    assert [c['t'] for c in candles] == [0, 900]
+    first = candles[0]
+    spreads = [b[i]['close'] - 100.0 for i in range(15)]
+    assert first['o'] == pytest.approx(spreads[0])
+    assert first['h'] == pytest.approx(max(spreads))
+    assert first['l'] == pytest.approx(min(spreads))
+    assert first['c'] == pytest.approx(spreads[-1])
+
+
+def test_a_minute_only_one_leg_traded_is_not_in_the_candle():
+    a = [bar(0, 100.0), bar(60, 100.0)]
+    b = [bar(0, 105.0), bar(60, 150.0), bar(120, 199.0)]
+    [candle] = bands.spread_ohlc(a, b, 1.0, 60, 900, 0, 0)
+    assert candle['h'] == pytest.approx(50.0)       # not 99: no leg A then
+
+
+def test_an_unplaced_clock_gives_no_candles_rather_than_wrong_ones():
+    a = [bar(0, 100.0)]
+    b = [bar(0, 105.0)]
+    assert bands.spread_ohlc(a, b, 1.0, 60, 900, None, 0) == []
+
+
+@pytest.fixture
+def engine(config, pair, legs, tmp_path):
+    from test_algo_desk import T0, OFFSET, Clock
+    start = T0 - T0 % 900 - 60 * 15 * 40
+    a, b = [], []
+    for i in range(15 * 40):
+        stamp = start + 60 * i + OFFSET
+        a.append(bar(stamp, 4292.10))
+        b.append(bar(stamp, 4351.20 + 0.3 * ((i * 7) % 11) / 10.0))
+    legs['acct_a'].broker.bars['XAUUSD_'] = a
+    legs['acct_b'].broker.bars['GC1226'] = b
+    co = Coordinator(config, legs, status_path=str(tmp_path / 'status.json'),
+                     sleep=lambda s: None, clock=Clock(T0))
+    co.start()
+    co.poll_once()
+    return co
+
+
+def test_the_engine_writes_the_candles_beside_the_status_file(engine, pair,
+                                                             tmp_path):
+    answer = engine.chart_history(pair.key, 15)
+    assert answer['ok'], answer
+    # The command answers that it is written - not the history itself.
+    assert 'candles' in answer and isinstance(answer['candles'], int)
+    body = json.loads((tmp_path / 'chart_history.json')
+                      .read_text(encoding='utf-8'))[pair.key + '#15']
+    assert len(body['candles']) == answer['candles'] >= 40
+    assert body['length'] == 20 and body['entry_z'] == 2.5
+    assert body['algo_timeframe_min'] == 15
+    candle = body['candles'][0]
+    assert candle['l'] <= min(candle['o'], candle['c'])
+    assert candle['h'] >= max(candle['o'], candle['c'])
+
+
+def test_each_timeframe_reads_the_finer_bars_it_is_built_from(engine, pair,
+                                                              legs):
+    asked = legs['acct_a'].broker.rates_asked
+    for tf, sub in ((15, 1), (60, 5), (240, 15)):
+        assert engine.chart_history(pair.key, tf)['ok']
+        assert asked[-1][1] == sub
+
+
+def test_a_history_is_reused_not_refetched_every_time(engine, pair, legs):
+    asked = legs['acct_a'].broker.rates_asked
+    engine.chart_history(pair.key, 15)
+    before = len(asked)
+    engine.chart_history(pair.key, 15)
+    assert len(asked) == before
+    # Control: five minutes on, it is fetched again.
+    engine.clock.now += 301
+    engine.chart_history(pair.key, 15)
+    assert len(asked) == before + 1
+
+
+def test_a_chart_that_cannot_be_drawn_says_why(engine, pair, legs):
+    assert 'no 5-minute chart' in engine.chart_history(pair.key, 5)['reason']
+    legs['acct_b'].broker.bars['GC1226'] = []
+    engine.clock.now += 301
+    answer = engine.chart_history(pair.key, 60)
+    assert not answer['ok'] and 'leg B' in answer['reason']
+
+
+def test_the_screen_asks_for_it_through_the_command_log(engine, pair):
+    from mt5trader.commands import CommandRunner
+    assert hasattr(CommandRunner, '_do_chart_history')
+
+
+def test_the_route_serves_a_written_history_and_says_when_there_is_none(
+        client, tmp_path):
+    path = chart.history_path(str(tmp_path / 'status.json'))
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump({'A|B#60': {'ok': True, 'candles': [{'t': 0, 'o': 1,
+                                                      'h': 2, 'l': 0,
+                                                      'c': 1}]}}, f)
+    body = client.get('/api/chart_history/A|B?tf=60').get_json()
+    assert body['ok'] and len(body['candles']) == 1
+    assert client.get('/api/chart_history/A|B?tf=240').get_json() == \
+        {'ok': False, 'missing': True}

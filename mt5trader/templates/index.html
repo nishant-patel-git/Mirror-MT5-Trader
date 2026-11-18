@@ -233,24 +233,21 @@
     </div>
     <div class="cw-body">
       <div class="cw-bar">
-        over the last
-        <select class="cw-minutes" title="How much of the session to draw">
-          <option value="15">15 min</option>
-          <option value="30">30 min</option>
-          <option value="60" selected>1 hour</option>
-          <option value="120">2 hours</option>
-        </select>
+        <span class="cw-tfs" title="Candle size. 15m is the Algo&#8217;s own candle when its timeframe is 15 minutes.">
+          <button type="button" data-tf="15">15m</button><button type="button" data-tf="60">1h</button><button type="button" data-tf="240">4h</button>
+        </span>
         <span class="cw-size hint"></span>
         <span class="cw-now"></span>
       </div>
       <div class="cw-card">
         <div class="cw-head">Z-Score
-          <span class="cw-key"><b class="k-candle up"></b><b class="k-candle down"></b>z <i class="k-up"></i>+entry <i class="k-down"></i>&minus;entry <span class="cw-key-stop"><i class="k-stop"></i>&plusmn;stop</span></span>
+          <span class="cw-key"><b class="k-candle up"></b><b class="k-candle down"></b>z <i class="k-sd"></i>&plusmn;1&sigma; &plusmn;2&sigma; <i class="k-up"></i>+entry <i class="k-down"></i>&minus;entry <span class="cw-key-stop"><i class="k-stop"></i>&plusmn;stop</span></span>
         </div>
         <div class="cw-plot cw-z"></div>
       </div>
       <div class="cw-card">
-        <div class="cw-head">Spread History
+        <div class="cw-head">Spread
+          <span class="cw-key"><i class="k-mean"></i>mean <i class="k-sd"></i>&plusmn;1&sigma; &plusmn;2&sigma; <i class="k-up"></i><i class="k-down"></i>&plusmn;entry</span>
           <span class="cw-badges"><span class="cw-badge cw-min">Min: &mdash;</span><span class="cw-badge cw-max">Max: &mdash;</span></span>
         </div>
         <div class="cw-plot cw-spread"></div>
