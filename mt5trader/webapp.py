@@ -18,6 +18,7 @@ Two rules from the spec shape the endpoints here:
   response body, for the panel to print.
 """
 
+import datetime
 import logging
 import os
 import re
@@ -583,8 +584,62 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
             # the zone track is a reading, not the money.
             logging.error('the signal track could not be read: %s', e)
             signal_rows, signal_days = [], []
+        # NOTIONAL TRADED: the broker's own deals over the last 30 days,
+        # priced lots x contract size x price. A day of margin on the
+        # query, because it is on the BROKER's clock.
+        # A picked RANGE as well - from one broker day to another, both
+        # inclusive - from the two date pickers. One of them alone is
+        # that one day.
+        def day(name):
+            value = (request.args.get(name) or '').strip()
+            return value if re.fullmatch(r'\d{4}-\d{2}-\d{2}', value) \
+                else None
+        volume_from, volume_to = day('volume_from'), day('volume_to')
+        volume_from = volume_from or volume_to
+        volume_to = volume_to or volume_from
+        if volume_from and volume_to and volume_to < volume_from:
+            volume_from, volume_to = volume_to, volume_from
+        try:
+            since = now - 31 * 86400.0
+            picked = None
+            if volume_from:
+                # Midnights on the BROKER's clock: its stamps are its
+                # wall clock written as an epoch.
+                def midnight(value):
+                    return datetime.datetime.strptime(
+                        value, '%Y-%m-%d').replace(
+                        tzinfo=datetime.timezone.utc).timestamp()
+                picked = (midnight(volume_from),
+                          midnight(volume_to) + 86400.0)
+                since = min(since, picked[0] - 86400.0)
+            deals = db.fills(pair_key=pair_key, ours_only=True,
+                             since_ms=int(since * 1000), limit=200000)
+            snapshot = status() or {}
+            sizes = analysis.contract_sizes(
+                snapshot.get('pairs'),
+                db.positions_between(now - 400 * 86400.0, None))
+            label = None
+            if volume_from:
+                label = volume_from if volume_from == volume_to \
+                    else f'{volume_from} \u2192 {volume_to}'
+            notional = analysis.notional_traded(
+                deals, sizes, now, date=label,
+                date_ms=None if picked is None else
+                (int(picked[0] * 1000), int(picked[1] * 1000)))
+            notional['from'], notional['to'] = volume_from, volume_to
+            # Which MT5 account, at which broker, each account is: the
+            # terminal's own word, read live.
+            notional['account_info'] = {
+                name: {'login': (info or {}).get('login'),
+                       'broker': ((info or {}).get('company')
+                                  or (info or {}).get('server'))}
+                for name, info in (snapshot.get('accounts') or {}).items()}
+        except Exception as e:
+            logging.error('notional traded could not be read: %s', e)
+            notional = None
         return jsonify(dict(body, ok=True, days=days, pair=pair_key,
                             names=names,
+                            notional=notional,
                             zone_days=zone_days,
                             date=zone_date,
                             # The JOURNAL shape: newest first, each row

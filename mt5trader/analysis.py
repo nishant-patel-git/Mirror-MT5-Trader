@@ -606,3 +606,121 @@ def report(positions, events=(), shadows=(), excursions=None, now=0.0):
             'z_excursions': {key: excursions_view(data, now)
                              for key, data in (excursions or {}).items()},
             'journal': journal(positions, entry_z, exit_z)}
+
+
+#: The windows the volume is counted over: the broker's own TODAY, and
+#: the last 7 and 30 days rolling.
+NOTIONAL_PERIODS = (('today', 'Today'), ('7d', 'Last 7 days'),
+                    ('30d', 'Last 30 days'))
+
+
+def contract_sizes(pairs=None, positions=()):
+    """{(account, symbol): contract size} - what one LOT is, per leg.
+
+    The ladders' own sizes first (MT5's, or the trader's override, as
+    the engine publishes them); then the size frozen on each recorded
+    position's legs, so a ladder deleted since still prices its fills.
+    """
+    sizes = {}
+    for row in positions or ():
+        for leg in (row.get('leg_a'), row.get('leg_b')):
+            leg = leg or {}
+            size = leg.get('contract_size')
+            if size and leg.get('account') and leg.get('symbol'):
+                sizes[(leg['account'], leg['symbol'])] = float(size)
+    for pair in (pairs or {}).values():
+        for side in ('a', 'b'):
+            size = pair.get(f'contract_size_{side}')
+            account, symbol = pair.get(f'account_{side}'), \
+                pair.get(f'symbol_{side}')
+            if size and account and symbol:
+                sizes[(account, symbol)] = float(size)
+    return sizes
+
+
+def notional_traded(fills, sizes, now, date=None, date_ms=None):
+    """Notional volume traded - lots x contract size x price, per deal -
+    today, over the last 7 days and over the last 30, and over a picked
+    range of the broker's days (`date` its label): per ladder, per
+    account, and in all, from the BROKER's own deals.
+
+    Each deal is placed in time on the broker's stamp less that
+    broker's offset from UTC; "today" and a picked date are the broker's
+    own days, as its terminal shows them. A deal whose contract size is
+    not known is COUNTED, not priced: unmeasured is not zero, and the
+    screen says how many there were rather than leaving them out of a
+    total.
+
+    `date_ms` is the picked range, (start, end) with the end exclusive,
+    on the broker's clock as its stamps are written (the caller reads it
+    off the two picked days).
+    """
+    offset = None
+    for fill in fills:
+        if fill.get('server_offset_s') is not None:
+            offset = float(fill['server_offset_s'])
+            break
+    offset = offset or 0.0
+    broker_now = now + offset
+    day_start = broker_now - broker_now % 86400.0 - offset
+    since = {'today': day_start, '7d': now - 7 * 86400.0,
+             '30d': now - 30 * 86400.0}
+    periods = list(NOTIONAL_PERIODS)
+    if date:
+        periods.append(('date', date))
+
+    def in_period(period, at, stamp):
+        if period == 'date':
+            return date_ms is not None and \
+                date_ms[0] <= stamp < date_ms[1]
+        return at >= since[period]
+
+    def cell():
+        return {'notional': 0.0, 'lots': 0.0, 'fills': 0, 'unpriced': 0,
+                'a': 0.0, 'b': 0.0}
+
+    def cells():
+        return {k: cell() for k, _ in periods}
+
+    by_pair, by_account, total = {}, {}, cells()
+    for fill in fills:
+        stamp = fill.get('broker_time_ms')
+        if stamp is None:
+            continue
+        at = stamp / 1000.0 - float(fill.get('server_offset_s') or 0)
+        volume = abs(float(fill.get('volume') or 0.0))
+        price = fill.get('price')
+        size = sizes.get((fill.get('account'), fill.get('symbol')))
+        notional = (volume * size * abs(float(price))
+                    if size and price is not None else None)
+        pair = by_pair.setdefault(fill.get('pair_key') or '(no ladder)',
+                                  cells())
+        account = by_account.setdefault(fill.get('account') or '?', cells())
+        leg = (fill.get('leg') or '').lower()
+        for period, _label in periods:
+            if not in_period(period, at, stamp):
+                continue
+            for target in (pair[period], account[period], total[period]):
+                target['fills'] += 1
+                target['lots'] += volume
+                if notional is None:
+                    target['unpriced'] += 1
+                    continue
+                target['notional'] += notional
+                if leg in ('a', 'b'):
+                    target[leg] += notional
+    groups = list(by_pair.values()) + list(by_account.values()) + [total]
+    for group in groups:
+        for c in group.values():
+            for name in ('notional', 'lots', 'a', 'b'):
+                c[name] = round(c[name], 2)
+
+    def listed(rows, key):
+        return [dict(c, **{key: name}) for name, c in sorted(rows.items())
+                if any(c[p]['fills'] for p, _ in periods)]
+
+    return {'periods': [{'key': k, 'label': label} for k, label in periods],
+            'date': date,
+            'rows': listed(by_pair, 'pair_key'),
+            'accounts': listed(by_account, 'account'),
+            'total': total}
