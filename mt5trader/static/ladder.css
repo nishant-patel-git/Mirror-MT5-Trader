@@ -2303,3 +2303,12 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
   flex-shrink: 0; }
 .window.ladder .chart-btn.on { background: #0d6efd; color: #fff;
   border-color: #0d6efd; }
+
+/* The Algo window's legs: each one's account number and broker, small,
+ * under the title. */
+.window.algowin .aw-legs { font-size: 11px; color: #6c757d;
+  padding: 3px 8px; border-bottom: 1px solid rgba(128,128,128,.25);
+  line-height: 1.35; }
+.window.algowin .aw-legs .aw-leg { white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.window.algowin .aw-legs b { color: #212529; margin-right: 2px; }

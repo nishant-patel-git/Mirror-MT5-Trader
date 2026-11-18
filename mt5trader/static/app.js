@@ -3019,6 +3019,27 @@
       (title ? ' title="' + escapeHtml(title) + '"' : '') + '>' + text + '</span>';
   }
 
+  function algoLegsHtml(row) {
+    /* "A USOIL_F7 · #19514405 · CFI Financial Group", and B's. The
+     * login and broker are the terminal's own, read live; a leg that
+     * could not be read says so rather than showing nothing. */
+    var accounts = (state.snapshot && state.snapshot.accounts) || {};
+    function leg(letter, account, symbol) {
+      var info = accounts[account];
+      var who = info
+        ? '#' + escapeHtml(info.login || DASH) + ' \u00b7 ' +
+          escapeHtml(info.company || info.server || DASH)
+        : '<span class="down">not read</span>';
+      return '<div class="aw-leg" title="Leg ' + letter + ': account \u2018' +
+        escapeHtml(account || '?') + '\u2019' +
+        (info && info.server ? ', server ' + escapeHtml(info.server) : '') +
+        '"><b>' + letter + '</b> ' + escapeHtml(symbol || '?') + ' \u00b7 ' +
+        who + '</div>';
+    }
+    return leg('A', row.account_a, row.symbol_a) +
+      leg('B', row.account_b, row.symbol_b);
+  }
+
   function renderAlgoWindow(key, row) {
     /* SIGNAL & POSITION, STATISTICS, FILTERS — the stat-arb dashboard's
      * three panels, for one ladder, from the engine's Algo block. */
@@ -3037,6 +3058,9 @@
       : 'Signals: the Algo signals, you trade — nothing is sent';
     var market = row.market || {};
     var entryZ = params.entry_z;
+
+    // Each leg's account number and broker, small, across the top.
+    node.querySelector('.aw-legs').innerHTML = algoLegsHtml(row);
 
     // -- SIGNAL & POSITION ------------------------------------------------
     var direction = params.direction || 'BOTH';

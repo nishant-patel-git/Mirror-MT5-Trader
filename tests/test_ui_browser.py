@@ -122,6 +122,9 @@ class Publisher:
         self.broker_pendings = None
         #: Any other field for the pair's row, as the engine sends it.
         self.pair_extra = {}
+        #: Fields the terminals report about each account (login,
+        #: server, company), merged into the snapshot's accounts.
+        self.accounts_extra = {}
         #: Which leg LIMIT mode rests its real pending on. The other
         #: leg is crossed at market when it fills, and a broker window
         #: showing nothing on that leg is the mode, not a fault.
@@ -151,6 +154,11 @@ class Publisher:
             payload['at'] = at
         for row in payload['pairs'].values():
             row.update(self.pair_extra)
+        for name, extra in self.accounts_extra.items():
+            if extra is None:
+                payload['accounts'].pop(name, None)
+            else:
+                payload['accounts'].setdefault(name, {}).update(extra)
         # A tmp name of its OWN. The timer thread and the test publish
         # at the same moment often enough to matter: sharing one tmp
         # file, the slower writer's file is gone before it renames it,
@@ -5244,6 +5252,27 @@ def test_the_Algo_has_a_window_of_its_own_with_the_three_panels(page):
         assert 'Mean-rev' in text and '42 min' in text
         assert page.locator('.window.algowin .aw-tile.sell.hit').count() == 1
         assert page.text_content('.window.algowin .aw-mode') == 'SIGNALS'
+        # Each leg's account number and broker, across the top.
+        publisher.accounts_extra = {
+            'acct_a': {'login': 19514405, 'server': 'CFI3-Real',
+                       'company': 'CFI Financial Group'},
+            'acct_b': None}               # a leg that could not be read
+        publisher.publish()
+        page.wait_for_function(
+            "() => document.querySelector('.window.algowin .aw-legs')"
+            ".textContent.includes('#19514405')", timeout=WAIT)
+        legs = page.text_content('.window.algowin .aw-legs')
+        assert 'A XAUUSD_ \u00b7 #19514405 \u00b7 CFI Financial Group' in legs
+        # Control: unread is said, not left blank or shown as a number.
+        assert 'B GC1226 \u00b7 not read' in legs
+        # No company reported: the server's name stands in for it.
+        publisher.accounts_extra = {
+            'acct_a': {'login': 19514405, 'server': 'CFI3-Real',
+                       'company': None}}
+        publisher.publish()
+        page.wait_for_function(
+            "() => document.querySelector('.window.algowin .aw-legs')"
+            ".textContent.includes('CFI3-Real')", timeout=WAIT)
         # The Fair Spread window no longer carries the Algo.
         assert 'H to L signal' not in (page.text_content('.window.fairwin')
                                      if page.locator('.window.fairwin').count()
@@ -5251,6 +5280,7 @@ def test_the_Algo_has_a_window_of_its_own_with_the_three_panels(page):
     finally:
         publisher.algo = 'NONE'
         publisher.algo_block = None
+        publisher.accounts_extra = {}
         publisher.publish()
     page.wait_for_function(
         "() => !document.querySelector('.window.algowin')", timeout=WAIT)

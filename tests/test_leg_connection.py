@@ -42,13 +42,21 @@ def hammer(leg, rounds=25):
 
     def chart():
         for _ in range(rounds):
-            bars = leg.rates('USOIL_F7', 1, 5000)
+            try:
+                bars = leg.rates('USOIL_F7', 1, 5000)
+            except Exception as e:    # the race can raise outright too
+                wrong.append(f'rates raised {e!r}')
+                continue
             if not bars or len(bars) != 5000:
                 wrong.append('rates')
 
     def poll():
         for _ in range(rounds * 8):
-            tick = leg.tick('USOIL_F7')
+            try:
+                tick = leg.tick('USOIL_F7')
+            except Exception as e:
+                wrong.append(f'tick raised {e!r}')
+                continue
             if not tick or tick.get('bid') != 92.06:
                 wrong.append('tick')
 
