@@ -49,7 +49,8 @@
     showUnconfirmed: false,
     //: The pair charts: the last series read, when, and how much of
     //: the session each one draws.
-    charts: {}, chartFetch: {}, chartMinutes: {},
+    charts: {}, chartFetch: {}, chartTf: {}, chartHist: {},
+    chartHistFetch: {}, chartHistNote: {},
     analysisBt: null, analysisBtDays: 5,
     // What the Reconciler tab's adopt form has selected. IN STATE, not
     // in the DOM: that pane is re-rendered from innerHTML on every
@@ -936,12 +937,21 @@
 
   // -- the pair chart -------------------------------------------------
   //
-  // Arrow-statarb's two charts, for one ladder: the Algo's z with its
-  // entry and stop lines, and the spread. Drawn here in SVG - the page
-  // loads nothing from outside - from the series the engine writes
-  // beside the status file. The z is the ALGO'S OWN, read off the
-  // candles it trades on, so the line crosses the entry exactly where
-  // the Algo armed.
+  // One ladder's spread as 15m, 1h or 4h candles with its standard-
+  // deviation bands, and the Algo's z against them. The history is
+  // MT5's own bars, fetched by the engine; the newest candle moves with
+  // the live 10-second candles the engine writes every two seconds.
+  // The bands are the Algo's own arithmetic - an EMA middle, the
+  // population sigma of the last `length` closes - so on the Algo's own
+  // timeframe they ARE its bands. Drawn in SVG: nothing is loaded from
+  // outside.
+
+  //: Candles drawn. The bands are worked out over the history before
+  //: them too, so the first one drawn already has its band.
+  var CHART_SHOWN = 100;
+  //: How old a history may be before the engine is asked again. The
+  //: engine reuses its own for five minutes as well.
+  var CHART_HISTORY_MS = 300000;
 
   function chartOpen(key) {
     return state.open.indexOf(panelId('chart', key)) >= 0;
@@ -952,6 +962,8 @@
     if (chartOpen(key)) { closePanel(id); } else { openPanel(id); }
   }
 
+  function chartTf(key) { return state.chartTf[key] || 15; }
+
   function chartNode(key) {
     var existing = document.querySelector(
       '.chartwin[data-pair="' + cssEscape(key) + '"]');
@@ -961,35 +973,101 @@
     node.querySelector('.close').addEventListener('click', function () {
       closePanel(panelId('chart', key));
     });
-    var minutes = node.querySelector('.cw-minutes');
-    minutes.value = String(state.chartMinutes[key] || 60);
-    minutes.addEventListener('change', function (e) {
-      state.chartMinutes[key] = parseInt(e.target.value, 10) || 60;
-      delete state.charts[key];
-      fetchChart(key, true);
+    node.querySelectorAll('.cw-tfs button').forEach(function (button) {
+      button.addEventListener('click', function () {
+        state.chartTf[key] = parseInt(button.dataset.tf, 10) || 15;
+        node.dataset.drawn = '';
+        fetchHistory(key, true);
+        drawChart(node, key);
+      });
     });
     el('desktop').appendChild(node);
     return node;
   }
 
-  function fetchChart(key, now) {
+  function chartRedraw(key) {
+    var node = document.querySelector(
+      '.chartwin[data-pair="' + cssEscape(key) + '"]');
+    if (node) { drawChart(node, key); }
+  }
+
+  function fetchLive(key) {
+    // The live 10-second candles: the right-hand end of every timeframe.
     var held = state.chartFetch[key] || {};
     var at = Date.now();
-    if (held.busy || (!now && held.at && at - held.at < 2000)) { return; }
+    if (held.busy || (held.at && at - held.at < 2000)) { return; }
     state.chartFetch[key] = {busy: true, at: at};
-    var minutes = state.chartMinutes[key] || 60;
-    fetch('/api/chart/' + encodeURIComponent(key) + '?minutes=' + minutes)
+    fetch('/api/chart/' + encodeURIComponent(key) + '?minutes=120')
       .then(function (r) { return r.json(); })
       .then(function (body) {
         state.charts[key] = body;
         state.chartFetch[key] = {busy: false, at: Date.now()};
-        var node = document.querySelector(
-          '.chartwin[data-pair="' + cssEscape(key) + '"]');
-        if (node) { drawChart(node, key); }
+        chartRedraw(key);
       })
       .catch(function () {
         state.chartFetch[key] = {busy: false, at: Date.now()};
       });
+  }
+
+  function fetchHistory(key, now) {
+    /* The candles from MT5. Read what the engine last wrote; if there is
+     * none, or it is five minutes old, ask the engine for it - through
+     * the same command log a backtest goes through - and read it again
+     * once it answers. */
+    var tf = chartTf(key);
+    var id = key + '#' + tf;
+    var held = state.chartHistFetch[id] || {};
+    var at = Date.now();
+    if (held.busy) { return; }
+    if (!now && held.at && at - held.at < 15000) { return; }
+    state.chartHistFetch[id] = {busy: true, at: at};
+    function finish(body) {
+      if (body) { state.chartHist[id] = body; }
+      state.chartHistFetch[id] = {busy: false, at: Date.now(),
+                                  asked: held.asked};
+      chartRedraw(key);
+    }
+    function read() {
+      return fetch('/api/chart_history/' + encodeURIComponent(key) +
+                   '?tf=' + tf).then(function (r) { return r.json(); });
+    }
+    read().then(function (body) {
+      var fresh = body && body.ok && body.at &&
+        Date.now() - body.at * 1000 < CHART_HISTORY_MS;
+      if (fresh) { return finish(body); }
+      if (body && body.ok) { state.chartHist[id] = body; }
+      // Asked already, a moment ago: wait for that answer.
+      if (held.asked && at - held.asked < 20000) { return finish(null); }
+      held.asked = at;
+      return fetch('/api/command', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({kind: 'chart_history',
+                              payload: {pair: key, timeframe_min: tf}})
+      }).then(function (r) { return r.json(); }).then(function (sent) {
+        if (!sent.ok) {
+          state.chartHistNote[id] = sent.error || 'the engine refused';
+          return finish(null);
+        }
+        var tries = 0;
+        (function poll() {
+          fetch('/api/result/' + sent.id).then(function (r) {
+            return r.json();
+          }).then(function (result) {
+            if (result && result.pending && ++tries < 120) {
+              return window.setTimeout(poll, 250);
+            }
+            var data = (result && result.data) || {};
+            if (!result || result.ok === false || data.ok === false) {
+              state.chartHistNote[id] = (result && result.error) ||
+                data.reason || 'no answer from the engine';
+              return finish(null);
+            }
+            delete state.chartHistNote[id];
+            read().then(finish).catch(function () { finish(null); });
+          });
+        })();
+      });
+    }).catch(function () { finish(null); });
   }
 
   function renderChartWindow(key, row) {
@@ -998,145 +1076,230 @@
     title.textContent = (row.name || key) + ' · Chart';
     title.title = key + ' — leg A ' + (row.symbol_a || '?') +
       ', leg B ' + (row.symbol_b || '?');
-    fetchChart(key, false);
+    var tf = chartTf(key);
+    node.querySelectorAll('.cw-tfs button').forEach(function (button) {
+      button.classList.toggle('on', parseInt(button.dataset.tf, 10) === tf);
+    });
+    fetchLive(key);
+    fetchHistory(key, false);
     drawChart(node, key);
   }
 
-  function chartClock(t) {
+  function chartClock(t, withDay) {
     var d = new Date(t * 1000);
     function two(n) { return (n < 10 ? '0' : '') + n; }
-    return two(d.getHours()) + ':' + two(d.getMinutes());
+    var clock = two(d.getHours()) + ':' + two(d.getMinutes());
+    return withDay ? d.getDate() + ' ' +
+      ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep',
+       'Oct', 'Nov', 'Dec'][d.getMonth()] + ' ' + clock : clock;
   }
 
   //: Candle colours: up green, down red, the house style of every
   //: chart a trader already reads; the entry lines keep Arrow-statarb's.
   var CHART = {up: '#198754', down: '#dc3545', stop: '#6c757d',
+               mean: '#fd7e14', sd: 'rgba(13,110,253,.55)',
                grid: 'rgba(128,128,128,.25)', text: '#6c757d'};
 
-  //: The candle each range is drawn in: 45 to 60 candles whatever the
-  //: range, every one a whole number of the engine's 10-second candles.
-  var CANDLE_SEC = {15: 20, 30: 30, 60: 60, 120: 120};
-
-  function mergeCandles(fine, seconds, prefix) {
-    /* The engine's 10-second candles, merged into `seconds`-wide ones:
-     * the first open, the highest high, the lowest low, the last close.
-     * `prefix` '' is the spread, 'z' the Algo's z. */
-    var out = [], current = null;
-    fine.forEach(function (c) {
-      var o = c[prefix + 'o'];
-      if (o === null || o === undefined) { return; }
-      var start = c.t - c.t % seconds;
-      if (!current || current.t !== start) {
-        current = {t: start, o: o, h: c[prefix + 'h'], l: c[prefix + 'l'],
-                   c: c[prefix + 'c']};
-        out.push(current);
+  function mergeLive(history, live, seconds, anchor, since) {
+    /* MT5's candles with the live 10-second ones folded into them: a
+     * live price makes a candle's high, low and close; a bucket the
+     * history has not reached yet starts a new candle. */
+    var byT = {};
+    var out = history.map(function (c) {
+      var copy = {t: c.t, o: c.o, h: c.h, l: c.l, c: c.c};
+      byT[c.t] = copy;
+      return copy;
+    });
+    (live || []).forEach(function (lc) {
+      if (lc.o === null || lc.o === undefined) { return; }
+      var b = Math.floor((lc.t + anchor) / seconds) * seconds - anchor;
+      var candle = byT[b];
+      if (!candle) {
+        if (out.length && b < out[out.length - 1].t) { return; }
+        candle = byT[b] = {t: b, o: lc.o, h: lc.h, l: lc.l, c: lc.c};
+        out.push(candle);
         return;
       }
-      current.h = Math.max(current.h, c[prefix + 'h']);
-      current.l = Math.min(current.l, c[prefix + 'l']);
-      current.c = c[prefix + 'c'];
+      candle.h = Math.max(candle.h, lc.h);
+      candle.l = Math.min(candle.l, lc.l);
+      // The close only from a live candle at or after the history's own
+      // reading: an older one would move the close backwards.
+      if (lc.t + 10 >= since) { candle.c = lc.c; }
     });
     return out;
   }
 
-  function svgCandles(box, candles, seconds, lines, digits, t0, t1) {
-    /* One candlestick plot, at the box's own pixel size so the labels
-     * are crisp. `lines` [{y, colour, dash, cls}] are drawn across it;
-     * the y scale always includes them, so the entry and stop are on
-     * the chart even on a quiet hour. */
+  function withBands(candles, length) {
+    /* The Algo's band on every candle: Pine's EMA middle (seeded with
+     * the simple average of the first `length` closes) and the
+     * POPULATION sigma of the last `length` closes. None until there
+     * are `length` closes behind it - unmeasured is not zero. */
+    var alpha = 2 / (length + 1), mean = null, sum = 0;
+    candles.forEach(function (c, i) {
+      if (i < length) { sum += c.c; }
+      if (i === length - 1) { mean = sum / length; }
+      else if (i >= length) { mean = alpha * c.c + (1 - alpha) * mean; }
+      if (i < length - 1) { c.m = null; c.sd = null; return; }
+      var last = candles.slice(i - length + 1, i + 1);
+      var avg = last.reduce(function (a, w) { return a + w.c; }, 0) /
+        length;
+      var sd = Math.sqrt(last.reduce(function (a, w) {
+        return a + (w.c - avg) * (w.c - avg);
+      }, 0) / length);
+      c.m = mean;
+      c.sd = sd > 1e-12 ? sd : null;
+    });
+    return candles;
+  }
+
+  function svgCandles(box, candles, seconds, opts) {
+    /* One candlestick plot at the box's own pixel size, so the labels
+     * are crisp. `opts.lines` [{y, colour, dash, cls}] go straight
+     * across; `opts.curves` [{key(c), colour, dash, cls}] follow the
+     * candles, like a band. The y scale includes them all, so the entry
+     * is on the chart even on a quiet day. */
     var w = Math.max(box.clientWidth, 200);
     var h = Math.max(box.clientHeight, 120);
     var left = 52, right = 8, top = 8, bottom = 18;
+    var lines = opts.lines || [], curves = opts.curves || [];
     var ys = [];
     candles.forEach(function (c) { ys.push(c.h, c.l); });
     lines.forEach(function (line) { ys.push(line.y); });
+    curves.forEach(function (curve) {
+      candles.forEach(function (c) {
+        var v = curve.value(c);
+        if (v !== null && v !== undefined && isFinite(v)) { ys.push(v); }
+      });
+    });
     var lo = Math.min.apply(null, ys), hi = Math.max.apply(null, ys);
     if (!isFinite(lo) || !isFinite(hi)) { lo = -1; hi = 1; }
     if (hi - lo < 1e-9) { hi += 1; lo -= 1; }
-    var pad = (hi - lo) * 0.08;
+    var pad = (hi - lo) * 0.06;
     lo -= pad; hi += pad;
-    if (t1 - t0 < seconds) { t1 = t0 + seconds; }
+    var t0 = candles[0].t, t1 = candles[candles.length - 1].t + seconds;
     var plotW = w - left - right;
     function X(t) { return left + (t - t0) / (t1 - t0) * plotW; }
     function Y(v) { return top + (hi - v) / (hi - lo) * (h - top - bottom); }
     var slot = seconds / (t1 - t0) * plotW;
-    var body = Math.max(1, Math.min(14, slot * 0.7));
+    var body = Math.max(1, Math.min(12, slot * 0.7));
     var svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' +
       w + ' ' + h + '" xmlns="http://www.w3.org/2000/svg">';
-    for (var i = 0; i <= 4; i++) {
-      var v = lo + (hi - lo) * i / 4;
+    // Ticks the caller names (z: whole sigmas), or five even ones.
+    var ticks = (opts.ticks || [0, 1, 2, 3, 4].map(function (k) {
+      return lo + (hi - lo) * k / 4;
+    })).filter(function (v) { return v >= lo && v <= hi; });
+    ticks.forEach(function (v) {
       svg += '<line x1="' + left + '" x2="' + (w - right) + '" y1="' +
         Y(v).toFixed(1) + '" y2="' + Y(v).toFixed(1) + '" stroke="' +
         CHART.grid + '" stroke-width="1"/>' +
         '<text x="' + (left - 4) + '" y="' + (Y(v) + 3).toFixed(1) +
         '" text-anchor="end" font-size="10" fill="' + CHART.text + '">' +
-        v.toFixed(digits) + '</text>';
-    }
+        v.toFixed(opts.digits) + '</text>';
+    });
     lines.forEach(function (line) {
       svg += '<line class="' + (line.cls || '') + '" x1="' + left +
         '" x2="' + (w - right) + '" y1="' + Y(line.y).toFixed(1) +
         '" y2="' + Y(line.y).toFixed(1) + '" stroke="' + line.colour +
         '" stroke-width="1" stroke-dasharray="' + line.dash + '"/>';
     });
+    curves.forEach(function (curve) {
+      var path = '', pen = 'M';
+      candles.forEach(function (c) {
+        var v = curve.value(c);
+        if (v === null || v === undefined || !isFinite(v)) {
+          pen = 'M';
+          return;
+        }
+        path += pen + X(c.t + seconds / 2).toFixed(1) + ' ' +
+          Y(v).toFixed(1) + ' ';
+        pen = 'L';
+      });
+      if (path) {
+        svg += '<path class="' + (curve.cls || '') + '" d="' + path +
+          '" fill="none" stroke="' + curve.colour + '" stroke-width="' +
+          (curve.width || 1) + '" stroke-dasharray="' + (curve.dash || '0') +
+          '"/>';
+      }
+    });
     candles.forEach(function (c) {
       var up = c.c >= c.o;
       var colour = up ? CHART.up : CHART.down;
       var x = X(c.t + seconds / 2);
       var yTop = Y(Math.max(c.o, c.c)), yBot = Y(Math.min(c.o, c.c));
-      svg += '<g class="cw-candle ' + (up ? 'up' : 'down') + '">' +
+      svg += '<g class="cw-candle ' + (up ? 'up' : 'down') +
+        (c.beyond ? ' beyond' : '') + '">' +
         '<line x1="' + x.toFixed(1) + '" x2="' + x.toFixed(1) + '" y1="' +
         Y(c.h).toFixed(1) + '" y2="' + Y(c.l).toFixed(1) + '" stroke="' +
         colour + '" stroke-width="1"/>' +
         '<rect x="' + (x - body / 2).toFixed(1) + '" y="' + yTop.toFixed(1) +
         '" width="' + body.toFixed(1) + '" height="' +
         Math.max(1, yBot - yTop).toFixed(1) + '" fill="' + colour +
-        '" stroke="' + colour + '"/></g>';
+        '" stroke="' + (c.beyond ? '#000' : colour) + '"/></g>';
     });
+    var withDay = t1 - t0 > 20 * 3600;
     svg += '<text x="' + left + '" y="' + (h - 4) + '" font-size="10" ' +
-      'fill="' + CHART.text + '">' + chartClock(t0) + '</text>' +
+      'fill="' + CHART.text + '">' + chartClock(t0, withDay) + '</text>' +
       '<text x="' + (w - right) + '" y="' + (h - 4) + '" font-size="10" ' +
-      'text-anchor="end" fill="' + CHART.text + '">' + chartClock(t1) +
-      '</text>';
+      'text-anchor="end" fill="' + CHART.text + '">' +
+      chartClock(t1, withDay) + '</text>';
     return svg + '</svg>';
   }
 
   function drawChart(node, key) {
-    var body = state.charts[key];
+    var tf = chartTf(key);
+    var id = key + '#' + tf;
+    var hist = state.chartHist[id];
+    var live = state.charts[key] || {};
     var zBox = node.querySelector('.cw-z');
     var sBox = node.querySelector('.cw-spread');
-    // Not redrawn three times a second for nothing: only when the data
-    // or the room it is drawn in has changed.
-    var fine = (body && body.candles) || [];
-    var stamp = body ? [body.at, body.minutes, fine.length,
-                        zBox.clientWidth, zBox.clientHeight,
-                        sBox.clientWidth, sBox.clientHeight].join('|') : '';
-    if (node.dataset.drawn === stamp && stamp) { return; }
+    // Only when the data or the room it is drawn in has changed.
+    var stamp = [tf, hist ? hist.at : '', live.at || '',
+                 (live.candles || []).length, zBox.clientWidth,
+                 zBox.clientHeight, sBox.clientWidth,
+                 sBox.clientHeight].join('|');
+    if (node.dataset.drawn === stamp) { return; }
     node.dataset.drawn = stamp;
     var note = node.querySelector('.cw-note');
     var nowBox = node.querySelector('.cw-now');
-    var minutes = (body && body.minutes) || state.chartMinutes[key] || 60;
-    var seconds = CANDLE_SEC[minutes] || Math.max(10, minutes);
     node.querySelector('.cw-size').textContent =
-      seconds < 60 ? seconds + 's candles' : (seconds / 60) + 'm candles';
-    var spread = mergeCandles(fine, seconds, '');
-    if (!spread.length) {
-      var waiting = '<div class="cw-empty">Waiting for price data…</div>';
+      tf === 15 ? '15-minute candles' : tf === 60 ? '1-hour candles'
+        : '4-hour candles';
+    var seconds = tf * 60;
+    if (!hist || !hist.ok || !(hist.candles || []).length) {
+      var why = state.chartHistNote[id];
+      var waiting = '<div class="cw-empty">' + escapeHtml(why
+        ? 'no candles: ' + why : 'reading MT5’s bars…') + '</div>';
       zBox.innerHTML = waiting;
       sBox.innerHTML = waiting;
       nowBox.textContent = '';
-      note.textContent = (body && body.note) || 'reading the chart…';
+      note.textContent = '';
       node.querySelector('.cw-min').textContent = 'Min: —';
       node.querySelector('.cw-max').textContent = 'Max: —';
       return;
     }
-    var z = mergeCandles(fine, seconds, 'z');
-    // ONE time axis for both, ending now: the two charts line up
-    // candle for candle, and an empty stretch on the right is the feed
-    // having said nothing, not the chart stopping early.
-    var t1 = Math.max(body.at || 0, fine[fine.length - 1].t + 10);
-    var t0 = t1 - minutes * 60;
-    var entry = body.entry_z, stop = body.stop_z;
-    var zLines = [{y: 0, colour: CHART.grid, dash: '0'}];
+    var length = hist.length || 20;
+    var entry = hist.entry_z, stop = hist.stop_z;
+    var all = withBands(mergeLive(hist.candles, live.candles, seconds,
+                                  hist.anchor || 0, hist.at || 0), length);
+    var shown = all.slice(-CHART_SHOWN);
+    // z of each candle against ITS OWN band: where it stood when it
+    // was drawn, not against today's.
+    var zc = [];
+    shown.forEach(function (c) {
+      if (c.sd === null || c.m === null) { return; }
+      var z = {t: c.t, o: (c.o - c.m) / c.sd, h: (c.h - c.m) / c.sd,
+               l: (c.l - c.m) / c.sd, c: (c.c - c.m) / c.sd};
+      z.beyond = entry !== null && entry !== undefined &&
+        Math.abs(z.c) >= entry;
+      c.beyond = z.beyond;
+      zc.push(z);
+    });
+    var sdLines = [];
+    [1, 2].forEach(function (k) {
+      sdLines.push({y: k, colour: CHART.sd, dash: '2 3', cls: 'cw-sd'});
+      sdLines.push({y: -k, colour: CHART.sd, dash: '2 3', cls: 'cw-sd'});
+    });
+    var zLines = [{y: 0, colour: CHART.grid, dash: '0'}].concat(sdLines);
     if (entry !== null && entry !== undefined) {
       zLines.push({y: entry, colour: '#dc3545', dash: '5 5',
                    cls: 'cw-entry-up'});
@@ -1144,36 +1307,61 @@
                    cls: 'cw-entry-down'});
     }
     if (stop !== null && stop !== undefined) {
-      zLines.push({y: stop, colour: CHART.stop, dash: '2 3',
+      zLines.push({y: stop, colour: CHART.stop, dash: '1 3',
                    cls: 'cw-stop'});
-      zLines.push({y: -stop, colour: CHART.stop, dash: '2 3',
+      zLines.push({y: -stop, colour: CHART.stop, dash: '1 3',
                    cls: 'cw-stop'});
     }
     node.querySelector('.cw-key-stop').hidden =
       stop === null || stop === undefined;
-    zBox.innerHTML = z.length
-      ? svgCandles(zBox, z, seconds, zLines, 2, t0, t1)
-      : '<div class="cw-empty">no z yet — the Algo’s band is ' +
-        'still filling</div>';
-    sBox.innerHTML = svgCandles(sBox, spread, seconds, [], 4, t0, t1);
+    zBox.innerHTML = zc.length
+      ? svgCandles(zBox, zc, seconds, {lines: zLines, digits: 0,
+                                       ticks: [-4, -3, -2, -1, 0, 1, 2, 3,
+                                               4]})
+      : '<div class="cw-empty">no band yet — fewer than ' + length +
+        ' candles</div>';
+    function band(k) {
+      return function (c) {
+        return c.m === null || c.sd === null ? null : c.m + k * c.sd;
+      };
+    }
+    var curves = [{value: band(0), colour: CHART.mean, cls: 'cw-mean',
+                   width: 1.5}];
+    [1, 2].forEach(function (k) {
+      curves.push({value: band(k), colour: CHART.sd, dash: '2 3',
+                   cls: 'cw-band'});
+      curves.push({value: band(-k), colour: CHART.sd, dash: '2 3',
+                   cls: 'cw-band'});
+    });
+    if (entry !== null && entry !== undefined) {
+      curves.push({value: band(entry), colour: '#dc3545', dash: '5 5',
+                   cls: 'cw-band-entry'});
+      curves.push({value: band(-entry), colour: '#198754', dash: '5 5',
+                   cls: 'cw-band-entry'});
+    }
+    sBox.innerHTML = svgCandles(sBox, shown, seconds,
+                                {curves: curves, digits: 4});
+    var lows = shown.map(function (c) { return c.l; });
+    var highs = shown.map(function (c) { return c.h; });
     node.querySelector('.cw-min').textContent = 'Min: ' +
-      fmt(body.spread_min, 4);
+      fmt(Math.min.apply(null, lows), 4);
     node.querySelector('.cw-max').textContent = 'Max: ' +
-      fmt(body.spread_max, 4);
-    var last = spread[spread.length - 1];
-    var lastZ = z.length ? z[z.length - 1].c : null;
+      fmt(Math.max.apply(null, highs), 4);
+    var last = shown[shown.length - 1];
+    var lastZ = zc.length ? zc[zc.length - 1].c : null;
     nowBox.textContent = 'now: z ' + (lastZ === null ? '—'
       : (lastZ > 0 ? '+' : '') + lastZ.toFixed(2)) +
-      ' · spread ' + fmt(last.c, 4);
-    note.textContent = body.ready
-      ? 'z is the Algo’s own, measured on its candles as it read ' +
-        'it at the time; entry ±' + fmt(entry, 2) +
-        (stop !== null && stop !== undefined ? ', stop ±' + fmt(stop, 2)
-          : ', z-stop off') + '. Every price the engine saw is in a ' +
-        'candle; one the jump guard held back is not.'
-      : 'The Algo’s band is still filling (' + (body.count || 0) +
-        '/' + (body.needed || '?') + ' candles) — no z until it is; ' +
-        'the spread is drawn meanwhile.';
+      ' · spread ' + fmt(last.c, 4) +
+      (last.sd ? ' · 1σ ' + fmt(last.sd, 4) : '');
+    var own = hist.algo_timeframe_min === tf;
+    note.textContent = 'Bands: EMA(' + length + ') middle, ±1σ ' +
+      'and ±2σ dotted, the entry ±' + fmt(entry, 2) +
+      'σ dashed — the Algo’s own arithmetic' +
+      (own ? ', on its own ' + tf + '-minute candles: these are its bands.'
+        : '; the Algo itself reads ' + hist.algo_timeframe_min +
+          '-minute candles.') +
+      ' A candle outlined in black closed beyond the entry band. ' +
+      'Candles from MT5’s bars, the newest moving live.';
   }
 
   function wireLadder(node, key) {

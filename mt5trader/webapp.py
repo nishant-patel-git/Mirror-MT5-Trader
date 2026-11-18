@@ -327,6 +327,19 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                             spread_min=min(lows) if lows else None,
                             spread_max=max(highs) if highs else None))
 
+    @app.get('/api/chart_history/<path:key>')
+    def api_chart_history(key):
+        """One ladder's 15m / 1h / 4h candles, as the engine last fetched
+        them from MT5 - or that there are none yet, so the screen asks
+        the engine for them. Read-only."""
+        from .chart import history_path
+        tf = request.args.get('tf', '15')
+        body = (read_json(history_path(status_path)) or {}).get(
+            f'{key}#{tf}')
+        if not body:
+            return jsonify({'ok': False, 'missing': True})
+        return jsonify(body)
+
     @app.get('/api/config')
     def api_config():
         raw = cfg.load_raw(config_path)

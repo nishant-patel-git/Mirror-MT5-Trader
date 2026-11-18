@@ -340,6 +340,12 @@ class CommandRunner:
         return self.coordinator.algo_backtest(payload['pair'],
                                               payload.get('days', 5))
 
+    def _do_chart_history(self, payload):
+        """One ladder's spread as 15m, 1h or 4h candles from MT5's bars,
+        for the chart window. Reads only."""
+        return self.coordinator.chart_history(
+            payload['pair'], payload.get('timeframe_min', 15))
+
     def _do_backfill_signals(self, payload):
         """DERIVE the last N days of signals from MT5's own bars.
 
