@@ -53,6 +53,9 @@ class LocalLeg:
         return {
             'account': self.name,
             'login': info.login, 'server': info.server,
+            # The broker's own name for itself ("CFI Financial Group"),
+            # where the server is a machine's name ("CFI3-Real").
+            'company': getattr(info, 'company', None) or None,
             'name': getattr(info, 'name', ''),
             'currency': getattr(info, 'currency', 'USD'),
             'leverage': getattr(info, 'leverage', None),
