@@ -47,6 +47,9 @@
     // a tick-by-tick record, and a day of them is the usual read.
     zoneDays: 1, zoneDate: '', deriving: false, deriveNote: null,
     showUnconfirmed: false,
+    //: The notional table's own picked range of the broker's days,
+    //: both inclusive; either alone is that one day.
+    volumeFrom: '', volumeTo: '',
     //: The pair charts: the last series read, when, and how much of
     //: the session each one draws.
     charts: {}, chartFetch: {}, chartTf: {}, chartHist: {},
@@ -973,6 +976,14 @@
     node.querySelector('.close').addEventListener('click', function () {
       closePanel(panelId('chart', key));
     });
+    // The hover: a crosshair on both charts and a readout of the candle.
+    [['.cw-z', 'z'], ['.cw-spread', 's']].forEach(function (pair) {
+      var box = node.querySelector(pair[0]);
+      box.addEventListener('mousemove', function (e) {
+        chartHover(node, key, pair[1], e);
+      });
+      box.addEventListener('mouseleave', function () { chartUnhover(node); });
+    });
     node.querySelectorAll('.cw-tfs button').forEach(function (button) {
       button.addEventListener('click', function () {
         state.chartTf[key] = parseInt(button.dataset.tf, 10) || 15;
@@ -1152,22 +1163,28 @@
     return candles;
   }
 
-  function svgCandles(box, candles, seconds, opts) {
+  function svgCandles(box, candles, opts) {
     /* One candlestick plot at the box's own pixel size, so the labels
-     * are crisp. `opts.lines` [{y, colour, dash, cls}] go straight
-     * across; `opts.curves` [{key(c), colour, dash, cls}] follow the
-     * candles, like a band. The y scale includes them all, so the entry
-     * is on the chart even on a quiet day. */
+     * are crisp. Candles sit on the CLOCK: a stretch the broker sent
+     * nothing for is left as a gap, not closed up. `candles` may hold
+     * nulls - a slot with nothing to draw (a z before the band has its
+     * length) - and `opts.times` gives every slot its time, so the z
+     * and the spread line up candle for candle.
+     *
+     * `opts.lines` [{y, colour, dash, cls}] go straight across;
+     * `opts.curves` [{value(c), colour, dash, cls}] follow the candles,
+     * like a band. Returns the SVG and the geometry the hover reads. */
     var w = Math.max(box.clientWidth, 200);
     var h = Math.max(box.clientHeight, 120);
     var left = 52, right = 8, top = 8, bottom = 18;
     var lines = opts.lines || [], curves = opts.curves || [];
+    var n = candles.length;
     var ys = [];
-    candles.forEach(function (c) { ys.push(c.h, c.l); });
+    candles.forEach(function (c) { if (c) { ys.push(c.h, c.l); } });
     lines.forEach(function (line) { ys.push(line.y); });
     curves.forEach(function (curve) {
       candles.forEach(function (c) {
-        var v = curve.value(c);
+        var v = c ? curve.value(c) : null;
         if (v !== null && v !== undefined && isFinite(v)) { ys.push(v); }
       });
     });
@@ -1176,11 +1193,16 @@
     if (hi - lo < 1e-9) { hi += 1; lo -= 1; }
     var pad = (hi - lo) * 0.06;
     lo -= pad; hi += pad;
-    var t0 = candles[0].t, t1 = candles[candles.length - 1].t + seconds;
+    var times = opts.times || [];
+    var seconds = opts.seconds || 60;
+    var t0 = times.length ? times[0] : 0;
+    var t1 = times.length ? times[times.length - 1] + seconds : 1;
     var plotW = w - left - right;
-    function X(t) { return left + (t - t0) / (t1 - t0) * plotW; }
-    function Y(v) { return top + (hi - v) / (hi - lo) * (h - top - bottom); }
     var slot = seconds / (t1 - t0) * plotW;
+    function X(i) {
+      return left + (times[i] + seconds / 2 - t0) / (t1 - t0) * plotW;
+    }
+    function Y(v) { return top + (hi - v) / (hi - lo) * (h - top - bottom); }
     var body = Math.max(1, Math.min(12, slot * 0.7));
     var svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' +
       w + ' ' + h + '" xmlns="http://www.w3.org/2000/svg">';
@@ -1204,14 +1226,13 @@
     });
     curves.forEach(function (curve) {
       var path = '', pen = 'M';
-      candles.forEach(function (c) {
-        var v = curve.value(c);
+      candles.forEach(function (c, i) {
+        var v = c ? curve.value(c) : null;
         if (v === null || v === undefined || !isFinite(v)) {
           pen = 'M';
           return;
         }
-        path += pen + X(c.t + seconds / 2).toFixed(1) + ' ' +
-          Y(v).toFixed(1) + ' ';
+        path += pen + X(i).toFixed(1) + ' ' + Y(v).toFixed(1) + ' ';
         pen = 'L';
       });
       if (path) {
@@ -1221,10 +1242,11 @@
           '"/>';
       }
     });
-    candles.forEach(function (c) {
+    candles.forEach(function (c, i) {
+      if (!c) { return; }
       var up = c.c >= c.o;
       var colour = up ? CHART.up : CHART.down;
-      var x = X(c.t + seconds / 2);
+      var x = X(i);
       var yTop = Y(Math.max(c.o, c.c)), yBot = Y(Math.min(c.o, c.c));
       svg += '<g class="cw-candle ' + (up ? 'up' : 'down') +
         (c.beyond ? ' beyond' : '') + '">' +
@@ -1236,13 +1258,181 @@
         Math.max(1, yBot - yTop).toFixed(1) + '" fill="' + colour +
         '" stroke="' + (c.beyond ? '#000' : colour) + '"/></g>';
     });
-    var withDay = t1 - t0 > 20 * 3600;
-    svg += '<text x="' + left + '" y="' + (h - 4) + '" font-size="10" ' +
-      'fill="' + CHART.text + '">' + chartClock(t0, withDay) + '</text>' +
-      '<text x="' + (w - right) + '" y="' + (h - 4) + '" font-size="10" ' +
-      'text-anchor="end" fill="' + CHART.text + '">' +
-      chartClock(t1, withDay) + '</text>';
-    return svg + '</svg>';
+    // The time along the bottom: five labels evenly across the clock,
+    // the day added where the chart spans more than one.
+    if (times.length) {
+      var withDay = t1 - t0 > 20 * 3600;
+      [0, 0.25, 0.5, 0.75, 1].forEach(function (f, k) {
+        var anchor = k === 0 ? 'start' : k === 4 ? 'end' : 'middle';
+        svg += '<text x="' + (left + f * plotW).toFixed(1) + '" y="' +
+          (h - 4) + '" font-size="10" text-anchor="' + anchor + '" fill="' +
+          CHART.text + '">' + chartClock(t0 + f * (t1 - t0), withDay) +
+          '</text>';
+      });
+    }
+    return {svg: svg + '</svg>',
+            geom: {left: left, right: right, top: top, bottom: bottom,
+                   w: w, h: h, lo: lo, hi: hi, n: n, slot: slot,
+                   t0: t0, t1: t1, seconds: seconds, times: times,
+                   x: X}};
+  }
+
+  // -- the hover -------------------------------------------------------
+  //
+  // A crosshair across BOTH charts on the same candle, and a readout of
+  // everything about it: its open, high, low and close, the band's
+  // middle and every band line in price, sigma, and the z of each. The
+  // price under the pointer is read off the axis it is over.
+
+  function chartHover(node, key, plot, event) {
+    var drawn = node._drawn;
+    if (!drawn) { return; }
+    var geom = drawn.geom[plot === 'z' ? 'z' : 's'];
+    if (!geom) { return; }
+    var box = node.querySelector(plot === 'z' ? '.cw-z' : '.cw-spread');
+    var rect = box.getBoundingClientRect();
+    var x = event.clientX - rect.left, y = event.clientY - rect.top;
+    if (x < geom.left || x > geom.w - geom.right) {
+      return chartUnhover(node);
+    }
+    // The candle under the pointer, by time: in a gap there is none.
+    var at = geom.t0 + (x - geom.left) / (geom.w - geom.left -
+      geom.right) * (geom.t1 - geom.t0);
+    var i = -1;
+    for (var k = 0; k < geom.times.length; k++) {
+      if (geom.times[k] <= at && at < geom.times[k] + geom.seconds) {
+        i = k;
+        break;
+      }
+    }
+    if (i < 0) { return chartUnhover(node); }
+    var c = drawn.shown[i], z = drawn.zc[i];
+    if (!c) { return chartUnhover(node); }
+    // The vertical line, on both plots, through the candle.
+    ['.cw-z', '.cw-spread'].forEach(function (selector) {
+      var other = node.querySelector(selector);
+      var g = drawn.geom[selector === '.cw-z' ? 'z' : 's'];
+      var line = crossNode(other, 'cw-xline');
+      if (!g) { line.hidden = true; return; }
+      line.hidden = false;
+      line.style.left = g.x(i) + 'px';
+      line.style.top = g.top + 'px';
+      line.style.height = (g.h - g.top - g.bottom) + 'px';
+    });
+    // The level under the pointer, on the plot it is over.
+    var value = geom.hi - (y - geom.top) / (geom.h - geom.top -
+      geom.bottom) * (geom.hi - geom.lo);
+    node.querySelectorAll('.cw-yline, .cw-ylabel').forEach(function (el_) {
+      el_.hidden = true;
+    });
+    if (y >= geom.top && y <= geom.h - geom.bottom) {
+      var yline = crossNode(box, 'cw-yline');
+      yline.hidden = false;
+      yline.style.top = y + 'px';
+      yline.style.left = geom.left + 'px';
+      yline.style.width = (geom.w - geom.left - geom.right) + 'px';
+      var ylabel = crossNode(box, 'cw-ylabel');
+      ylabel.hidden = false;
+      ylabel.style.top = (y - 8) + 'px';
+      ylabel.textContent = plot === 'z'
+        ? (value > 0 ? '+' : '') + value.toFixed(2) + 'σ'
+        : value.toFixed(4);
+    }
+    var tip = crossNode(node.querySelector('.cw-body'), 'cw-tip');
+    tip.hidden = false;
+    tip.innerHTML = chartTipHtml(drawn, c, z);
+    // Beside the pointer, flipped to the other side near the edge.
+    var bodyRect = node.querySelector('.cw-body').getBoundingClientRect();
+    var tx = event.clientX - bodyRect.left + 14;
+    var ty = event.clientY - bodyRect.top + 14;
+    if (tx + tip.offsetWidth > bodyRect.width - 4) {
+      tx = event.clientX - bodyRect.left - tip.offsetWidth - 14;
+    }
+    if (ty + tip.offsetHeight > bodyRect.height - 4) {
+      ty = Math.max(4, event.clientY - bodyRect.top - tip.offsetHeight - 14);
+    }
+    tip.style.left = Math.max(4, tx) + 'px';
+    tip.style.top = ty + 'px';
+    node._hover = {plot: plot, clientX: event.clientX,
+                   clientY: event.clientY};
+  }
+
+  function chartUnhover(node) {
+    node.querySelectorAll('.cw-xline, .cw-yline, .cw-ylabel, .cw-tip')
+      .forEach(function (el_) { el_.hidden = true; });
+    node._hover = null;
+  }
+
+  function crossNode(parent, cls) {
+    var found = parent.querySelector(':scope > .' + cls);
+    if (found) { return found; }
+    var made = document.createElement('div');
+    made.className = cls;
+    made.hidden = true;
+    parent.appendChild(made);
+    return made;
+  }
+
+  function chartTipHtml(drawn, c, z) {
+    /* Everything about one candle, in price and in sigma. */
+    var entry = drawn.entry;
+    function p(v) { return v === null || v === undefined ? DASH : fmt(v, 4); }
+    function band(k) { return c.m === null || !c.sd ? null : c.m + k * c.sd; }
+    var when = new Date(c.t * 1000);
+    var head = when.toLocaleString([], {weekday: 'short', day: 'numeric',
+                                        month: 'short', hour: '2-digit',
+                                        minute: '2-digit'}) +
+      ' · ' + drawn.label;
+    // Each price with its SCORE: how many of the band's sigmas it
+    // stands from the mean - the z, as a plain number.
+    function score(v) {
+      return v === null || v === undefined || !isFinite(v) ? ''
+        : (v > 0 ? '+' : '') + v.toFixed(2);
+    }
+    var rows = [
+      ['', 'Price', 'Score', 'cols'],
+      ['Open', p(c.o), z ? score(z.o) : ''],
+      ['High', p(c.h), z ? score(z.h) : ''],
+      ['Low', p(c.l), z ? score(z.l) : ''],
+      ['Close', p(c.c), z ? score(z.c) : '', c.c >= c.o ? 'up' : 'down'],
+      ['Range', p(c.h - c.l), c.sd ? ((c.h - c.l) / c.sd).toFixed(2) : '']
+    ];
+    var bands = [];
+    if (entry !== null && entry !== undefined) {
+      bands.push(['+ entry', p(band(entry)), score(entry), 'entry-up']);
+    }
+    // Only what the trader acts on: the entry either side, and the mean.
+    bands.push(['Mean', p(c.m), score(0) || '0.00', 'mean']);
+    if (entry !== null && entry !== undefined) {
+      bands.push(['\u2212 entry', p(band(-entry)), score(-entry),
+                  'entry-down']);
+    }
+    function table(list) {
+      return '<table>' + list.map(function (r) {
+        return '<tr class="' + (r[3] || '') + '"><th>' + r[0] +
+          '</th><td>' + r[1] + '</td><td class="z">' + (r[2] || '') +
+          '</td></tr>';
+      }).join('') + '</table>';
+    }
+    var verdict = '';
+    if (z && entry !== null && entry !== undefined) {
+      verdict = Math.abs(z.c) >= entry
+        ? '<div class="beyond">closed beyond the entry band</div>'
+        : Math.abs(z.h) >= entry || Math.abs(z.l) >= entry
+          ? '<div class="touched">touched the entry band, closed inside</div>'
+          : '';
+    }
+    if (!z) {
+      verdict = '<div class="hint">no band yet — fewer than ' +
+        drawn.length + ' candles behind it</div>';
+    }
+    // ONE table, so the band prices line up under the candle's.
+    var html = table(rows.concat([['', '', '', 'sep']]).concat(bands));
+    html = html.replace('<tr class="sep"><th></th><td></td>' +
+                        '<td class="z"></td></tr>',
+                        '<tr class="sep"><th colspan="3">Bands</th></tr>');
+    return '<div class="head">' + escapeHtml(head) + '</div>' + html +
+      verdict;
   }
 
   function drawChart(node, key) {
@@ -1261,9 +1451,9 @@
     node.dataset.drawn = stamp;
     var note = node.querySelector('.cw-note');
     var nowBox = node.querySelector('.cw-now');
-    node.querySelector('.cw-size').textContent =
-      tf === 15 ? '15-minute candles' : tf === 60 ? '1-hour candles'
-        : '4-hour candles';
+    var label = tf === 15 ? '15-minute candles' : tf === 60
+      ? '1-hour candles' : '4-hour candles';
+    node.querySelector('.cw-size').textContent = label;
     var seconds = tf * 60;
     if (!hist || !hist.ok || !(hist.candles || []).length) {
       var why = state.chartHistNote[id];
@@ -1273,6 +1463,7 @@
       sBox.innerHTML = waiting;
       nowBox.textContent = '';
       note.textContent = '';
+      node._drawn = null;
       node.querySelector('.cw-min').textContent = 'Min: —';
       node.querySelector('.cw-max').textContent = 'Max: —';
       return;
@@ -1283,23 +1474,19 @@
                                   hist.anchor || 0, hist.at || 0), length);
     var shown = all.slice(-CHART_SHOWN);
     // z of each candle against ITS OWN band: where it stood when it
-    // was drawn, not against today's.
-    var zc = [];
-    shown.forEach(function (c) {
-      if (c.sd === null || c.m === null) { return; }
+    // was drawn, not against today's. Null where there is no band yet,
+    // so the two charts keep the same slots.
+    var zc = shown.map(function (c) {
+      if (c.sd === null || c.m === null) { return null; }
       var z = {t: c.t, o: (c.o - c.m) / c.sd, h: (c.h - c.m) / c.sd,
                l: (c.l - c.m) / c.sd, c: (c.c - c.m) / c.sd};
       z.beyond = entry !== null && entry !== undefined &&
         Math.abs(z.c) >= entry;
       c.beyond = z.beyond;
-      zc.push(z);
+      return z;
     });
-    var sdLines = [];
-    [1, 2].forEach(function (k) {
-      sdLines.push({y: k, colour: CHART.sd, dash: '2 3', cls: 'cw-sd'});
-      sdLines.push({y: -k, colour: CHART.sd, dash: '2 3', cls: 'cw-sd'});
-    });
-    var zLines = [{y: 0, colour: CHART.grid, dash: '0'}].concat(sdLines);
+    var times = shown.map(function (c) { return c.t; });
+    var zLines = [{y: 0, colour: CHART.grid, dash: '0'}];
     if (entry !== null && entry !== undefined) {
       zLines.push({y: entry, colour: '#dc3545', dash: '5 5',
                    cls: 'cw-entry-up'});
@@ -1314,12 +1501,18 @@
     }
     node.querySelector('.cw-key-stop').hidden =
       stop === null || stop === undefined;
-    zBox.innerHTML = zc.length
-      ? svgCandles(zBox, zc, seconds, {lines: zLines, digits: 0,
-                                       ticks: [-4, -3, -2, -1, 0, 1, 2, 3,
-                                               4]})
-      : '<div class="cw-empty">no band yet — fewer than ' + length +
-        ' candles</div>';
+    var geom = {z: null, s: null};
+    if (zc.some(function (z) { return z; })) {
+      var zPlot = svgCandles(zBox, zc, {lines: zLines, digits: 0,
+                                        ticks: [-4, -3, -2, -1, 0, 1, 2, 3,
+                                                4], times: times,
+                                        seconds: seconds});
+      zBox.innerHTML = zPlot.svg;
+      geom.z = zPlot.geom;
+    } else {
+      zBox.innerHTML = '<div class="cw-empty">no band yet — fewer ' +
+        'than ' + length + ' candles</div>';
+    }
     function band(k) {
       return function (c) {
         return c.m === null || c.sd === null ? null : c.m + k * c.sd;
@@ -1327,20 +1520,25 @@
     }
     var curves = [{value: band(0), colour: CHART.mean, cls: 'cw-mean',
                    width: 1.5}];
-    [1, 2].forEach(function (k) {
-      curves.push({value: band(k), colour: CHART.sd, dash: '2 3',
-                   cls: 'cw-band'});
-      curves.push({value: band(-k), colour: CHART.sd, dash: '2 3',
-                   cls: 'cw-band'});
-    });
     if (entry !== null && entry !== undefined) {
       curves.push({value: band(entry), colour: '#dc3545', dash: '5 5',
                    cls: 'cw-band-entry'});
       curves.push({value: band(-entry), colour: '#198754', dash: '5 5',
                    cls: 'cw-band-entry'});
     }
-    sBox.innerHTML = svgCandles(sBox, shown, seconds,
-                                {curves: curves, digits: 4});
+    var sPlot = svgCandles(sBox, shown, {curves: curves, digits: 4,
+                                         times: times, seconds: seconds});
+    sBox.innerHTML = sPlot.svg;
+    geom.s = sPlot.geom;
+    node._drawn = {shown: shown, zc: zc, geom: geom, entry: entry,
+                   length: length, label: label};
+    // A redraw under a resting pointer keeps its readout, on the
+    // candle now there.
+    if (node._hover) {
+      chartHover(node, key, node._hover.plot,
+                 {clientX: node._hover.clientX,
+                  clientY: node._hover.clientY});
+    }
     var lows = shown.map(function (c) { return c.l; });
     var highs = shown.map(function (c) { return c.h; });
     node.querySelector('.cw-min').textContent = 'Min: ' +
@@ -1348,20 +1546,20 @@
     node.querySelector('.cw-max').textContent = 'Max: ' +
       fmt(Math.max.apply(null, highs), 4);
     var last = shown[shown.length - 1];
-    var lastZ = zc.length ? zc[zc.length - 1].c : null;
+    var lastZ = zc[zc.length - 1] ? zc[zc.length - 1].c : null;
     nowBox.textContent = 'now: z ' + (lastZ === null ? '—'
       : (lastZ > 0 ? '+' : '') + lastZ.toFixed(2)) +
       ' · spread ' + fmt(last.c, 4) +
       (last.sd ? ' · 1σ ' + fmt(last.sd, 4) : '');
     var own = hist.algo_timeframe_min === tf;
-    note.textContent = 'Bands: EMA(' + length + ') middle, ±1σ ' +
-      'and ±2σ dotted, the entry ±' + fmt(entry, 2) +
-      'σ dashed — the Algo’s own arithmetic' +
+    note.textContent = 'Hover a candle for its prices, the mean and the entry bands. ' +
+      'Bands: EMA(' + length + ') middle, the entry ±' + fmt(entry, 2) + 'σ dashed — the ' +
+      'Algo’s own arithmetic' +
       (own ? ', on its own ' + tf + '-minute candles: these are its bands.'
         : '; the Algo itself reads ' + hist.algo_timeframe_min +
           '-minute candles.') +
-      ' A candle outlined in black closed beyond the entry band. ' +
-      'Candles from MT5’s bars, the newest moving live.';
+      ' Outlined: closed beyond the entry band. Candles from MT5’s ' +
+      'bars, the newest moving live.';
   }
 
   function wireLadder(node, key) {
@@ -4229,6 +4427,14 @@
           state.zoneDate = e.target.value || '';
           loadAnalysis(true);
         }
+        if (e.target.classList.contains('an-volume-from')) {
+          state.volumeFrom = e.target.value || '';
+          loadAnalysis(true);
+        }
+        if (e.target.classList.contains('an-volume-to')) {
+          state.volumeTo = e.target.value || '';
+          loadAnalysis(true);
+        }
         if (e.target.classList.contains('an-bt-days')) {
           state.analysisBtDays = Number(e.target.value);
         }
@@ -4929,6 +5135,10 @@
     fetch('/api/analysis?days=' + state.analysisDays +
           '&zone_days=' + state.zoneDays +
           (state.zoneDate ? '&date=' + encodeURIComponent(state.zoneDate) : '') +
+          (state.volumeFrom ? '&volume_from=' +
+           encodeURIComponent(state.volumeFrom) : '') +
+          (state.volumeTo ? '&volume_to=' +
+           encodeURIComponent(state.volumeTo) : '') +
           (state.analysisPair ? '&pair=' +
            encodeURIComponent(state.analysisPair) : ''))
       .then(function (r) { return r.json(); })
@@ -5460,6 +5670,112 @@
       'reached is booked as the stop.</div>';
     return html;
   }
+  function compactNumber(value) {
+    /* 1,234,567 -> 1.23M: a notional is read by its size, and seven
+     * digits across a table is a column nobody reads. The exact figure
+     * is in the cell's title. */
+    if (value === null || value === undefined) { return DASH; }
+    var size = Math.abs(value);
+    var units = [[1e9, 'B'], [1e6, 'M'], [1e3, 'K']];
+    for (var i = 0; i < units.length; i++) {
+      if (size >= units[i][0]) {
+        return (value / units[i][0]).toFixed(2) + units[i][1];
+      }
+    }
+    return value.toFixed(0);
+  }
+
+  function notionalHtml(data, name) {
+    /* Notional volume traded, per ladder and in all, today and over the
+     * last 7 and 30 days, from the broker's own deals. */
+    var html = '<h4>Notional traded <small>\u2014 lots \u00d7 contract ' +
+      'size \u00d7 price, both legs, on the broker\u2019s own deals, in ' +
+      'the instruments\u2019 price currency</small></h4>' +
+      '<div class="an-bar">and from ' +
+      '<input type="date" class="an-volume-from" value="' +
+      escapeHtml(state.volumeFrom) + '"' +
+      ' max="' + new Date().toISOString().slice(0, 10) + '"> to ' +
+      '<input type="date" class="an-volume-to" value="' +
+      escapeHtml(state.volumeTo) + '"' +
+      ' max="' + new Date().toISOString().slice(0, 10) + '">' +
+      ' <span class="hint">' + (state.volumeFrom || state.volumeTo
+        ? 'the broker\u2019s days, both included \u2014 clear both to ' +
+          'hide the column'
+        : 'pick a range for a column of its own') + '</span></div>';
+    if (!data) {
+      return html + '<p class="hint">the deals could not be read</p>';
+    }
+    var periods = data.periods || [];
+    function cell(c) {
+      c = c || {};
+      if (!c.fills) { return '<td class="hint">' + DASH + '</td>'; }
+      var exact = Math.round(c.notional).toLocaleString();
+      var title = exact + ' notional \u00b7 leg A ' +
+        Math.round(c.a).toLocaleString() + ' \u00b7 leg B ' +
+        Math.round(c.b).toLocaleString() + ' \u00b7 ' + c.fills +
+        ' deal(s) \u00b7 ' + fmt(c.lots, 2) + ' lots' +
+        (c.unpriced ? ' \u00b7 ' + c.unpriced + ' deal(s) with no ' +
+          'contract size, counted but not priced' : '');
+      // None of it priced is unmeasured, not zero.
+      var shown = c.unpriced >= c.fills ? DASH : compactNumber(c.notional);
+      return '<td title="' + escapeHtml(title) + '"><b>' + shown + '</b>' +
+        (c.unpriced ? '<sup class="down" title="' + c.unpriced +
+          ' not priced">*</sup>' : '') +
+        '<div class="hint">' + c.fills + ' deal' +
+        (c.fills === 1 ? '' : 's') + ' \u00b7 ' + fmt(c.lots, 2) +
+        ' lots</div></td>';
+    }
+    html += '<table class="an-table an-notional"><thead><tr>' +
+      '<th class="l">Ladder</th>' + periods.map(function (p) {
+        return '<th>' + escapeHtml(p.label) + '</th>';
+      }).join('') + '</tr></thead><tbody>';
+    var rows = data.rows || [];
+    if (!rows.length) {
+      html += '<tr><td colspan="' + (periods.length + 1) + '" class="hint">' +
+        'nothing traded in the last 30 days</td></tr>';
+    }
+    rows.forEach(function (r) {
+      html += '<tr><td class="l">' + name(r.pair_key) + '</td>' +
+        periods.map(function (p) { return cell(r[p.key]); }).join('') +
+        '</tr>';
+    });
+    if (rows.length > 1) {
+      html += '<tr class="an-total"><td class="l"><b>All ladders</b></td>' +
+        periods.map(function (p) { return cell(data.total[p.key]); })
+          .join('') + '</tr>';
+    }
+    var unpriced = (data.total && data.total['30d'] &&
+                    data.total['30d'].unpriced) || 0;
+    html += '</tbody></table>';
+    // The same, per ACCOUNT: how much is going through each login at
+    // each broker.
+    var info = data.account_info || {};
+    var accounts = data.accounts || [];
+    if (accounts.length) {
+      html += '<table class="an-table an-notional an-notional-accounts">' +
+        '<thead><tr><th class="l">Account</th><th class="l">Broker</th>' +
+        periods.map(function (p) {
+          return '<th>' + escapeHtml(p.label) + '</th>';
+        }).join('') + '</tr></thead><tbody>';
+      accounts.forEach(function (r) {
+        var who = info[r.account] || {};
+        html += '<tr><td class="l">' + escapeHtml(r.account) +
+          (who.login ? '<div class="hint">#' + escapeHtml(who.login) +
+            '</div>' : '') + '</td><td class="l">' +
+          escapeHtml(who.broker || DASH) + '</td>' +
+          periods.map(function (p) { return cell(r[p.key]); }).join('') +
+          '</tr>';
+      });
+      html += '</tbody></table>';
+    }
+    if (unpriced) {
+      html += '<div class="note">* ' + unpriced + ' deal(s) are counted ' +
+        'but not priced: their contract size is not known (a ladder ' +
+        'deleted before any position on it was recorded).</div>';
+    }
+    return html;
+  }
+
   function analysisPane() {
     var a = state.analysis;
     var pairs = state.snapshot.pairs || {};
@@ -5517,6 +5833,10 @@
       anTile('Win rate', anPct(s.win_rate), '',
            (s.wins || 0) + ' won, ' + (s.losses || 0) + ' lost') +
       '</div>';
+
+    // 1b. NOTIONAL TRADED: lots x contract size x price, on the broker's
+    // own deals - today, and over the last 7 and 30 days.
+    html += notionalHtml(a.notional, name);
 
     // 2. Drawdown, and each trade's worst and best point.
     var d = a.drawdown || {};

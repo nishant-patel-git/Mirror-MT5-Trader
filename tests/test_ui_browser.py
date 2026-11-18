@@ -6010,7 +6010,7 @@ def write_chart_history(page, key, tf, count=150):
 
 def test_the_chart_opens_and_closes_from_the_ladder(page):
     """15m, 1h and 4h candles of the spread with the Algo's bands round
-    them - the mean, +-1 and +-2 sigma, and the entry - and the z of
+    them - the mean and the entry - and the z of
     each candle against its own band: whether the spread is past the
     band, on the screen. Opened and closed from the ladder's title bar."""
     key = 'XAUUSD_|GC1226'
@@ -6030,17 +6030,57 @@ def test_the_chart_opens_and_closes_from_the_ladder(page):
     # entry either side.
     assert win.locator('.cw-spread .cw-candle').count() == 100
     assert win.locator('.cw-spread .cw-mean').count() == 1
-    assert win.locator('.cw-spread .cw-band').count() == 4
+    # The +-1 and +-2 sigma lines are not drawn: the entry and the mean
+    # are the levels a trade is read against.
+    assert win.locator('.cw-spread .cw-band').count() == 0
     assert win.locator('.cw-spread .cw-band-entry').count() == 2
     # z against each candle's own band, with the same levels across.
     assert win.locator('.cw-z .cw-candle').count() == 100
-    assert win.locator('.cw-z .cw-sd').count() == 4
+    assert win.locator('.cw-z .cw-sd').count() == 0
     assert win.locator('.cw-z .cw-entry-up').count() == 1
     assert win.locator('.cw-z .cw-entry-down').count() == 1
     assert win.locator('.cw-z .cw-stop').count() == 0     # the z-stop is off
     # The jump near the end closes beyond the entry band, and is marked.
     assert win.locator('.cw-z .cw-candle.beyond').count() >= 1
     assert 'these are its bands' in win.locator('.cw-note').text_content()
+    # HOVER: the candle under the pointer, in price and in sigma - its
+    # open, high, low and close, the mean and every band line - with a
+    # crosshair through it on BOTH charts.
+    box = win.locator('.cw-spread').bounding_box()
+    page.mouse.move(box['x'] + box['width'] * 0.6,
+                    box['y'] + box['height'] * 0.5)
+    page.wait_for_selector('.chartwin .cw-tip:not([hidden])', timeout=WAIT)
+    tip = win.locator('.cw-tip').text_content()
+    for word in ('Price', 'Score', 'Open', 'High', 'Low', 'Close', 'Range',
+                 'Mean', '+ entry', '\u2212 entry', '15-minute candles'):
+        assert word in tip, word
+    # Each price with its score, a plain number - no sigma symbol.
+    values = win.locator('.cw-tip td').all_text_contents()
+    assert values and not any('\u03c3' in v for v in values), values
+    scores = win.locator('.cw-tip td.z').all_text_contents()
+    # The bands' own scores: the entry either side, and the mean at 0.
+    assert {'+2.50', '0.00', '-2.50'} <= set(scores), scores
+    # The bands it gives are the entry and the mean - nothing between.
+    labels = win.locator('.cw-tip th').all_text_contents()
+    for word in ('+2\u03c3', '+1\u03c3', '\u22121\u03c3', '\u22122\u03c3', '1\u03c3'):
+        assert word not in labels, word
+    assert win.locator('.cw-z .cw-xline:not([hidden])').count() == 1
+    assert win.locator('.cw-spread .cw-xline:not([hidden])').count() == 1
+    # The level under the pointer, read off the axis it is over.
+    assert win.locator('.cw-spread .cw-ylabel:not([hidden])').count() == 1
+    # The readout is the candle's own numbers: its high is its high.
+    readout = page.evaluate('''() => {
+        const node = document.querySelector('.chartwin');
+        const tip = node.querySelector('.cw-tip').textContent;
+        const shown = node._drawn.shown;
+        return {tip, highs: shown.map(c => c.h.toFixed(4))};
+    }''')
+    assert any(h in readout['tip'] for h in readout['highs'])
+    # Away from the chart, it all goes.
+    page.mouse.move(box['x'] - 40, box['y'] - 40)
+    page.wait_for_timeout(150)
+    assert win.locator('.cw-tip:not([hidden])').count() == 0
+    assert win.locator('.cw-xline:not([hidden])').count() == 0
     assert 'Min:' in win.text_content() and 'Max:' in win.text_content()
     assert 'on' in button.get_attribute('class')
     # 1h candles: the same chart, read off the 1-hour history.
@@ -6109,6 +6149,91 @@ def test_the_signal_journal_names_the_accounts_the_edge_and_hides_the_unconfirme
     assert '2.10× / 1.50× (off)' in text
     page.click('.monitor .an-toggle-unconfirmed')
     assert '-7.73' not in page.text_content('.monitor .analysis')
+    assert page.errors == []
+
+
+def test_the_analysis_page_shows_the_notional_traded(page):
+    """Today, 7 days and 30 days, per ladder and in all - compact, the
+    exact figure and each leg in the cell's title, and a deal that could
+    not be priced flagged rather than dropped."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        const cell = (n, a, b, fills, lots, unpriced) => ({notional: n,
+            a: a, b: b, fills: fills, lots: lots, unpriced: unpriced || 0});
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis', 'C|D': 'Gold'},
+          summary: {}, drawdown: {}, calibration: {}, shadow: {},
+          excursion: [], journal: [], signals: [], signal_tally: {},
+          notional: {
+            periods: [{key: 'today', label: 'Today'},
+                      {key: '7d', label: 'Last 7 days'},
+                      {key: '30d', label: 'Last 30 days'}],
+            rows: [
+              {pair_key: 'A|B', today: cell(1234567, 600000, 634567, 4, 2),
+               '7d': cell(9876543, 5e6, 4876543, 30, 15),
+               '30d': cell(45e6, 22e6, 23e6, 120, 60)},
+              {pair_key: 'C|D', today: cell(0, 0, 0, 0, 0),
+               '7d': cell(250000, 125000, 125000, 2, 1),
+               '30d': cell(250000, 125000, 125000, 3, 1, 1)}],
+            accounts: [
+              {account: 'CFI 19514405', today: cell(600000, 600000, 0, 2, 1),
+               '7d': cell(5e6, 5e6, 0, 15, 8), '30d': cell(22e6, 22e6, 0, 60, 30)}],
+            account_info: {'CFI 19514405': {login: 19514405,
+                                            broker: 'CFI Financial Group'}},
+            total: {today: cell(1234567, 600000, 634567, 4, 2),
+                    '7d': cell(10126543, 5125000, 5001543, 32, 16),
+                    '30d': cell(45250000, 22125000, 23125000, 123, 61, 1)}}};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .an-notional', timeout=WAIT)
+    text = page.text_content('.monitor .an-notional')
+    for word in ('Today', 'Last 7 days', 'Last 30 days', 'Oil basis', 'Gold',
+                 'All ladders', '1.23M', '9.88M', '45.00M', '250.00K',
+                 '4 deals'):
+        assert word in text, word
+    title = page.locator('.monitor .an-notional td[title]').first \
+        .get_attribute('title')
+    assert '1,234,567' in title and 'leg A 600,000' in title
+    # A ladder that traded nothing today shows a dash there, not 0.
+    gold = page.locator('.monitor .an-notional tr', has_text='Gold')
+    assert gold.locator('td').nth(1).text_content().strip() == '\u2014'
+    assert 'counted but not priced' in page.text_content('.monitor .analysis')
+    # Per ACCOUNT: the login and the broker it is at.
+    accounts = page.text_content('.monitor .an-notional-accounts')
+    assert 'CFI 19514405' in accounts and '#19514405' in accounts
+    assert 'CFI Financial Group' in accounts and '600.00K' in accounts
+    # Nothing priced at all is unmeasured: a dash, never a 0.
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.analysis.notional.rows[1]['30d'] = {notional: 0, a: 0, b: 0,
+            fills: 3, lots: 1, unpriced: 3};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    gold = page.locator('.monitor .an-notional tr', has_text='Gold')
+    assert gold.locator('td').nth(3).locator('b').text_content() == '\u2014'
+    # A day of the trader's choosing: the picker asks the page for it.
+    # `fill` fires the change itself: ONE reload each, waited for.
+    with page.expect_response(lambda r: '/api/analysis' in r.url,
+                              timeout=WAIT) as reply:
+        page.fill('.monitor .an-volume-from', '2026-11-03')
+    assert 'volume_from=2026-11-03' in reply.value.url
+    with page.expect_response(lambda r: '/api/analysis' in r.url,
+                              timeout=WAIT) as reply:
+        page.fill('.monitor .an-volume-to', '2026-11-05')
+    assert 'volume_from=2026-11-03' in reply.value.url
+    assert 'volume_to=2026-11-05' in reply.value.url
+    # Leave the page as found: the reload this asked for has landed and
+    # is not left to arrive in the next test's data, nor the day picked.
+    page.wait_for_timeout(200)
+    # ...and the focus off the picker: the pane is not rebuilt under a
+    # field being typed into, so a focused picker freezes it.
+    page.evaluate("() => { const s = window.MT5Trader.state;"
+                  " s.volumeFrom = ''; s.volumeTo = '';"
+                  " document.activeElement.blur(); }")
     assert page.errors == []
 
 

@@ -402,6 +402,10 @@ def test_the_journal_records_what_the_broker_reported(desk, browser_page):
         "() => document.querySelector('.monitor .pane').textContent"
         ".includes('GC1226')", timeout=8000)
 
+    # BOTH legs' deals: the journal writes one account, then the other,
+    # and the page can show the first before the second is written.
+    desk.wait_for(lambda: len(Store(desk.paths['db']).fills()) == 2,
+                  'the second leg never reached the journal')
     fills = Store(desk.paths['db']).fills()
     assert len(fills) == 2
     assert {fill['leg'] for fill in fills} == {'A', 'B'}
