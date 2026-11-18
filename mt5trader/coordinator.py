@@ -3449,6 +3449,10 @@ class Coordinator:
                 'key': key, 'name': pair.name, 'enabled': pair.enabled,
                 'account_a': pair.account_a, 'account_b': pair.account_b,
                 'symbol_a': pair.symbol_a, 'symbol_b': pair.symbol_b,
+                # What one LOT is on each leg - MT5's, or the trader's
+                # override - so a fill can be priced as notional.
+                'contract_size_a': (pair.meta_a or {}).get('contract_size'),
+                'contract_size_b': (pair.meta_b or {}).get('contract_size'),
                 # What KIND of pair this is — the operator's own
                 # declaration, and the only thing that says whether a
                 # fair spread applies at all.

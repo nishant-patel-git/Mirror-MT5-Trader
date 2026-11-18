@@ -2303,3 +2303,53 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
   flex-shrink: 0; }
 .window.ladder .chart-btn.on { background: #0d6efd; color: #fff;
   border-color: #0d6efd; }
+
+/* The Algo window's legs: each one's account number and broker, small,
+ * under the title. */
+.window.algowin .aw-legs { font-size: 11px; color: #6c757d;
+  padding: 3px 8px; border-bottom: 1px solid rgba(128,128,128,.25);
+  line-height: 1.35; }
+.window.algowin .aw-legs .aw-leg { white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.window.algowin .aw-legs b { color: #212529; margin-right: 2px; }
+
+/* The chart's hover: a crosshair through the candle on both charts, the
+ * level under the pointer on its axis, and a readout of the candle. */
+.window.chartwin .cw-body { position: relative; }
+.window.chartwin .cw-plot { cursor: crosshair; }
+.window.chartwin .cw-xline { position: absolute; width: 0;
+  border-left: 1px dashed rgba(33,37,41,.55); pointer-events: none; }
+.window.chartwin .cw-yline { position: absolute; height: 0;
+  border-top: 1px dashed rgba(33,37,41,.45); pointer-events: none; }
+.window.chartwin .cw-ylabel { position: absolute; left: 2px; padding: 0 3px;
+  font: 600 10px var(--font); background: #212529; color: #fff;
+  border-radius: 2px; pointer-events: none; }
+.window.chartwin .cw-tip { position: absolute; z-index: 5;
+  pointer-events: none; background: rgba(255,255,255,.97);
+  border: 1px solid rgba(0,0,0,.25); border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.2); padding: 5px 8px;
+  font-size: 11px; min-width: 190px; }
+.window.chartwin .cw-tip .head { font-weight: 700; margin-bottom: 3px; }
+.window.chartwin .cw-tip .sep { font-weight: 700; margin: 4px 0 1px;
+  color: #6c757d; border-top: 1px solid rgba(128,128,128,.25);
+  padding-top: 3px; }
+.window.chartwin .cw-tip table { border-collapse: collapse; width: 100%; }
+.window.chartwin .cw-tip th { text-align: left; font-weight: 400;
+  color: #6c757d; padding: 0 8px 0 0; white-space: nowrap; }
+.window.chartwin .cw-tip td { text-align: right; font-family: var(--mono, monospace);
+  padding: 0 0 0 6px; white-space: nowrap; }
+.window.chartwin .cw-tip td.z { color: #0d6efd; min-width: 52px; }
+.window.chartwin .cw-tip tr.up td:first-of-type { color: #198754; font-weight: 700; }
+.window.chartwin .cw-tip tr.down td:first-of-type { color: #dc3545; font-weight: 700; }
+.window.chartwin .cw-tip tr.mean th, .window.chartwin .cw-tip tr.mean td {
+  color: #fd7e14; font-weight: 700; }
+.window.chartwin .cw-tip tr.entry-up th { color: #dc3545; }
+.window.chartwin .cw-tip tr.entry-down th { color: #198754; }
+.window.chartwin .cw-tip .beyond { margin-top: 3px; font-weight: 700;
+  color: #212529; background: #ffda6a; padding: 1px 4px; border-radius: 2px; }
+.window.chartwin .cw-tip .touched { margin-top: 3px; color: #6c757d; }
+.window.chartwin .cw-tip tr.sep th { font-weight: 700; color: #6c757d;
+  border-top: 1px solid rgba(128,128,128,.25); padding-top: 3px; }
+.window.chartwin .cw-tip tr.cols th, .window.chartwin .cw-tip tr.cols td {
+  font: 600 10px var(--font); color: #6c757d; text-transform: uppercase;
+  letter-spacing: .03em; }

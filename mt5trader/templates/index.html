@@ -241,13 +241,13 @@
       </div>
       <div class="cw-card">
         <div class="cw-head">Z-Score
-          <span class="cw-key"><b class="k-candle up"></b><b class="k-candle down"></b>z <i class="k-sd"></i>&plusmn;1&sigma; &plusmn;2&sigma; <i class="k-up"></i>+entry <i class="k-down"></i>&minus;entry <span class="cw-key-stop"><i class="k-stop"></i>&plusmn;stop</span></span>
+          <span class="cw-key"><b class="k-candle up"></b><b class="k-candle down"></b>z <i class="k-up"></i>+entry <i class="k-down"></i>&minus;entry <span class="cw-key-stop"><i class="k-stop"></i>&plusmn;stop</span></span>
         </div>
         <div class="cw-plot cw-z"></div>
       </div>
       <div class="cw-card">
         <div class="cw-head">Spread
-          <span class="cw-key"><i class="k-mean"></i>mean <i class="k-sd"></i>&plusmn;1&sigma; &plusmn;2&sigma; <i class="k-up"></i><i class="k-down"></i>&plusmn;entry</span>
+          <span class="cw-key"><i class="k-mean"></i>mean <i class="k-up"></i><i class="k-down"></i>&plusmn;entry</span>
           <span class="cw-badges"><span class="cw-badge cw-min">Min: &mdash;</span><span class="cw-badge cw-max">Max: &mdash;</span></span>
         </div>
         <div class="cw-plot cw-spread"></div>
@@ -270,6 +270,10 @@
       <span class="winbtns"><button class="winbtn aw-cog" title="This ladder&#8217;s Algo settings">&#9881;</button><button class="winbtn close" title="Close — and turn the Algo off for this ladder">&times;</button></span>
     </div>
     <div class="aw-body">
+      <!-- Which account, at which broker, each leg is on: two accounts
+           is the whole architecture, and which is which should not be
+           looked up elsewhere. -->
+      <div class="aw-legs"></div>
       <div class="aw-section aw-signal"></div>
       <div class="aw-section aw-stats"></div>
       <div class="aw-section aw-filters"></div>
