@@ -1975,6 +1975,103 @@ class Coordinator:
             out['caveats'] = answer.get('caveats') or out['caveats']
         return out
 
+    #: The pair chart's candle sizes, each built from finer MT5 bars so a
+    #: candle's high and low are the spread's own: (sub-bar minutes,
+    #: sub-bars per candle).
+    CHART_FRAMES = {15: (1, 15), 60: (5, 12), 240: (15, 16)}
+    #: Candles drawn, and kept for the bands to warm up on before them.
+    CHART_CANDLES = 120
+    #: How long one ladder's candle history is reused. The newest candle
+    #: moves on the screen meanwhile, from the live 10-second candles;
+    #: this keeps thousands of bars off the trading connection.
+    CHART_HISTORY_SEC = 300.0
+
+    def chart_history(self, pair_key, timeframe_min=15):
+        """One ladder's spread as CANDLES of `timeframe_min` (15, 60 or
+        240), from MT5's own bars for both legs - full the moment the
+        engine starts, and days long. Reads only; sends nothing.
+
+        The bands are not here: the screen works them out over these
+        closes with the Algo's own arithmetic (an EMA middle, the
+        population sigma of the last `length` closes), so the newest
+        candle's band moves with the live price."""
+        pair = self.config.pairs.get(pair_key)
+        if pair is None:
+            return {'ok': False, 'reason': f'no pair {pair_key}'}
+        try:
+            timeframe_min = int(timeframe_min)
+        except (TypeError, ValueError):
+            timeframe_min = 15
+        frame = self.CHART_FRAMES.get(timeframe_min)
+        if frame is None:
+            return {'ok': False, 'reason': f'no {timeframe_min}-minute chart '
+                                           f'- 15, 60 or 240'}
+        now = self.clock()
+        cache = getattr(self, '_chart_history', None)
+        if cache is None:
+            cache = self._chart_history = {}
+        held = cache.get((pair_key, timeframe_min))
+        if held and now - held[0] < self.CHART_HISTORY_SEC:
+            return self._history_summary(held[1])
+        params = algo_module.clean_params(pair.algo_params)
+        sub_min, per = frame
+        count = (self.CHART_CANDLES + params['length'] * 5) * per
+        leg_a = self.legs.get(pair.account_a)
+        leg_b = self.legs.get(pair.account_b)
+        if leg_a is None or leg_b is None:
+            return {'ok': False, 'reason': 'a leg is not connected'}
+        try:
+            bars_a = leg_a.rates(pair.symbol_a, sub_min, count)
+            bars_b = leg_b.rates(pair.symbol_b, sub_min, count)
+        except Exception as e:
+            return {'ok': False, 'reason': f'MT5 history unavailable ({e})'}
+        if not bars_a or not bars_b:
+            which = 'leg A' if not bars_a else 'leg B'
+            return {'ok': False,
+                    'reason': f'MT5 returned no {sub_min}-minute bars for '
+                              f'{which} ({pair.symbol_a if not bars_a else pair.symbol_b})'}
+        offset_a = self._offset_of(pair.account_a)
+        offset_b = self._offset_of(pair.account_b)
+        if offset_a is None or offset_b is None:
+            return {'ok': False,
+                    'reason': "a broker's clock is not measured yet, so its "
+                              "bars cannot be placed in time"}
+        anchor = bands.round_offset(offset_a) or 0.0
+        candles = bands.spread_ohlc(
+            bars_a, bars_b, pair.hedge_ratio, sub_min * 60.0,
+            timeframe_min * 60.0, bands.round_offset(offset_a),
+            bands.round_offset(offset_b), anchor=anchor)
+        if not candles:
+            return {'ok': False, 'reason': 'the two legs share no bars'}
+        answer = {
+            'ok': True, 'pair': pair_key, 'timeframe_min': timeframe_min,
+            'length': params['length'], 'entry_z': params['entry_z'],
+            'stop_z': params['stop_z'] if params['stop_z_on'] else None,
+            'algo_timeframe_min': params['timeframe_min'],
+            'anchor': anchor, 'at': now,
+            'candles': [{k: (round(v, 6) if k != 't' else v)
+                         for k, v in c.items()} for c in candles]}
+        cache[(pair_key, timeframe_min)] = (now, answer)
+        # Written to a file of its own, not returned through the command
+        # results: those are rewritten on every click's answer, and a
+        # history in them would make every click's answer heavier.
+        from .chart import history_path
+        tmp = history_path(self.status_path) + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump({f'{key}#{tf}': body
+                       for (key, tf), (_, body) in cache.items()}, f)
+        atomicfile.replace(tmp, history_path(self.status_path))
+        return self._history_summary(answer)
+
+    @staticmethod
+    def _history_summary(answer):
+        """What the command answers: that the history is written, not
+        the history itself."""
+        out = {key: answer.get(key) for key in ('ok', 'pair',
+                                                'timeframe_min', 'at')}
+        out['candles'] = len(answer.get('candles') or ())
+        return out
+
     def algo_backtest(self, pair_key, days=5, compare=True):
         """Replay `days` of MT5's own 15-minute bars through this
         ladder's Algo, with its settings — and, beside it, the same run

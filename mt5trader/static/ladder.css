@@ -2264,6 +2264,16 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
   margin-left: auto; display: flex; gap: 6px; align-items: center; }
 .window.chartwin .cw-key i { display: inline-block; width: 14px; height: 0;
   border-top: 2px solid; vertical-align: middle; margin-right: 2px; }
+.window.chartwin .cw-key .k-sd { border-top: 1px dotted rgba(13,110,253,.8); }
+.window.chartwin .cw-key .k-mean { border-top: 2px solid #fd7e14; }
+.window.chartwin .cw-tfs { display: inline-flex; }
+.window.chartwin .cw-tfs button { font: 700 11px var(--font); padding: 1px 8px;
+  border: 1px solid rgba(0, 0, 0, .3); background: var(--chrome);
+  cursor: pointer; margin-right: -1px; }
+.window.chartwin .cw-tfs button:first-child { border-radius: 3px 0 0 3px; }
+.window.chartwin .cw-tfs button:last-child { border-radius: 0 3px 3px 0; }
+.window.chartwin .cw-tfs button.on { background: #0d6efd; color: #fff;
+  border-color: #0d6efd; }
 .window.chartwin .cw-key .k-candle { display: inline-block; width: 5px;
   height: 10px; vertical-align: middle; margin-right: 1px; }
 .window.chartwin .cw-key .k-candle.up { background: #198754; }
