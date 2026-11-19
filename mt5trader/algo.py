@@ -421,7 +421,10 @@ _POSITION_DISPLAY = ('quantity', 'opened_at', 'age_sec', 'source',
                      # Fills read as one position (`combined.py`): the
                      # panel lists them and the lots behind each leg.
                      'leg_a_volume', 'leg_b_volume', 'combined',
-                     'position_ids', 'fills', 'close_covered')
+                     'position_ids', 'fills', 'close_covered',
+                     # The margin both legs tied up, and where that
+                     # figure came from: the P&L's share of it.
+                     'entry_margin', 'entry_margin_source')
 
 
 def reentry_window(p):
