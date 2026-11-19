@@ -6555,3 +6555,147 @@ def test_a_derive_that_found_nothing_reads_as_a_sentence(page):
     assert 'required 1' not in note
     page.evaluate('() => { window.fetch = window.__realFetch; }')
     assert page.errors == []
+
+
+# -- market sessions -----------------------------------------------------------
+
+def _sessions_at(page, iso):
+    """Stand the sessions clock at `iso` (UTC) and repaint."""
+    page.evaluate("""(iso) => {
+        window.MT5Sessions.now = () => new Date(iso);
+        window.MT5Sessions.tick();
+    }""", iso)
+    return page.evaluate("(iso) => window.MT5Sessions.snapshot(new Date(iso))",
+                         iso)
+
+
+def _clear_session_alerts(page):
+    page.evaluate("""() => {
+        try { Object.keys(localStorage).filter(k => k.startsWith('mkt:'))
+                .forEach(k => localStorage.removeItem(k)); } catch (e) {}
+        document.getElementById('toasts').innerHTML = '';
+    }""")
+
+
+def _restore_sessions_clock(page):
+    page.evaluate("""() => {
+        window.MT5Sessions.now = () => new Date();
+        window.MT5Sessions.tick();
+        document.getElementById('toasts').innerHTML = '';
+        document.getElementById('mkt-panel').hidden = true;
+    }""")
+
+
+def test_the_strip_counts_down_to_the_four_markets(page):
+    open_ladder(page)
+    try:
+        # Wed 23:30 UTC = Thu 08:30 in Tokyo: it opens at 08:45.
+        snap = _sessions_at(page, '2026-11-18T23:30:00Z')
+        rows = {r['name']: r for r in snap['rows']}
+        assert list(rows) == ['Tokyo', 'Singapore/Shanghai', 'London',
+                              'New York']
+        assert rows['Tokyo']['tone'] == 'soon' and not rows['Tokyo']['open']
+        assert round(rows['Tokyo']['toOpen']) == 15
+        assert snap['headline'] == 'Next: Tokyo opens in 15m'
+        strip = page.text_content('#mkt-strip')
+        assert 'Tokyo Thu 08:30 · opens in 15m' in strip
+        assert page.locator('#mkt-strip .mkt-chip').count() == 4
+        assert page.locator('#mkt-strip .mkt-chip.soon').count() == 1
+        # Thu 14:10 UTC: New York opened 10 minutes ago, London is open.
+        snap = _sessions_at(page, '2026-11-19T14:10:00Z')
+        rows = {r['name']: r for r in snap['rows']}
+        assert rows['New York']['tone'] == 'hot'
+        assert rows['London']['tone'] == 'open'
+        assert snap['headline'] == ('New York opened 10m ago — expect '
+                                    'volatility')
+        assert 'JUST OPENED · settles in 5h 20m' in page.text_content(
+            '#mkt-strip')
+    finally:
+        _restore_sessions_clock(page)
+
+
+def test_new_york_daylight_saving_moves_the_open_by_itself(page):
+    """09:00 in New York is 14:00 UTC in November and 13:00 in July."""
+    open_ladder(page)
+    try:
+        summer = {r['name']: r for r in
+                  _sessions_at(page, '2026-07-15T13:05:00Z')['rows']}
+        assert summer['New York']['open'] and \
+            summer['New York']['tone'] == 'hot'
+        winter = {r['name']: r for r in
+                  _sessions_at(page, '2026-11-18T13:05:00Z')['rows']}
+        assert not winter['New York']['open']          # still 08:05 ET
+        assert round(winter['New York']['toOpen']) == 55
+    finally:
+        _restore_sessions_clock(page)
+
+
+def test_the_weekend_counts_to_monday(page):
+    open_ladder(page)
+    try:
+        # Saturday noon UTC: everything shut; Tokyo opens Monday 08:45
+        # JST, which is Sunday 23:45 UTC - 35h 45m away.
+        rows = {r['name']: r for r in
+                _sessions_at(page, '2026-11-21T12:00:00Z')['rows']}
+        assert not any(r['open'] for r in rows.values())
+        assert round(rows['Tokyo']['toOpen']) == 35 * 60 + 45
+    finally:
+        _restore_sessions_clock(page)
+
+
+def test_ten_minutes_before_an_open_a_pop_up_says_so_once(page):
+    open_ladder(page)
+    _clear_session_alerts(page)
+    try:
+        # Control: half an hour before London, too early - nothing said.
+        _sessions_at(page, '2026-11-19T07:30:00Z')
+        assert page.locator('#toasts .toast').count() == 0
+        # 8 minutes before London's 08:00: said.
+        _sessions_at(page, '2026-11-19T07:52:00Z')
+        page.wait_for_selector('#toasts .toast', timeout=WAIT)
+        assert 'London opens in 8m' in page.text_content('#toasts')
+        # ...and only once, however many seconds tick by.
+        _sessions_at(page, '2026-11-19T07:53:00Z')
+        assert page.locator('#toasts .toast').count() == 1
+    finally:
+        _clear_session_alerts(page)
+        _restore_sessions_clock(page)
+
+
+def test_ten_minutes_before_new_yorks_settlement_a_pop_up_says_so(page):
+    open_ladder(page)
+    _clear_session_alerts(page)
+    try:
+        # 14:30 ET is 19:30 UTC in November.
+        _sessions_at(page, '2026-11-19T19:25:00Z')
+        page.wait_for_selector('#toasts .toast', timeout=WAIT)
+        assert 'New York settles in 5m (14:30 local)' in page.text_content(
+            '#toasts')
+        # Control: London's close is not one it alerts on.
+        _clear_session_alerts(page)
+        _sessions_at(page, '2026-11-19T16:25:00Z')
+        assert page.locator('#toasts .toast').count() == 0
+    finally:
+        _clear_session_alerts(page)
+        _restore_sessions_clock(page)
+
+
+def test_sessions_opens_a_timeline_with_the_moment_marked(page):
+    open_ladder(page)
+    try:
+        _sessions_at(page, '2026-11-19T14:10:00Z')
+        assert page.evaluate(
+            "() => document.getElementById('mkt-panel').hidden") is True
+        page.click('#mkt-strip .mkt-more')
+        page.wait_for_selector('#mkt-panel .mkt-row', timeout=WAIT)
+        assert page.locator('#mkt-panel .mkt-row').count() == 4
+        assert page.locator('#mkt-panel .mkt-now').count() == 1
+        # New York's bar starts at 14:00 UTC in November.
+        left = page.evaluate("""() => document.querySelectorAll(
+            '#mkt-panel .mkt-row')[3].querySelector('.mkt-bar').style.left""")
+        assert left.startswith('58.33'), left
+        page.click('#mkt-panel .mkt-close')
+        assert page.evaluate(
+            "() => document.getElementById('mkt-panel').hidden") is True
+    finally:
+        _restore_sessions_clock(page)

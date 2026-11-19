@@ -28,6 +28,9 @@
   </svg>
   <span class="brand-name">NEXUS</span>
   <span class="brand-note">spread terminal</span>
+  <!-- When to expect the market to move: each big centre's open, and
+       New York's settlement. Filled by sessions.js; display only. -->
+  <span id="mkt-strip"></span>
   <!-- The padlock, in the one place that is always on screen. TT puts
        it in the corner of the workspace for the same reason: a lock
        you have to go and find is a lock nobody uses on the way out.
@@ -785,7 +788,14 @@
   </section>
 </template>
 
+<!-- Market sessions: a 24-hour timeline, opened from the top bar. -->
+<div id="mkt-panel" hidden>
+  <div class="mkt-title">Market sessions <button type="button"
+       class="mkt-close" aria-label="Close">&times;</button></div>
+  <div class="mkt-body"></div>
+</div>
 <script src="{{ url_for('static', filename='app.js') }}?v={{ asset_version }}"></script>
 <script src="{{ url_for('static', filename='settings.js') }}?v={{ asset_version }}"></script>
+<script src="{{ url_for('static', filename='sessions.js') }}?v={{ asset_version }}"></script>
 </body>
 </html>
