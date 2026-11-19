@@ -113,6 +113,10 @@ def test_flat_a_second_remote_opening_order_is_refused(engine, pair):
 
 
 def test_CONTROL_the_screen_may_still_stack_working_orders(engine, pair):
+    # The phone's one-at-a-time rule is what is under test; the ladder's
+    # own position limit (default 2) is off here so it does not stand in
+    # for it - see tests/test_position_limit.py.
+    pair.max_positions = 0
     for side in ('BUY', 'SELL', 'BUY'):
         answer = engine.click(pair.key, side, away(engine, pair, side), 1)
         assert answer['ok'], answer

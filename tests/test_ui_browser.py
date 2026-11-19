@@ -5810,9 +5810,10 @@ def test_an_ordinary_toast_is_stamped_too(page):
     page.evaluate("() => document.getElementById('toasts').innerHTML = ''")
 
 
-def test_your_position_is_marked_on_the_ladder_and_named_yours(page):
-    """A manual position the Algo watches: YOUR SHORT in its window, and
-    its entry / target / stop tagged on the ladder's own prices."""
+def test_a_position_is_marked_on_the_ladder_and_named_plainly(page):
+    """A manual position the Algo watches: SHORT in its window - not
+    "YOUR SHORT", the desk's own word - and its entry / target / stop
+    tagged on the ladder's own prices."""
     open_ladder(page)
     publisher = page.paths['publisher']
     levels = page.evaluate(
@@ -5834,16 +5835,152 @@ def test_your_position_is_marked_on_the_ladder_and_named_yours(page):
         assert page.locator('.ladder .lvl-tag.be').count() == 0
         page.wait_for_function(
             "() => (document.querySelector('.window.algowin .aw-pos')"
-            " || {textContent: ''}).textContent.includes('YOUR SHORT')",
+            " || {textContent: ''}).textContent.indexOf('SHORT 1') === 0",
             timeout=WAIT)
-        # The control: the Algo's own position is not called yours.
-        held['source'] = 'ALGO'
+        assert 'YOUR' not in page.text_content('.window.algowin .aw-pos')
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def _combined_short(levels, covered=0.0):
+    return {'position_id': 'AVG:P1+P2', 'combined': True,
+            'position_ids': ['P1', 'P2'], 'side': 'SELL', 'quantity': 2.0,
+            'source': 'MANUAL', 'entry_spread': levels[4],
+            'closing_spread': levels[5], 'break_even': levels[4],
+            'tp': levels[7], 'sl': levels[2], 'tp_money': 6.0,
+            'sl_money': -9.0, 'net_pnl': -1.5, 'exit': None,
+            'opened_at': time.time() - 600, 'age_sec': 600.0,
+            'leg_a_side': 'BUY', 'leg_a_volume': 0.2, 'leg_a_entry': 4607.5,
+            'leg_a_now': 4607.4, 'leg_b_side': 'SELL', 'leg_b_volume': 0.2,
+            'leg_b_entry': 4666.6, 'leg_b_now': 4660.8,
+            'fills': [{'position_id': 'P1', 'quantity': 1.0,
+                       'entry_spread': levels[6], 'opened_at': time.time() - 600,
+                       'net_pnl': -3.0},
+                      {'position_id': 'P2', 'quantity': 1.0,
+                       'entry_spread': levels[2], 'opened_at': time.time() - 60,
+                       'net_pnl': 1.5}],
+            'close_covered': covered}
+
+
+def test_two_fills_read_as_one_averaged_position(page):
+    """The ladder and the Algo window show ONE position: its size, its
+    average, one set of tags - and the fills behind it folded away."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    levels = page.evaluate(
+        """() => window.MT5Trader.state.snapshot
+             .pairs['XAUUSD_|GC1226'].rows.map(r => r.level)""")
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(state='IN_POSITION', signal=None,
+                                       positions=[_combined_short(levels)])
+    try:
         publisher.publish()
         page.wait_for_function(
             "() => (document.querySelector('.window.algowin .aw-pos')"
-            " || {textContent: ''}).textContent.indexOf('SHORT') === 0",
+            " || {textContent: ''}).textContent.indexOf('SHORT 2') === 0",
             timeout=WAIT)
+        line = page.text_content('.window.algowin .aw-line')
+        assert 'SELL 2 @' in line and 'avg' in line, line
+        signal = page.text_content('.window.algowin .aw-signal')
+        assert 'Avg entry' in signal and '(2 fills)' in signal
+        assert 'Leg B (SELL 0.2)' in signal and '(oldest)' in signal
+        # One set of tags, the entry marked as the average.
+        assert page.locator('.ladder .lvl-tag.entry').count() == 1
+        assert page.text_content('.ladder .lvl-tag.entry') == 'AVG'
+        # The fills: folded by default...
+        assert page.evaluate(
+            "() => document.querySelector('.aw-fills').open") is False
+        page.click('.aw-fills summary')
+        page.wait_for_timeout(700)               # three repaints later
+        assert page.evaluate(
+            "() => document.querySelector('.aw-fills').open") is True
+        assert '#2 SELL 1' in page.text_content('.aw-fills')
+        page.click('.aw-fills summary')          # folded again
+        page.wait_for_timeout(500)
+        assert page.evaluate(
+            "() => document.querySelector('.aw-fills').open") is False
+        # No close order, or one that covers the whole: no warning.
+        assert page.locator('.aw-cover').count() == 0
     finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def test_a_close_that_covers_part_of_the_whole_is_said(page):
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    levels = page.evaluate(
+        """() => window.MT5Trader.state.snapshot
+             .pairs['XAUUSD_|GC1226'].rows.map(r => r.level)""")
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(
+        state='IN_POSITION', signal=None,
+        positions=[_combined_short(levels, covered=1.0)])
+    try:
+        publisher.publish()
+        page.wait_for_selector('.aw-cover', timeout=WAIT)
+        text = page.text_content('.aw-cover')
+        assert 'covers 1 of 2' in text and 'other 1 has no close' in text
+        # Control: covering the whole, nothing to say.
+        publisher.algo_block = _algo_block(
+            state='IN_POSITION', signal=None,
+            positions=[_combined_short(levels, covered=2.0)])
+        publisher.publish()
+        page.wait_for_function(
+            "() => !document.querySelector('.aw-cover')", timeout=WAIT)
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def test_the_position_limit_is_said_once_it_is_reached(page):
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    levels = page.evaluate(
+        """() => window.MT5Trader.state.snapshot
+             .pairs['XAUUSD_|GC1226'].rows.map(r => r.level)""")
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(
+        state='IN_POSITION', signal=None,
+        positions=[_combined_short(levels)])
+    two = [{'position_id': 'P%d' % i, 'side': 'SELL', 'quantity': 1.0,
+            'entry_spread': levels[4], 'source': 'MANUAL',
+            'leg_a': {'volume': 0.1}, 'leg_b': {'volume': 0.1}}
+           for i in (1, 2)]
+    try:
+        publisher.pair_extra = {'max_positions': 2, 'positions': two}
+        publisher.publish()
+        page.wait_for_selector('.aw-limit', timeout=WAIT)
+        assert '2 of 2 positions on' in page.text_content('.aw-limit')
+        assert 'Closes always work' in page.text_content('.aw-limit')
+        # Control: one on, nothing working - under the limit, not said.
+        publisher.pair_extra = {'max_positions': 2, 'positions': two[:1]}
+        publisher.publish()
+        page.wait_for_function(
+            "() => !document.querySelector('.aw-limit')", timeout=WAIT)
+        # A working add counts: one on + one working = the limit.
+        publisher.pair_extra = {'max_positions': 2, 'positions': two[:1],
+                                'orders': [{'order_id': 'W1', 'side': 'SELL',
+                                            'level': levels[1],
+                                            'quantity': 1.0,
+                                            'filled_quantity': 0.0,
+                                            'state': 'WORKING',
+                                            'position_id': None}]}
+        publisher.publish()
+        page.wait_for_selector('.aw-limit', timeout=WAIT)
+        assert '1 on + 1 working add = 2 of 2' in page.text_content(
+            '.aw-limit')
+        # Control: the limit off, never said.
+        publisher.pair_extra = {'max_positions': 0, 'positions': two}
+        publisher.publish()
+        page.wait_for_function(
+            "() => !document.querySelector('.aw-limit')", timeout=WAIT)
+    finally:
+        publisher.pair_extra = {}
         publisher.algo = 'NONE'
         publisher.algo_block = None
         publisher.publish()
@@ -6418,3 +6555,316 @@ def test_a_derive_that_found_nothing_reads_as_a_sentence(page):
     assert 'required 1' not in note
     page.evaluate('() => { window.fetch = window.__realFetch; }')
     assert page.errors == []
+
+
+# -- market sessions -----------------------------------------------------------
+
+def _sessions_at(page, iso):
+    """Stand the sessions clock at `iso` (UTC) and repaint."""
+    page.evaluate("""(iso) => {
+        window.MT5Sessions.now = () => new Date(iso);
+        window.MT5Sessions.tick();
+    }""", iso)
+    return page.evaluate("(iso) => window.MT5Sessions.snapshot(new Date(iso))",
+                         iso)
+
+
+def _clear_session_alerts(page):
+    page.evaluate("""() => {
+        try { Object.keys(localStorage).filter(k => k.startsWith('mkt:'))
+                .forEach(k => localStorage.removeItem(k)); } catch (e) {}
+        document.getElementById('toasts').innerHTML = '';
+    }""")
+
+
+def _restore_sessions_clock(page):
+    page.evaluate("""() => {
+        window.MT5Sessions.now = () => new Date();
+        window.MT5Sessions.tick();
+        document.getElementById('toasts').innerHTML = '';
+        document.getElementById('mkt-panel').hidden = true;
+    }""")
+
+
+def test_the_strip_counts_down_to_the_four_markets(page):
+    open_ladder(page)
+    try:
+        # Wed 23:30 UTC = Thu 08:30 in Tokyo: it opens at 08:45.
+        snap = _sessions_at(page, '2026-11-18T23:30:00Z')
+        rows = {r['name']: r for r in snap['rows']}
+        assert list(rows) == ['Tokyo', 'Singapore/Shanghai', 'London',
+                              'New York']
+        assert rows['Tokyo']['tone'] == 'soon' and not rows['Tokyo']['open']
+        assert round(rows['Tokyo']['toOpen']) == 15
+        assert snap['headline'] == 'Next: Tokyo opens in 15m'
+        strip = page.text_content('#mkt-strip')
+        assert 'Tokyo Thu 08:30 · opens in 15m' in strip
+        assert page.locator('#mkt-strip .mkt-chip').count() == 4
+        assert page.locator('#mkt-strip .mkt-chip.soon').count() == 1
+        # Thu 14:10 UTC: New York opened 10 minutes ago, London is open.
+        snap = _sessions_at(page, '2026-11-19T14:10:00Z')
+        rows = {r['name']: r for r in snap['rows']}
+        assert rows['New York']['tone'] == 'hot'
+        assert rows['London']['tone'] == 'open'
+        assert snap['headline'] == ('New York opened 10m ago — expect '
+                                    'volatility')
+        assert 'JUST OPENED · settles in 5h 20m' in page.text_content(
+            '#mkt-strip')
+    finally:
+        _restore_sessions_clock(page)
+
+
+def test_new_york_daylight_saving_moves_the_open_by_itself(page):
+    """09:00 in New York is 14:00 UTC in November and 13:00 in July."""
+    open_ladder(page)
+    try:
+        summer = {r['name']: r for r in
+                  _sessions_at(page, '2026-07-15T13:05:00Z')['rows']}
+        assert summer['New York']['open'] and \
+            summer['New York']['tone'] == 'hot'
+        winter = {r['name']: r for r in
+                  _sessions_at(page, '2026-11-18T13:05:00Z')['rows']}
+        assert not winter['New York']['open']          # still 08:05 ET
+        assert round(winter['New York']['toOpen']) == 55
+    finally:
+        _restore_sessions_clock(page)
+
+
+def test_the_weekend_counts_to_monday(page):
+    open_ladder(page)
+    try:
+        # Saturday noon UTC: everything shut; Tokyo opens Monday 08:45
+        # JST, which is Sunday 23:45 UTC - 35h 45m away.
+        rows = {r['name']: r for r in
+                _sessions_at(page, '2026-11-21T12:00:00Z')['rows']}
+        assert not any(r['open'] for r in rows.values())
+        assert round(rows['Tokyo']['toOpen']) == 35 * 60 + 45
+    finally:
+        _restore_sessions_clock(page)
+
+
+def test_ten_minutes_before_an_open_a_pop_up_says_so_once(page):
+    open_ladder(page)
+    _clear_session_alerts(page)
+    try:
+        # Control: half an hour before London, too early - nothing said.
+        _sessions_at(page, '2026-11-19T07:30:00Z')
+        assert page.locator('#toasts .toast').count() == 0
+        # 8 minutes before London's 08:00: said.
+        _sessions_at(page, '2026-11-19T07:52:00Z')
+        page.wait_for_selector('#toasts .toast', timeout=WAIT)
+        assert 'London opens in 8m' in page.text_content('#toasts')
+        # ...and only once, however many seconds tick by.
+        _sessions_at(page, '2026-11-19T07:53:00Z')
+        assert page.locator('#toasts .toast').count() == 1
+    finally:
+        _clear_session_alerts(page)
+        _restore_sessions_clock(page)
+
+
+def test_ten_minutes_before_new_yorks_settlement_a_pop_up_says_so(page):
+    open_ladder(page)
+    _clear_session_alerts(page)
+    try:
+        # 14:30 ET is 19:30 UTC in November.
+        _sessions_at(page, '2026-11-19T19:25:00Z')
+        page.wait_for_selector('#toasts .toast', timeout=WAIT)
+        assert 'New York settles in 5m (14:30 local)' in page.text_content(
+            '#toasts')
+        # Control: London's close is not one it alerts on.
+        _clear_session_alerts(page)
+        _sessions_at(page, '2026-11-19T16:25:00Z')
+        assert page.locator('#toasts .toast').count() == 0
+    finally:
+        _clear_session_alerts(page)
+        _restore_sessions_clock(page)
+
+
+def test_sessions_opens_a_timeline_with_the_moment_marked(page):
+    open_ladder(page)
+    try:
+        _sessions_at(page, '2026-11-19T14:10:00Z')
+        assert page.evaluate(
+            "() => document.getElementById('mkt-panel').hidden") is True
+        page.click('#mkt-strip .mkt-more')
+        page.wait_for_selector('#mkt-panel .mkt-row', timeout=WAIT)
+        assert page.locator('#mkt-panel .mkt-row').count() == 4
+        assert page.locator('#mkt-panel .mkt-now').count() == 1
+        # New York's bar starts at 14:00 UTC in November.
+        left = page.evaluate("""() => document.querySelectorAll(
+            '#mkt-panel .mkt-row')[3].querySelector('.mkt-bar').style.left""")
+        assert left.startswith('58.33'), left
+        page.click('#mkt-panel .mkt-close')
+        assert page.evaluate(
+            "() => document.getElementById('mkt-panel').hidden") is True
+    finally:
+        _restore_sessions_clock(page)
+
+
+# -- the Slippage page -----------------------------------------------------------
+
+def _slip_report(**over):
+    """A report as `/api/slippage` builds it, from the real report code."""
+    from mt5trader import slippage
+    from test_slippage_split import position
+    body = slippage.report([position(**over)], names={'OIL': 'USOIL|UKOIL'},
+                           window={'label': 'since Wed 18 Nov 16:55 broker '
+                                            'time', 'clock': 'broker',
+                                   'note': ''})
+    body['journal'] = {'fills': 4}
+    body['account_info'] = {'CFI': {'login': 19514405,
+                                    'broker': 'CFI Financial Markets'},
+                            'AC': {'login': 7001, 'broker': 'AC Markets'}}
+    return body
+
+
+def _show_slippage(page, report):
+    page.evaluate("""(report) => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:']; s.monitorTab = 'slippage';
+        s.slippage = report; s.slippageAt = Date.now() + 60000;
+        window.MT5Trader.render();
+    }""", report)
+    page.wait_for_selector('.monitor .slip-cards', timeout=WAIT)
+
+
+def test_the_slippage_page_says_what_it_cost_and_where_it_came_from(page):
+    open_ladder(page)
+    try:
+        _show_slippage(page, _slip_report())
+        cards = page.text_content('.monitor .slip-cards')
+        assert '$10.00' in cards and '$2.00' in cards and '$8.00' in cards
+        assert '7.4%' in cards and '752 ms' in cards
+        bars = page.text_content('.monitor .slip-splits')
+        assert 'market moved while sending' in bars
+        assert 'broker fill' not in bars             # the broker cost nothing
+        pane = page.text_content('.monitor .pane')
+        assert '#19514405 · CFI Financial Markets' in pane
+        assert '#7001 · AC Markets' in pane
+        assert 'USOIL|UKOIL' in pane and '$124.30' in pane   # net P&L
+        # The full statistics are there, folded away.
+        assert page.evaluate(
+            "() => document.querySelector('.slip-detail').open") is False
+        assert 'Round turn' in pane and 'Entries by ladder' in pane
+    finally:
+        page.evaluate("""() => { const s = window.MT5Trader.state;
+            s.slippage = null; s.monitorTab = 'positions';
+            s.open = []; window.MT5Trader.render(); }""")
+
+
+def test_a_broker_that_filled_off_its_price_shows_as_the_broker(page):
+    open_ladder(page)
+    try:
+        _show_slippage(page, _slip_report(fill_b=91.999))
+        assert 'broker fill' in page.text_content('.monitor .slip-splits')
+        # Control: a leg with no send price is unmeasured, said in words.
+        report = _slip_report()
+        for row in report['rows']:
+            for end in ('entry', 'exit'):
+                row[end + '_broker_money'] = row[end + '_moved_money'] = None
+        report['split'] = {'entry': {'measured': 0},
+                           'exit': {'measured': 0}}
+        _show_slippage(page, report)
+        assert 'not measured' in page.text_content('.monitor .slip-splits')
+    finally:
+        page.evaluate("""() => { const s = window.MT5Trader.state;
+            s.slippage = null; s.monitorTab = 'positions';
+            s.open = []; window.MT5Trader.render(); }""")
+
+
+# -- profit % on margin --------------------------------------------------------
+
+def _open_position(**over):
+    leg = lambda side, price: {'side': side, 'volume': 1.0,
+                               'contract_size': 1000.0, 'price': price,
+                               'symbol': 'X', 'account': 'acct_a',
+                               'position_tickets': [], 'order_ticket': None}
+    base = {'position_id': 'PX', 'side': 'SELL', 'quantity': 2.0,
+            'entry_spread': 9.76, 'closing_spread': 9.90, 'net_pnl': -280.0,
+            'order_type': 'LIMIT', 'entry_slippage': 0.002,
+            'click_to_on_ms': 752.0, 'entry_margin': 1740.0,
+            'entry_margin_source': 'terminal',
+            'leg_a': leg('BUY', 82.0), 'leg_b': leg('SELL', 92.0)}
+    base.update(over)
+    return base
+
+
+def test_the_positions_tab_shows_profit_on_both_legs_margin(page):
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    try:
+        publisher.positions = [_open_position()]
+        publisher.publish()
+        page.wait_for_function(
+            "() => (window.MT5Trader.state.snapshot.pairs['XAUUSD_|GC1226']"
+            ".positions || []).length === 1", timeout=WAIT)
+        page.evaluate("""() => { const s = window.MT5Trader.state;
+            s.open = ['monitor:']; s.monitorTab = 'positions';
+            window.MT5Trader.render(); }""")
+        page.wait_for_selector('.monitor tr[data-position="PX"]',
+                               timeout=WAIT)
+        row = page.text_content('.monitor tr[data-position="PX"]')
+        assert '-8.05%' in row and '$3,480.00' in row     # -280 / (1,740 x 2)
+        assert 'est.' not in row
+        # An estimated margin says so; no margin is a dash, never 0%.
+        publisher.positions = [_open_position(entry_margin_source='leverage')]
+        publisher.publish()
+        page.wait_for_function(
+            "() => (window.MT5Trader.state.snapshot.pairs['XAUUSD_|GC1226']"
+            ".positions || [{}])[0].entry_margin_source === 'leverage'",
+            timeout=WAIT)
+        page.evaluate("() => window.MT5Trader.render()")
+        page.wait_for_function(
+            "() => (document.querySelector('.monitor tr[data-position=\"PX\"]')"
+            " || {textContent: ''}).textContent.includes('est.')",
+            timeout=WAIT)
+        publisher.positions = [_open_position(entry_margin=None)]
+        publisher.publish()
+        page.wait_for_function(
+            "() => ((window.MT5Trader.state.snapshot.pairs['XAUUSD_|GC1226']"
+            ".positions || [{}])[0] || {}).entry_margin === null",
+            timeout=WAIT)
+        page.evaluate("() => window.MT5Trader.render()")
+        page.wait_for_function(
+            "() => !(document.querySelector('.monitor tr[data-position=\"PX\"]')"
+            " || {textContent: '%'}).textContent.includes('-8.05%')",
+            timeout=WAIT)
+        assert '0.00%' not in page.text_content(
+            '.monitor tr[data-position="PX"]')
+    finally:
+        publisher.positions = None
+        publisher.publish()
+        page.evaluate("""() => { const s = window.MT5Trader.state;
+            s.open = []; window.MT5Trader.render(); }""")
+
+
+def test_the_algo_window_says_the_pnl_as_a_share_of_margin(page):
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    levels = page.evaluate(
+        """() => window.MT5Trader.state.snapshot
+             .pairs['XAUUSD_|GC1226'].rows.map(r => r.level)""")
+    held = dict(_combined_short(levels), net_pnl=-280.0, entry_margin=1740.0,
+                entry_margin_source='terminal')
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(state='IN_POSITION', signal=None,
+                                       positions=[held])
+    try:
+        publisher.publish()
+        page.wait_for_function(
+            "() => (document.querySelector('.window.algowin .aw-signal')"
+            " || {textContent: ''}).textContent.includes('margin)')",
+            timeout=WAIT)
+        assert '(-8.05% margin)' in page.text_content(
+            '.window.algowin .aw-signal')
+        # Control: no margin priced, no share shown.
+        held['entry_margin'] = None
+        publisher.publish()
+        page.wait_for_function(
+            "() => !(document.querySelector('.window.algowin .aw-signal')"
+            " || {textContent: 'margin)'}).textContent.includes('margin)')",
+            timeout=WAIT)
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()

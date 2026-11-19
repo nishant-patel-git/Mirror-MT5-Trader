@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from datetime import datetime
 
 from . import algo as algo_module, algofilters, analysis, atomicfile, \
+    combined, \
     backtest, bands, carry, costs, config as config_module, \
     depth as depth_book, fairvalue, hedgeratio, signals, sizing, \
     takeprofit
@@ -724,7 +725,7 @@ class Coordinator:
         """
         return (self.margin_detail(pair) or {}).get('money')
 
-    def margin_detail(self, pair):
+    def margin_detail(self, pair, side=None):
         """What one spread ties up, WITH where the figure came from.
 
         The terminals price it themselves (`order_calc_margin`), which
@@ -738,23 +739,31 @@ class Coordinator:
         No leverage either, and there is NO suggestion: a target on a
         base nobody set is worse than no target.
         """
+        # IN THE TRADE'S OWN DIRECTION: a BUY spread buys B and sells A,
+        # a SELL spread the reverse. Each leg is priced on the side it
+        # is actually on - a sell at the bid, a buy at the ask. No side
+        # given is a BUY spread, as before.
+        side = 'SELL' if getattr(side, 'value', side) == 'SELL' else 'BUY'
         ttl = float(self.config.get('MARGIN_TTL_SEC', 60.0))
         now = self.clock()
-        cached = self._margin_cache.get(pair.key)
+        key = (pair.key, side)
+        cached = self._margin_cache.get(key)
         if cached and now - cached[0] < ttl:
             return cached[1]
-        detail = self._price_margin(pair)
-        self._margin_cache[pair.key] = (now, detail)
+        detail = self._price_margin(pair, side)
+        self._margin_cache[key] = (now, detail)
         return detail
 
-    def _price_margin(self, pair):
+    def _price_margin(self, pair, spread_side='BUY'):
         total = 0.0
         source = 'terminal'
+        leg_a_side = 'SELL' if spread_side == 'BUY' else 'BUY'
+        leg_b_side = 'BUY' if spread_side == 'BUY' else 'SELL'
         for meta, account, symbol, lots, side in (
                 (pair.meta_a, pair.account_a, pair.symbol_a,
-                 pair.clip_lots_a, 'SELL'),
+                 pair.clip_lots_a, leg_a_side),
                 (pair.meta_b, pair.account_b, pair.symbol_b,
-                 pair.clip_lots_b, 'BUY')):
+                 pair.clip_lots_b, leg_b_side)):
             leg = self.legs.get(account)
             if leg is None or not symbol or not lots:
                 total = None
@@ -1591,7 +1600,8 @@ class Coordinator:
             one = sizing.spread_units(pair.clip_lots_b,
                                       (pair.meta_b or {}).get('contract_size'))
             side_params = algo_module.for_side(params, side)
-            row['entry_margin'] = (self.margin_detail(pair) or {}).get('money')
+            row['entry_margin'] = (self.margin_detail(pair, side)
+                                   or {}).get('money')
             row['entry_atr'] = (
                 algofilters.atr(closed, side_params['atr_period'])
                 if 'ATR' in (side_params['stop_mode'],
@@ -1730,11 +1740,27 @@ class Coordinator:
         if not self.algos.is_on(pair.key):
             return None
         try:
-            return self.algos.observe(pair, md, self._algo_positions(pair, md),
+            rows = self._algo_positions(pair, md)
+            if self.algos.mode(pair.key) != algo_module.LIVE:
+                # SIGNALS: the trader's fills on one side are ONE
+                # position to read and to exit - one average, one
+                # target, one stop, one alert. LIVE is never combined:
+                # it holds one trade, and closes the one it opened.
+                rows = combined.combine(rows, self._closes_working(pair))
+            return self.algos.observe(pair, md, rows,
                                       self._algo_gates(pair, md))
         except Exception as e:
             logging.exception('[ALGO %s] skipped this pass: %s', pair.key, e)
             return None
+
+    def _closes_working(self, pair):
+        """Position id -> quantity already working to CLOSE it."""
+        out = {}
+        for order in self.book.orders(pair.key):
+            if order.position_id:
+                out[order.position_id] = out.get(order.position_id, 0.0) \
+                    + float(order.remaining or 0.0)
+        return out
 
     def _position_levels(self, pair, md, position, ladder_params,
                          ladder_settings, margin, atr):
@@ -1843,6 +1869,7 @@ class Coordinator:
                                            if params['stop_loss_on']
                                            else None),
                          'entry_margin': margin,
+                         'entry_margin_source': position.entry_margin_source,
                          'stop_points': stop,
                          'spread_units': units,
                          **self._leg_marks(position, md)})
@@ -1855,9 +1882,15 @@ class Coordinator:
         were set. Until the terminals can price it, None — never a
         guess."""
         if position.entry_margin is None:
-            margin = (self.margin_detail(pair) or {}).get('money')
+            detail = self.margin_detail(pair, position.side) or {}
+            margin = detail.get('money')
             if margin:
                 position.entry_margin = float(margin)
+                # Where it came from, kept with it: the terminals' own
+                # figure, or each leg's notional over its leverage when
+                # they could not price it - which is an estimate, and
+                # every screen that shows it says so.
+                position.entry_margin_source = detail.get('source')
                 self.remember(position)
         return position.entry_margin
 
@@ -1893,6 +1926,7 @@ class Coordinator:
             out[f'leg_{leg}_side'] = side
             out[f'leg_{leg}_entry'] = entry
             out[f'leg_{leg}_now'] = now
+            out[f'leg_{leg}_volume'] = getattr(fill, 'volume', None)
         return out
 
     #: How far back a derived history reaches by default.
@@ -2570,6 +2604,52 @@ class Coordinator:
                     f'most the {max(room, 0.0):g} left, it never opens the '
                     f'other way')
         return None
+    def _over_position_limit(self, pair, side, quantity):
+        """Why this click would hold more positions than the ladder
+        allows - in words - or None.
+
+        Counted: the positions open now, plus every working order that
+        would OPEN one (a working add that fills is the next position).
+        Only the OPENING part of a click is judged. A click that only
+        closes - the opposite side, no bigger than what it can cover -
+        is never refused: a guard must never prevent a close. The LIVE
+        Algo does not come through here; it holds one trade anyway.
+        """
+        limit = getattr(pair, 'max_positions', None)
+        if not limit:
+            return None
+        want = getattr(side, 'value', side)
+        try:
+            qty = float(quantity)
+        except (TypeError, ValueError):
+            return None
+        positions = self.book.positions(pair.key)
+        same = [p for p in positions if p.side.value == want]
+        opposite = [p for p in positions if p.side.value != want]
+        stays = len(opposite)
+        if opposite and self.config.get('CLOSE_FIRST', True):
+            # Reduce before opening: the click covers what is not
+            # already working to close, oldest first.
+            free = sum(max(float(p.quantity or 0.0)
+                           - self.book.armed_by_hand(p.position_id), 0.0)
+                       for p in opposite)
+            if qty <= free + 1e-9:
+                return None                    # a close, only a close
+            stays = sum(1 for p in opposite
+                        if self.book.armed_by_hand(p.position_id) > 1e-9)
+        openers = [o for o in self.book.orders(pair.key)
+                   if not o.position_id]
+        held = len(same) + stays
+        if held + len(openers) + 1 <= limit:
+            return None
+        parts = [f'{held} open position{"s" if held != 1 else ""}']
+        if openers:
+            parts.append(f'{len(openers)} working order'
+                         f'{"s" if len(openers) != 1 else ""} that would '
+                         f'open another')
+        return (f'{pair.key} already has {" and ".join(parts)} - '
+                f'{limit} is the most this ladder may hold. Close one, or '
+                f'cancel a working order, first. Closes are never refused.')
 
     def _log_click(self, pair_key, side, level, quantity, answer):
         """One line per click: what was asked for, and what came of it.
@@ -2611,6 +2691,11 @@ class Coordinator:
         # NEW manual order is refused here, in words. Dry run and off
         # refuse nothing. Closes do not come through this path.
         refusal = self.algos.manual_order_refusal(pair_key)
+        if refusal:
+            return self._refuse(pair_key, side, level, refusal)
+        refusal = self._over_position_limit(
+            pair, side, pair.default_quantity if quantity is None
+            else quantity)
         if refusal:
             return self._refuse(pair_key, side, level, refusal)
         shared = self.legs_share_an_account(pair)
@@ -3601,6 +3686,7 @@ class Coordinator:
                 'contract_a_mt5': (pair.meta_a or {}).get('contract_size_mt5'),
                 'contract_b_mt5': (pair.meta_b or {}).get('contract_size_mt5'),
                 'max_quote_age_sec': pair.max_quote_age_sec,
+                'max_positions': pair.max_positions,
                 'max_quote_age_effective': (
                     pair.max_quote_age_sec
                     if pair.max_quote_age_sec is not None
