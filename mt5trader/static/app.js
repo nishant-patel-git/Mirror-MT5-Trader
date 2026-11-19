@@ -243,7 +243,10 @@
     signal_entry: [{hz: 523, ms: 110, gain: 0.08}, {hz: 659, ms: 110, gain: 0.08},
                    {hz: 784, ms: 180, gain: 0.08}],
     signal_exit: [{hz: 784, ms: 110, gain: 0.08}, {hz: 659, ms: 110, gain: 0.08},
-                  {hz: 523, ms: 180, gain: 0.08}]
+                  {hz: 523, ms: 180, gain: 0.08}],
+    // A market about to open: a bell, two even strokes - nothing like
+    // a fill or a signal, so it is never mistaken for one.
+    session: [{hz: 988, ms: 220, gain: 0.07}, {hz: 988, ms: 220, gain: 0.07}]
   };
   var audio = null;
 
