@@ -43,8 +43,16 @@ from.
 - **Telegram is a remote desk, not a trader.** `telegram.py` goes
   through the web app's own routes; only ids in
   `TELEGRAM_ALLOWED_USERS` get an answer; every action is confirmed
-  (LIVE twice); it may send `set_algo`, `set_pair`, `flatten_pair` and
-  `kill` and nothing else — it never opens a position. The token lives
+  (LIVE twice); it may send `set_algo`, `set_pair`, `flatten_pair`,
+  `kill`, `cancel_order`, `cancel_where` and a RESTING working order
+  (`click`), and nothing else. Every click it sends is marked
+  `rest_only` at `WebDesk.command`, and the engine refuses a level at or
+  through the market on its own live price - nothing from the phone
+  fills at once; no market order, no close-at-limit. From the phone it
+  is ONE POSITION AT A TIME: flat, one opening working order; a
+  position on, only a closing order (opposite side, no more than the
+  position not yet covered) - never an add, never a flip. The screen
+  keeps the ladder's freedom. The token lives
   in `.env` and no URL carrying it is ever logged.
 
 ## Conventions that are easy to lose in a refactor

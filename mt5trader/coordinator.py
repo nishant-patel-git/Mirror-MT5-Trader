@@ -2499,7 +2499,7 @@ class Coordinator:
 
     # -- what a click does ---------------------------------------------------
 
-    def click(self, pair_key, side, level, quantity=None):
+    def click(self, pair_key, side, level, quantity=None, rest_only=False):
         """One click on one row. One click is ONE order.
 
         MARKET crosses both legs now with the clicked price as the
@@ -2512,10 +2512,98 @@ class Coordinator:
         click and a ladder click at the same price are the same order.
         """
         with self.lock:
+            if rest_only:
+                # A REMOTE order (the Telegram desk): it may only WAIT.
+                # Judged here, on the price the engine holds now, not on
+                # the copy a phone read seconds ago - a level at or
+                # through the market would fill at once, with nobody at
+                # the screen to see it.
+                refusal = (self._not_resting(pair_key, side, level) or
+                           self._not_one_at_a_time(pair_key, side, quantity))
+                if refusal:
+                    answer = self._refuse(pair_key, side, level, refusal)
+                    self._log_click(pair_key, side, level, quantity, answer)
+                    return answer
             answer = self._click(pair_key, side, level, quantity)
             self._log_click(pair_key, side, level, quantity, answer)
             return answer
 
+    def _not_resting(self, pair_key, side, level):
+        """Why a remote order at `level` would NOT simply rest - in
+        words, with the market as it is - or None when it would.
+
+        A BUY must be under the offer and a SELL over the bid, by at
+        least half a tick: anything else crosses. No price at all is a
+        refusal too: there is nothing to judge "away" against."""
+        pair = self.config.pairs.get(pair_key)
+        if pair is None:
+            return f'no pair {pair_key}'
+        md = self.market.get(pair_key)
+        side = SpreadSide(getattr(side, 'value', side))
+        bid = (md or {}).get('short_spread')
+        offer = (md or {}).get('long_spread')
+        if level is None:
+            return 'no price given'
+        if bid is None or offer is None:
+            return ('this ladder has no live price right now, so a resting '
+                    'order cannot be checked against the market - try '
+                    'again when it is priced')
+        edge = (pair.effective_increment() or 0.0) / 2.0
+        if side is SpreadSide.BUY and not level < offer - edge:
+            return (f'a BUY at {level:g} would cross the market now (offer '
+                    f'{offer:g}, bid {bid:g}) - from Telegram only a resting '
+                    f'order: a BUY below the offer')
+        if side is SpreadSide.SELL and not level > bid + edge:
+            return (f'a SELL at {level:g} would cross the market now (bid '
+                    f'{bid:g}, offer {offer:g}) - from Telegram only a '
+                    f'resting order: a SELL above the bid')
+        return None
+
+    def _not_one_at_a_time(self, pair_key, side, quantity):
+        """ONE POSITION AT A TIME, for a remote order - in words, or None.
+
+        Flat: one OPENING working order at a time - a second could fill
+        too and leave two positions on with nobody at the screen.
+        A position on: only a CLOSING order - the opposite side, for no
+        more than the position still has uncovered by closes already
+        working. Nothing from the phone adds to a position or flips it.
+
+        The trader at the screen keeps the ladder's freedom (add, flip,
+        scale); this is asked only for `rest_only` clicks."""
+        pair = self.config.pairs.get(pair_key)
+        if pair is None:
+            return f'no pair {pair_key}'
+        want = SpreadSide(getattr(side, 'value', side))
+        try:
+            qty = float(pair.default_quantity if quantity is None
+                        else quantity)
+        except (TypeError, ValueError):
+            return 'no quantity given'
+        positions = self.book.positions(pair_key)
+        working = self.book.orders(pair_key)
+        if not positions:
+            if working:
+                order = working[0]
+                return (f'{pair_key} is flat with a working order already '
+                        f'({order.side.value} {order.remaining:g} at '
+                        f'{order.level:g}) - one at a time from Telegram: '
+                        f'cancel it first')
+            return None
+        same = [p for p in positions if p.side is want]
+        if same:
+            return (f'{pair_key} already holds a {want.value} position - from '
+                    f'Telegram a position is only closed, never added to: '
+                    f'send the other side')
+        open_qty = sum(float(p.quantity or 0.0) for p in positions)
+        covered = sum(float(o.remaining or 0.0) for o in working
+                      if o.side is want)
+        room = sizing.tidy(open_qty - covered)
+        if qty > room + 1e-9:
+            return (f'{pair_key} has {open_qty:g} on and {covered:g} already '
+                    f'working to close it - from Telegram a close covers at '
+                    f'most the {max(room, 0.0):g} left, it never opens the '
+                    f'other way')
+        return None
     def _over_position_limit(self, pair, side, quantity):
         """Why this click would hold more positions than the ladder
         allows - in words - or None.

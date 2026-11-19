@@ -197,7 +197,9 @@ class CommandRunner:
     def _do_click(self, payload):
         return self.coordinator.click(payload['pair'], payload['side'],
                                       float(payload['level']),
-                                      payload.get('quantity'))
+                                      payload.get('quantity'),
+                                      rest_only=bool(payload.get(
+                                          'rest_only')))
 
     def _do_refresh_feed(self, payload):
         return self.coordinator.refresh_feed(payload['pair'])
