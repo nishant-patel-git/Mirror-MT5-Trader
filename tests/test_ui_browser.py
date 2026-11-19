@@ -5756,6 +5756,60 @@ def test_a_signals_alert_is_said_once_and_stays_until_dismissed(page):
         publisher.publish()
 
 
+def test_every_alert_box_says_when_it_happened(page):
+    """A wall of alerts is a history: each box carries the time of the
+    ALERT (the engine's own `at`), not when the page drew it, with its
+    date - today's included."""
+    open_ladder(page)
+    page.evaluate("() => document.getElementById('toasts').innerHTML = ''")
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+    now = time.time()
+    expect = page.evaluate(
+        """(at) => { const d = new Date(at * 1000);
+                     const p = n => (n < 10 ? '0' : '') + n;
+                     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-'
+                            + p(d.getDate()) + ' ' + p(d.getHours()) + ':'
+                            + p(d.getMinutes()) + ':' + p(d.getSeconds()); }""",
+        now - 20)
+    publisher.algo_block = _algo_block(signal_alert={
+        'id': 'T1', 'seq': 1, 'kind': 'EXIT', 'side': 'SELL',
+        'reason': 'stop', 'at': now - 20,
+        'text': 'Stop loss — close your SELL 1 at 9.9860 (net -502.00)'})
+    try:
+        publisher.publish()
+        page.wait_for_selector('#toasts .toast.signal', timeout=WAIT)
+        stamp = page.text_content('#toasts .toast.signal .toast-time')
+        assert stamp == expect, (stamp, expect)
+        page.locator('#toasts .toast.signal').first.click()
+        # Another day: its own date, not today's.
+        dated = page.evaluate(
+            """(at) => { const d = new Date(at * 1000);
+                         return d.getFullYear() + '-'; }""", now - 3 * 86400)
+        publisher.algo_block = _algo_block(signal_alert={
+            'id': 'T2', 'seq': 2, 'kind': 'EXIT', 'side': 'SELL',
+            'reason': 'stop', 'at': now - 3 * 86400, 'text': 'old one'})
+        publisher.publish()
+        page.wait_for_selector('#toasts .toast.signal', timeout=WAIT)
+        assert page.text_content(
+            '#toasts .toast.signal .toast-time').startswith(dated)
+        page.locator('#toasts .toast.signal').first.click()
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def test_an_ordinary_toast_is_stamped_too(page):
+    open_ladder(page)
+    page.evaluate("() => document.getElementById('toasts').innerHTML = ''")
+    page.evaluate("() => window.MT5Trader.toast('hello', 'ok')")
+    stamp = page.text_content('#toasts .toast .toast-time')
+    assert len(stamp) == 19 and stamp.count(':') == 2, stamp
+    assert stamp[4] == '-' and stamp[7] == '-' and stamp[10] == ' ', stamp
+    page.evaluate("() => document.getElementById('toasts').innerHTML = ''")
+
+
 def test_your_position_is_marked_on_the_ladder_and_named_yours(page):
     """A manual position the Algo watches: YOUR SHORT in its window, and
     its entry / target / stop tagged on the ladder's own prices."""
