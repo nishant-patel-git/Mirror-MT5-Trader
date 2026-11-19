@@ -28,6 +28,9 @@
   </svg>
   <span class="brand-name">NEXUS</span>
   <span class="brand-note">spread terminal</span>
+  <!-- When to expect the market to move: each big centre's open, and
+       New York's settlement. Filled by sessions.js; display only. -->
+  <span id="mkt-strip"></span>
   <!-- The padlock, in the one place that is always on screen. TT puts
        it in the corner of the workspace for the same reason: a lock
        you have to go and find is a lock nobody uses on the way out.
@@ -221,6 +224,42 @@
   </section>
 </template>
 
+<!-- The pair's chart: the Algo's z with its entry and stop lines, and
+     the spread, over time. Opened and closed from the Chart button on
+     the ladder's title bar. Reads only. -->
+<template id="chart-template">
+  <section class="window chartwin">
+    <div class="titlebar">
+      <span class="swatch"></span>
+      <span class="title cw-pair"></span>
+      <span class="winbtns"><button class="winbtn close" title="Close the chart">&times;</button></span>
+    </div>
+    <div class="cw-body">
+      <div class="cw-bar">
+        <span class="cw-tfs" title="Candle size. 15m is the Algo&#8217;s own candle when its timeframe is 15 minutes.">
+          <button type="button" data-tf="15">15m</button><button type="button" data-tf="60">1h</button><button type="button" data-tf="240">4h</button>
+        </span>
+        <span class="cw-size hint"></span>
+        <span class="cw-now"></span>
+      </div>
+      <div class="cw-card">
+        <div class="cw-head">Z-Score
+          <span class="cw-key"><b class="k-candle up"></b><b class="k-candle down"></b>z <i class="k-up"></i>+entry <i class="k-down"></i>&minus;entry <span class="cw-key-stop"><i class="k-stop"></i>&plusmn;stop</span></span>
+        </div>
+        <div class="cw-plot cw-z"></div>
+      </div>
+      <div class="cw-card">
+        <div class="cw-head">Spread
+          <span class="cw-key"><i class="k-mean"></i>mean <i class="k-up"></i><i class="k-down"></i>&plusmn;entry</span>
+          <span class="cw-badges"><span class="cw-badge cw-min">Min: &mdash;</span><span class="cw-badge cw-max">Max: &mdash;</span></span>
+        </div>
+        <div class="cw-plot cw-spread"></div>
+      </div>
+      <div class="cw-note hint"></div>
+    </div>
+  </section>
+</template>
+
 <!-- The Algo, one window per ladder while it is on: SIGNAL & POSITION,
      STATISTICS, FILTERS. Filled from the engine's Algo block on every
      poll; nothing in it trades — the switch is on the ladder's title
@@ -234,6 +273,10 @@
       <span class="winbtns"><button class="winbtn aw-cog" title="This ladder&#8217;s Algo settings">&#9881;</button><button class="winbtn close" title="Close — and turn the Algo off for this ladder">&times;</button></span>
     </div>
     <div class="aw-body">
+      <!-- Which account, at which broker, each leg is on: two accounts
+           is the whole architecture, and which is which should not be
+           looked up elsewhere. -->
+      <div class="aw-legs"></div>
       <div class="aw-section aw-signal"></div>
       <div class="aw-section aw-stats"></div>
       <div class="aw-section aw-filters"></div>
@@ -273,6 +316,7 @@
           <button type="button" data-algo="ALGO_LIVE" class="live">LIVE — it trades</button>
         </span>
       </span>
+      <button type="button" class="chart-btn" title="Open or close this ladder&#8217;s chart: the Algo&#8217;s z with its entry and stop lines, and the spread">Chart</button>
       <span class="winbtns"><button class="winbtn ladder-cog" title="This ladder's own settings — mode, exit costs, carry, Algo">&#9881;</button><button class="winbtn close" title="Close this ladder">&times;</button></span>
     </div>
     <div class="quotestrip">
@@ -500,6 +544,10 @@
             <input class="ls-stale" type="number" min="0" step="1"
                    placeholder="default"
                    title="How long EITHER leg of this pair may go unchanged before the spread is called stale and orders are withheld. Blank uses the desk-wide setting. Raise it for an instrument that is simply quiet — a dated future trading a few times a minute is not a dead feed. 0 turns the guard off for this pair, which also stops it catching a leg that has genuinely STOPPED."></label>
+          <label class="lsf"><span>Max positions</span>
+            <input class="ls-maxpos" type="number" min="0" step="1"
+                   placeholder="2"
+                   title="The most positions this ladder may hold at once, counting a working order that would OPEN one. A click that would go over it is refused, in words; a CLOSE is never refused. Blank is 2. 0 turns the limit off. The LIVE Algo holds one trade and is not counted here."></label>
           <label class="lsf"><span>Slippage allowance</span>
             <input class="ls-slip" type="number" min="0" step="0.01" placeholder="default"></label>
           <label class="lsf"><span>Nights held</span>
@@ -601,7 +649,7 @@
           <label class="lsf" title="No new entry signal for this long after an exit signal or a close.">
             <span>Cooldown (min)</span>
             <input class="ls-az-cooldown" type="number" min="0" step="1"></label>
-          <label class="lsf" title="No entry until the Algo has watched this many minutes of LIVE prices since it was turned on — even when MT5's history fills the band at once. Time with no price does not count. Dry run counts: warm up in Dry run, then switch to LIVE. 0 = off.">
+          <label class="lsf" title="No entry until the Algo has watched this many minutes of LIVE prices since it was turned on — even when MT5's history fills the band at once. Time with no price does not count. Signals counts: warm up in Signals, then switch to LIVE. 0 = off.">
             <span>Warm-up (min)</span>
             <input class="ls-az-warmup" type="number" min="0" step="1"></label>
           <label class="lsf check-row" title="Also signal EXIT if the spread runs against the position to this |z|.">
@@ -740,7 +788,14 @@
   </section>
 </template>
 
+<!-- Market sessions: a 24-hour timeline, opened from the top bar. -->
+<div id="mkt-panel" hidden>
+  <div class="mkt-title">Market sessions <button type="button"
+       class="mkt-close" aria-label="Close">&times;</button></div>
+  <div class="mkt-body"></div>
+</div>
 <script src="{{ url_for('static', filename='app.js') }}?v={{ asset_version }}"></script>
 <script src="{{ url_for('static', filename='settings.js') }}?v={{ asset_version }}"></script>
+<script src="{{ url_for('static', filename='sessions.js') }}?v={{ asset_version }}"></script>
 </body>
 </html>

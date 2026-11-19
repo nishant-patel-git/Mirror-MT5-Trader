@@ -12,6 +12,7 @@ so Chrome refused to submit and fired no event at all.
 """
 
 import json
+import math
 import re
 import os
 import threading
@@ -121,6 +122,9 @@ class Publisher:
         self.broker_pendings = None
         #: Any other field for the pair's row, as the engine sends it.
         self.pair_extra = {}
+        #: Fields the terminals report about each account (login,
+        #: server, company), merged into the snapshot's accounts.
+        self.accounts_extra = {}
         #: Which leg LIMIT mode rests its real pending on. The other
         #: leg is crossed at market when it fills, and a broker window
         #: showing nothing on that leg is the mode, not a fault.
@@ -150,6 +154,11 @@ class Publisher:
             payload['at'] = at
         for row in payload['pairs'].values():
             row.update(self.pair_extra)
+        for name, extra in self.accounts_extra.items():
+            if extra is None:
+                payload['accounts'].pop(name, None)
+            else:
+                payload['accounts'].setdefault(name, {}).update(extra)
         # A tmp name of its OWN. The timer thread and the test publish
         # at the same moment often enough to matter: sharing one tmp
         # file, the slower writer's file is gone before it renames it,
@@ -950,6 +959,59 @@ def test_the_exchanges_page_carries_connect_test_and_diagnose(page):
     for name in ('connect-account', 'test-account', 'diagnose-account'):
         assert row.locator('.' + name).count() == 1
     assert 'Exchanges' in page.text_content('.window.settings .accounts h3')
+
+
+def test_an_accounts_metatrader_is_PICKED_and_fixed_on_the_screen(
+        page, tmp_path, monkeypatch):
+    """A desk would not start because the MetaTrader path had been pasted
+    with Windows' quotes, and the person at it does not open config
+    files. The row says what is wrong; the installed terminals are a list
+    to pick from; the pick survives the page's own repaint; Save fixes
+    it."""
+    from mt5trader import config as cfg
+    root = tmp_path / 'Program Files'
+    (root / 'CFI2 MetaTrader 5 Terminal').mkdir(parents=True)
+    exe = root / 'CFI2 MetaTrader 5 Terminal' / 'terminal64.exe'
+    exe.write_text('', encoding='utf-8')
+    monkeypatch.setattr(cfg, 'terminal_roots', lambda: [str(root)])
+
+    page.click('#open-settings')
+    page.wait_for_selector('.window.settings')
+    page.evaluate("""async (gone) => {
+        await fetch('/api/accounts/CFI Spot', {method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({terminal_path: gone})});
+        await window.MT5Settings.refresh();
+    }""", '"' + str(tmp_path / 'gone' / 'terminal64.exe') + '"')
+    row = page.locator('tr[data-account="CFI Spot"]')
+    problem = page.locator('tr[data-account="CFI Spot"] + tr.problem')
+    page.wait_for_selector('tr[data-account="CFI Spot"] .f-terminal-pick',
+                           timeout=WAIT)
+    # Said on the line under the row, in words, with what to do.
+    assert 'no MetaTrader 5 at' in problem.text_content()
+    assert 'Pick' in problem.text_content()
+
+    row.locator('.f-terminal-pick').select_option(str(exe))
+    assert row.locator('.f-terminal').input_value() == str(exe)
+    # The page repaints itself every few seconds; an unsaved pick must
+    # not be wiped by it.
+    page.evaluate('() => window.MT5Settings.render()')
+    row = page.locator('tr[data-account="CFI Spot"]')
+    assert row.locator('.f-terminal').input_value() == str(exe)
+
+    page.wait_for_selector('.toast.ok:has-text("press Save")', timeout=WAIT)
+    row.locator('.save-account').click()
+    page.wait_for_selector('.toast.ok:has-text("restarts by itself")',
+                           timeout=WAIT)
+    stored = json.load(open(page.paths['config'], encoding='utf-8'))
+    assert stored['accounts']['CFI Spot']['terminal_path'] == str(exe)
+    page.evaluate('() => window.MT5Settings.refresh()')
+    page.wait_for_timeout(200)
+    row = page.locator('tr[data-account="CFI Spot"]')
+    assert page.locator(
+        'tr[data-account="CFI Spot"] + tr.problem').count() == 0
+    assert 'this account' in row.locator(
+        '.f-terminal-pick option:checked').text_content()
 
 
 def test_the_exit_costs_belong_to_ONE_LADDER_and_the_override_CLEARS(page):
@@ -5190,6 +5252,27 @@ def test_the_Algo_has_a_window_of_its_own_with_the_three_panels(page):
         assert 'Mean-rev' in text and '42 min' in text
         assert page.locator('.window.algowin .aw-tile.sell.hit').count() == 1
         assert page.text_content('.window.algowin .aw-mode') == 'SIGNALS'
+        # Each leg's account number and broker, across the top.
+        publisher.accounts_extra = {
+            'acct_a': {'login': 19514405, 'server': 'CFI3-Real',
+                       'company': 'CFI Financial Group'},
+            'acct_b': None}               # a leg that could not be read
+        publisher.publish()
+        page.wait_for_function(
+            "() => document.querySelector('.window.algowin .aw-legs')"
+            ".textContent.includes('#19514405')", timeout=WAIT)
+        legs = page.text_content('.window.algowin .aw-legs')
+        assert 'A XAUUSD_ \u00b7 #19514405 \u00b7 CFI Financial Group' in legs
+        # Control: unread is said, not left blank or shown as a number.
+        assert 'B GC1226 \u00b7 not read' in legs
+        # No company reported: the server's name stands in for it.
+        publisher.accounts_extra = {
+            'acct_a': {'login': 19514405, 'server': 'CFI3-Real',
+                       'company': None}}
+        publisher.publish()
+        page.wait_for_function(
+            "() => document.querySelector('.window.algowin .aw-legs')"
+            ".textContent.includes('CFI3-Real')", timeout=WAIT)
         # The Fair Spread window no longer carries the Algo.
         assert 'H to L signal' not in (page.text_content('.window.fairwin')
                                      if page.locator('.window.fairwin').count()
@@ -5197,6 +5280,7 @@ def test_the_Algo_has_a_window_of_its_own_with_the_three_panels(page):
     finally:
         publisher.algo = 'NONE'
         publisher.algo_block = None
+        publisher.accounts_extra = {}
         publisher.publish()
     page.wait_for_function(
         "() => !document.querySelector('.window.algowin')", timeout=WAIT)
@@ -5672,9 +5756,64 @@ def test_a_signals_alert_is_said_once_and_stays_until_dismissed(page):
         publisher.publish()
 
 
-def test_your_position_is_marked_on_the_ladder_and_named_yours(page):
-    """A manual position the Algo watches: YOUR SHORT in its window, and
-    its entry / target / stop tagged on the ladder's own prices."""
+def test_every_alert_box_says_when_it_happened(page):
+    """A wall of alerts is a history: each box carries the time of the
+    ALERT (the engine's own `at`), not when the page drew it, with its
+    date - today's included."""
+    open_ladder(page)
+    page.evaluate("() => document.getElementById('toasts').innerHTML = ''")
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+    now = time.time()
+    expect = page.evaluate(
+        """(at) => { const d = new Date(at * 1000);
+                     const p = n => (n < 10 ? '0' : '') + n;
+                     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-'
+                            + p(d.getDate()) + ' ' + p(d.getHours()) + ':'
+                            + p(d.getMinutes()) + ':' + p(d.getSeconds()); }""",
+        now - 20)
+    publisher.algo_block = _algo_block(signal_alert={
+        'id': 'T1', 'seq': 1, 'kind': 'EXIT', 'side': 'SELL',
+        'reason': 'stop', 'at': now - 20,
+        'text': 'Stop loss — close your SELL 1 at 9.9860 (net -502.00)'})
+    try:
+        publisher.publish()
+        page.wait_for_selector('#toasts .toast.signal', timeout=WAIT)
+        stamp = page.text_content('#toasts .toast.signal .toast-time')
+        assert stamp == expect, (stamp, expect)
+        page.locator('#toasts .toast.signal').first.click()
+        # Another day: its own date, not today's.
+        dated = page.evaluate(
+            """(at) => { const d = new Date(at * 1000);
+                         return d.getFullYear() + '-'; }""", now - 3 * 86400)
+        publisher.algo_block = _algo_block(signal_alert={
+            'id': 'T2', 'seq': 2, 'kind': 'EXIT', 'side': 'SELL',
+            'reason': 'stop', 'at': now - 3 * 86400, 'text': 'old one'})
+        publisher.publish()
+        page.wait_for_selector('#toasts .toast.signal', timeout=WAIT)
+        assert page.text_content(
+            '#toasts .toast.signal .toast-time').startswith(dated)
+        page.locator('#toasts .toast.signal').first.click()
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def test_an_ordinary_toast_is_stamped_too(page):
+    open_ladder(page)
+    page.evaluate("() => document.getElementById('toasts').innerHTML = ''")
+    page.evaluate("() => window.MT5Trader.toast('hello', 'ok')")
+    stamp = page.text_content('#toasts .toast .toast-time')
+    assert len(stamp) == 19 and stamp.count(':') == 2, stamp
+    assert stamp[4] == '-' and stamp[7] == '-' and stamp[10] == ' ', stamp
+    page.evaluate("() => document.getElementById('toasts').innerHTML = ''")
+
+
+def test_a_position_is_marked_on_the_ladder_and_named_plainly(page):
+    """A manual position the Algo watches: SHORT in its window - not
+    "YOUR SHORT", the desk's own word - and its entry / target / stop
+    tagged on the ladder's own prices."""
     open_ladder(page)
     publisher = page.paths['publisher']
     levels = page.evaluate(
@@ -5696,14 +5835,1034 @@ def test_your_position_is_marked_on_the_ladder_and_named_yours(page):
         assert page.locator('.ladder .lvl-tag.be').count() == 0
         page.wait_for_function(
             "() => (document.querySelector('.window.algowin .aw-pos')"
-            " || {textContent: ''}).textContent.includes('YOUR SHORT')",
+            " || {textContent: ''}).textContent.indexOf('SHORT 1') === 0",
             timeout=WAIT)
-        # The control: the Algo's own position is not called yours.
-        held['source'] = 'ALGO'
+        assert 'YOUR' not in page.text_content('.window.algowin .aw-pos')
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def _combined_short(levels, covered=0.0):
+    return {'position_id': 'AVG:P1+P2', 'combined': True,
+            'position_ids': ['P1', 'P2'], 'side': 'SELL', 'quantity': 2.0,
+            'source': 'MANUAL', 'entry_spread': levels[4],
+            'closing_spread': levels[5], 'break_even': levels[4],
+            'tp': levels[7], 'sl': levels[2], 'tp_money': 6.0,
+            'sl_money': -9.0, 'net_pnl': -1.5, 'exit': None,
+            'opened_at': time.time() - 600, 'age_sec': 600.0,
+            'leg_a_side': 'BUY', 'leg_a_volume': 0.2, 'leg_a_entry': 4607.5,
+            'leg_a_now': 4607.4, 'leg_b_side': 'SELL', 'leg_b_volume': 0.2,
+            'leg_b_entry': 4666.6, 'leg_b_now': 4660.8,
+            'fills': [{'position_id': 'P1', 'quantity': 1.0,
+                       'entry_spread': levels[6], 'opened_at': time.time() - 600,
+                       'net_pnl': -3.0},
+                      {'position_id': 'P2', 'quantity': 1.0,
+                       'entry_spread': levels[2], 'opened_at': time.time() - 60,
+                       'net_pnl': 1.5}],
+            'close_covered': covered}
+
+
+def test_two_fills_read_as_one_averaged_position(page):
+    """The ladder and the Algo window show ONE position: its size, its
+    average, one set of tags - and the fills behind it folded away."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    levels = page.evaluate(
+        """() => window.MT5Trader.state.snapshot
+             .pairs['XAUUSD_|GC1226'].rows.map(r => r.level)""")
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(state='IN_POSITION', signal=None,
+                                       positions=[_combined_short(levels)])
+    try:
         publisher.publish()
         page.wait_for_function(
             "() => (document.querySelector('.window.algowin .aw-pos')"
-            " || {textContent: ''}).textContent.indexOf('SHORT') === 0",
+            " || {textContent: ''}).textContent.indexOf('SHORT 2') === 0",
+            timeout=WAIT)
+        line = page.text_content('.window.algowin .aw-line')
+        assert 'SELL 2 @' in line and 'avg' in line, line
+        signal = page.text_content('.window.algowin .aw-signal')
+        assert 'Avg entry' in signal and '(2 fills)' in signal
+        assert 'Leg B (SELL 0.2)' in signal and '(oldest)' in signal
+        # One set of tags, the entry marked as the average.
+        assert page.locator('.ladder .lvl-tag.entry').count() == 1
+        assert page.text_content('.ladder .lvl-tag.entry') == 'AVG'
+        # The fills: folded by default...
+        assert page.evaluate(
+            "() => document.querySelector('.aw-fills').open") is False
+        page.click('.aw-fills summary')
+        page.wait_for_timeout(700)               # three repaints later
+        assert page.evaluate(
+            "() => document.querySelector('.aw-fills').open") is True
+        assert '#2 SELL 1' in page.text_content('.aw-fills')
+        page.click('.aw-fills summary')          # folded again
+        page.wait_for_timeout(500)
+        assert page.evaluate(
+            "() => document.querySelector('.aw-fills').open") is False
+        # No close order, or one that covers the whole: no warning.
+        assert page.locator('.aw-cover').count() == 0
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def test_a_close_that_covers_part_of_the_whole_is_said(page):
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    levels = page.evaluate(
+        """() => window.MT5Trader.state.snapshot
+             .pairs['XAUUSD_|GC1226'].rows.map(r => r.level)""")
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(
+        state='IN_POSITION', signal=None,
+        positions=[_combined_short(levels, covered=1.0)])
+    try:
+        publisher.publish()
+        page.wait_for_selector('.aw-cover', timeout=WAIT)
+        text = page.text_content('.aw-cover')
+        assert 'covers 1 of 2' in text and 'other 1 has no close' in text
+        # Control: covering the whole, nothing to say.
+        publisher.algo_block = _algo_block(
+            state='IN_POSITION', signal=None,
+            positions=[_combined_short(levels, covered=2.0)])
+        publisher.publish()
+        page.wait_for_function(
+            "() => !document.querySelector('.aw-cover')", timeout=WAIT)
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def test_the_position_limit_is_said_once_it_is_reached(page):
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    levels = page.evaluate(
+        """() => window.MT5Trader.state.snapshot
+             .pairs['XAUUSD_|GC1226'].rows.map(r => r.level)""")
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(
+        state='IN_POSITION', signal=None,
+        positions=[_combined_short(levels)])
+    two = [{'position_id': 'P%d' % i, 'side': 'SELL', 'quantity': 1.0,
+            'entry_spread': levels[4], 'source': 'MANUAL',
+            'leg_a': {'volume': 0.1}, 'leg_b': {'volume': 0.1}}
+           for i in (1, 2)]
+    try:
+        publisher.pair_extra = {'max_positions': 2, 'positions': two}
+        publisher.publish()
+        page.wait_for_selector('.aw-limit', timeout=WAIT)
+        assert '2 of 2 positions on' in page.text_content('.aw-limit')
+        assert 'Closes always work' in page.text_content('.aw-limit')
+        # Control: one on, nothing working - under the limit, not said.
+        publisher.pair_extra = {'max_positions': 2, 'positions': two[:1]}
+        publisher.publish()
+        page.wait_for_function(
+            "() => !document.querySelector('.aw-limit')", timeout=WAIT)
+        # A working add counts: one on + one working = the limit.
+        publisher.pair_extra = {'max_positions': 2, 'positions': two[:1],
+                                'orders': [{'order_id': 'W1', 'side': 'SELL',
+                                            'level': levels[1],
+                                            'quantity': 1.0,
+                                            'filled_quantity': 0.0,
+                                            'state': 'WORKING',
+                                            'position_id': None}]}
+        publisher.publish()
+        page.wait_for_selector('.aw-limit', timeout=WAIT)
+        assert '1 on + 1 working add = 2 of 2' in page.text_content(
+            '.aw-limit')
+        # Control: the limit off, never said.
+        publisher.pair_extra = {'max_positions': 0, 'positions': two}
+        publisher.publish()
+        page.wait_for_function(
+            "() => !document.querySelector('.aw-limit')", timeout=WAIT)
+    finally:
+        publisher.pair_extra = {}
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def test_a_derive_that_found_nothing_says_what_held_it_back(page):
+    """'derived 0 signal(s)' on its own reads as a broken replay.
+
+    This is the whole reason the engine now returns the reasons: the
+    note has to say that the Algo LOOKED and declined, and why, or the
+    screen cannot tell a filter doing its job from a derive that never
+    ran.
+    """
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .an-derive', timeout=WAIT)
+    page.evaluate("""() => {
+        // Stand in for the engine: the command log and its result.
+        window.__realFetch = window.fetch;
+        const json = (body) => Promise.resolve(new Response(
+            JSON.stringify(body),
+            {status: 200, headers: {'Content-Type': 'application/json'}}));
+        window.fetch = function (url, options) {
+            const at = String(url);
+            if (at.indexOf('/api/command') >= 0) {
+                return json({ok: true, id: 'cmd1'});
+            }
+            if (at.indexOf('/api/result/') >= 0) {
+                return json({ok: true, data: {
+                    ok: true, days: 30, written: 0,
+                    pairs: {'XAUUSD_|GC1226': {
+                        ok: true, derived: 0, replaced: 0,
+                        held: {'edge filter': 400, 'trend': 12}}},
+                    held: {'edge filter': 400, 'trend': 12}}});
+            }
+            return window.__realFetch(url, options);
+        };
+    }""")
+    page.click('.monitor .an-derive')
+    page.wait_for_selector('.monitor .an-derive-out', timeout=WAIT)
+    for _ in range(40):
+        note = page.text_content('.monitor .an-derive-out')
+        if 'held back' in note:
+            break
+        page.wait_for_timeout(100)
+    note = page.text_content('.monitor .an-derive-out')
+    assert 'derived 0 signal(s) over 30 days' in note
+    # The counts, biggest first, and the total so the size of it reads.
+    assert 'held back 412 time(s)' in note
+    # The count is in brackets, not run on after the reason: a reason
+    # that ends in a word made "under the nx required 1" of it.
+    assert 'edge filter (400)' in note and 'trend (12)' in note
+    assert note.index('edge filter') < note.index('trend')
+    page.evaluate('() => { window.fetch = window.__realFetch; }')
+
+
+def test_the_journal_puts_the_levels_in_columns(page):
+    """'Algo: stop loss' on its own cannot tell a stop that was hit
+    from a stop that was set in the wrong place \u2014 and a prose line
+    under the row cannot be compared with the row above it."""
+    page.errors.clear()      # earlier tests raise on purpose
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {count: 1, closed: 1, net_pnl: -205.0, win_rate: 0.0,
+                    wins: 0, losses: 1},
+          drawdown: {}, calibration: {}, shadow: {}, excursion: [],
+          signals: [],
+          journal: [{position_id: 'P1', pair_key: 'A|B', side: 'SELL',
+            closed_at: 1762600000, source: 'ALGO', quantity: 1.0,
+            exit_reason: 'Algo: stop loss',
+            exit: {break_even: 71.20, tp: 70.55, sl: 71.40,
+                   on_level: 'sl',
+                   sized_by: '2% of margin (4,720.00/spread)',
+                   level_money: -205.0, gap: 0.06, gap_word: 'past',
+                   note: null},
+            entry_spread: 71.0, exit_spread: 71.46, held_sec: 900,
+            entry_z: 2.6, exit_z: 3.1,
+            leg_a: {side: 'BUY', entry: 101.118},
+            leg_b: {side: 'SELL', entry: 115.554},
+            pnl: -205.0, cum_pnl: -205.0}]};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis table', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    for heading in ('Break-even', 'Target', 'Stop', 'vs level'):
+        assert heading in text, heading
+    assert '71.2000' in text and '70.5500' in text and '71.4000' in text
+    assert '0.0600' in text and 'past' in text
+    # The one that fired is marked, and only that one.
+    assert page.locator('.monitor .analysis td.on-level').count() == 1
+    marked = page.text_content('.monitor .analysis td.on-level')
+    assert '71.4000' in marked
+    # The setting that put it there is a tooltip, not a column of prose.
+    assert '2% of margin' in page.get_attribute(
+        '.monitor .analysis td.on-level', 'title')
+    # And no prose line survives under the row.
+    assert page.locator('.monitor .analysis tr.detail').count() == 0
+    assert page.errors == []
+
+
+def test_a_level_nobody_recorded_is_a_dash_not_a_number(page):
+    """CONTROL. Unmeasured is not zero and is not today's settings."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {}, drawdown: {}, calibration: {}, shadow: {},
+          excursion: [], signals: [],
+          journal: [{position_id: 'P9', pair_key: 'A|B', side: 'SELL',
+            closed_at: 1762600000, source: 'ALGO', quantity: 1.0,
+            exit_reason: 'Algo: stop loss',
+            exit: {break_even: null, tp: null, sl: null, on_level: 'sl',
+                   sized_by: null, level_money: null, gap: null,
+                   gap_word: null,
+                   note: 'the level it was measured against was not ' +
+                         'recorded \u2014 kept from this version on'},
+            entry_spread: 71.0, exit_spread: 71.46, held_sec: 900,
+            leg_a: {side: 'BUY', entry: 101.118},
+            leg_b: {side: 'SELL', entry: 115.554},
+            pnl: -205.0, cum_pnl: -205.0}]};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis table', timeout=WAIT)
+    assert page.locator('.monitor .analysis td.on-level').count() == 0
+    titles = page.locator('.monitor .analysis td.hint[title]')
+    assert titles.count() >= 3          # all three levels say why
+    assert 'not recorded' in titles.first.get_attribute('title')
+    assert page.errors == []
+
+
+def test_the_signal_journal_reads_like_the_trade_journal(page):
+    """The same columns in the same order, so the two halves of the
+    page can be read against each other \u2014 and the signals are
+    recorded off the live book, not simulated."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {}, drawdown: {}, calibration: {}, shadow: {},
+          excursion: [], journal: [],
+          signal_tally: {armed: 2, blocked: 1, entered: 1, no_entry: 0,
+                         tp: 0, sl: 1, win_rate: 0.0, net_pnl: -205.0,
+                         live: 2, replayed: 0, priced: 1, settled: 1},
+          signals: [
+            {pair_key: 'A|B', side: 'SELL', source: 'LIVE', state: 'CLOSED',
+             outcome: 'SL', armed_at: 1762600000, armed_z: 2.61,
+             closed_z: 3.12, entry: 71.0, exit_spread: 71.46,
+             break_even: 71.20, tp: 70.55, sl: 71.40,
+             quantity: 1.0, held_min: 15.0,
+             leg_a_side: 'BUY', leg_a_entry: 101.118,
+             leg_b_side: 'SELL', leg_b_entry: 115.554,
+             net_pnl: -205.0, cum_pnl: -205.0,
+             why: 'never came back to the mean'},
+            {pair_key: 'A|B', side: 'SELL', source: 'LIVE', state: 'CLOSED',
+             outcome: 'BLOCKED', armed_at: 1762500000, armed_z: 2.55,
+             break_even: null, tp: null, sl: null,
+             net_pnl: null, cum_pnl: -205.0,
+             why: 'edge filter: capture is 0.02x the round trip \u00b7 ' +
+               'edge 0.02x of 1.50x'}]};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis table', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    for heading in ('Size', 'Leg A in', 'Leg B in', 'Running', 'Why',
+                    'Break-even'):
+        assert heading in text, heading
+    assert 'BUY 101.118' in text and 'SELL 115.554' in text
+    assert '2.61' in text and '3.12' in text
+    # The levels as columns, with the one that fired marked.
+    assert '71.2000' in text and '70.5500' in text and '71.4000' in text
+    assert page.locator('.monitor .analysis td.on-level').count() == 1
+    # The refusal keeps its words, in the WHY column.
+    assert 'edge 0.02x of 1.50x' in text
+    # Recorded, not simulated: the word that was wrong is gone.
+    assert 'hypothetical' not in text.lower()
+    assert 'recorded off the live book' in text.lower()
+    assert page.errors == []
+
+
+def write_chart_history(page, key, tf, count=150):
+    """What the engine writes when the chart asks for MT5's candles."""
+    from mt5trader import chart
+    seconds = tf * 60
+    end = time.time() - time.time() % seconds
+    candles, x = [], 59.1
+    for i in range(count):
+        t = end - seconds * (count - 1 - i)
+        o = x
+        x += 0.02 * math.sin(i / 6.0) + (0.6 if i == count - 3 else 0)
+        candles.append({'t': t, 'o': o, 'h': max(o, x) + 0.01,
+                        'l': min(o, x) - 0.01, 'c': x})
+    path = chart.history_path(page.paths['status'])
+    try:
+        body = json.load(open(path, encoding='utf-8'))
+    except (OSError, ValueError):
+        body = {}
+    body[f'{key}#{tf}'] = {
+        'ok': True, 'pair': key, 'timeframe_min': tf, 'length': 20,
+        'entry_z': 2.5, 'stop_z': None, 'algo_timeframe_min': 15,
+        'anchor': 0.0, 'at': time.time(), 'candles': candles}
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(body, f)
+
+
+def test_the_chart_opens_and_closes_from_the_ladder(page):
+    """15m, 1h and 4h candles of the spread with the Algo's bands round
+    them - the mean and the entry - and the z of
+    each candle against its own band: whether the spread is past the
+    band, on the screen. Opened and closed from the ladder's title bar."""
+    key = 'XAUUSD_|GC1226'
+    write_chart_history(page, key, 15)
+    write_chart_history(page, key, 60)
+    page.errors.clear()
+    button = page.locator('.ladder[data-pair="%s"] .chart-btn' % key)
+    assert page.locator('.window.chartwin').count() == 0
+    button.click()
+    page.wait_for_selector('.window.chartwin .cw-spread svg', timeout=WAIT)
+    win = page.locator('.window.chartwin')
+    assert 'Gold basis' in win.locator('.cw-pair').text_content()
+    assert '15-minute candles' in win.locator('.cw-size').text_content()
+    assert 'on' in win.locator('.cw-tfs button[data-tf="15"]') \
+        .get_attribute('class')
+    # The spread: candles, the band's middle, +-1 and +-2 sigma, and the
+    # entry either side.
+    assert win.locator('.cw-spread .cw-candle').count() == 100
+    assert win.locator('.cw-spread .cw-mean').count() == 1
+    # The +-1 and +-2 sigma lines are not drawn: the entry and the mean
+    # are the levels a trade is read against.
+    assert win.locator('.cw-spread .cw-band').count() == 0
+    assert win.locator('.cw-spread .cw-band-entry').count() == 2
+    # z against each candle's own band, with the same levels across.
+    assert win.locator('.cw-z .cw-candle').count() == 100
+    assert win.locator('.cw-z .cw-sd').count() == 0
+    assert win.locator('.cw-z .cw-entry-up').count() == 1
+    assert win.locator('.cw-z .cw-entry-down').count() == 1
+    assert win.locator('.cw-z .cw-stop').count() == 0     # the z-stop is off
+    # The jump near the end closes beyond the entry band, and is marked.
+    assert win.locator('.cw-z .cw-candle.beyond').count() >= 1
+    assert 'these are its bands' in win.locator('.cw-note').text_content()
+    # HOVER: the candle under the pointer, in price and in sigma - its
+    # open, high, low and close, the mean and every band line - with a
+    # crosshair through it on BOTH charts.
+    box = win.locator('.cw-spread').bounding_box()
+    page.mouse.move(box['x'] + box['width'] * 0.6,
+                    box['y'] + box['height'] * 0.5)
+    page.wait_for_selector('.chartwin .cw-tip:not([hidden])', timeout=WAIT)
+    tip = win.locator('.cw-tip').text_content()
+    for word in ('Price', 'Score', 'Open', 'High', 'Low', 'Close', 'Range',
+                 'Mean', '+ entry', '\u2212 entry', '15-minute candles'):
+        assert word in tip, word
+    # Each price with its score, a plain number - no sigma symbol.
+    values = win.locator('.cw-tip td').all_text_contents()
+    assert values and not any('\u03c3' in v for v in values), values
+    scores = win.locator('.cw-tip td.z').all_text_contents()
+    # The bands' own scores: the entry either side, and the mean at 0.
+    assert {'+2.50', '0.00', '-2.50'} <= set(scores), scores
+    # The bands it gives are the entry and the mean - nothing between.
+    labels = win.locator('.cw-tip th').all_text_contents()
+    for word in ('+2\u03c3', '+1\u03c3', '\u22121\u03c3', '\u22122\u03c3', '1\u03c3'):
+        assert word not in labels, word
+    assert win.locator('.cw-z .cw-xline:not([hidden])').count() == 1
+    assert win.locator('.cw-spread .cw-xline:not([hidden])').count() == 1
+    # The level under the pointer, read off the axis it is over.
+    assert win.locator('.cw-spread .cw-ylabel:not([hidden])').count() == 1
+    # The readout is the candle's own numbers: its high is its high.
+    readout = page.evaluate('''() => {
+        const node = document.querySelector('.chartwin');
+        const tip = node.querySelector('.cw-tip').textContent;
+        const shown = node._drawn.shown;
+        return {tip, highs: shown.map(c => c.h.toFixed(4))};
+    }''')
+    assert any(h in readout['tip'] for h in readout['highs'])
+    # Away from the chart, it all goes.
+    page.mouse.move(box['x'] - 40, box['y'] - 40)
+    page.wait_for_timeout(150)
+    assert win.locator('.cw-tip:not([hidden])').count() == 0
+    assert win.locator('.cw-xline:not([hidden])').count() == 0
+    assert 'Min:' in win.text_content() and 'Max:' in win.text_content()
+    assert 'on' in button.get_attribute('class')
+    # 1h candles: the same chart, read off the 1-hour history.
+    win.locator('.cw-tfs button[data-tf="60"]').click()
+    page.wait_for_function(
+        "document.querySelector('.chartwin .cw-size').textContent"
+        ".indexOf('1-hour') === 0", timeout=WAIT)
+    page.wait_for_function(
+        "document.querySelector('.chartwin .cw-note').textContent"
+        ".indexOf('the Algo itself reads 15-minute') >= 0", timeout=WAIT)
+    # Closed by the trader: the same button...
+    button.click()
+    page.wait_for_timeout(200)
+    assert page.locator('.window.chartwin').count() == 0
+    assert 'on' not in button.get_attribute('class').split()
+    # ...or the window's own close.
+    button.click()
+    page.wait_for_selector('.window.chartwin', timeout=WAIT)
+    page.click('.window.chartwin .close')
+    page.wait_for_timeout(200)
+    assert page.locator('.window.chartwin').count() == 0
+    assert page.errors == []
+
+
+def test_the_signal_journal_names_the_accounts_the_edge_and_hides_the_unconfirmed(
+        page):
+    """Each row says which account at which broker each leg was on and
+    what the edge filter read; a stretch armed and let go without ever
+    confirming is not a signal, so it is not listed until asked for."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.showUnconfirmed = false;
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {}, drawdown: {}, calibration: {}, shadow: {},
+          excursion: [], journal: [],
+          signal_tally: {armed: 2, blocked: 1, entered: 0, no_entry: 1},
+          signals: [
+            {pair_key: 'A|B', side: 'SELL', source: 'LIVE', state: 'CLOSED',
+             outcome: 'BLOCKED', armed_at: 1762500000, armed_z: 2.55,
+             leg_a_account: 'CFI', leg_a_broker: 'CFI Financial Group',
+             leg_b_account: 'FxPro', leg_b_broker: 'FxPro Financial',
+             edge_ratio: 0.42, edge_required: 1.5, edge_on: true,
+             net_pnl: null, cum_pnl: null, why: 'edge filter'},
+            {pair_key: 'A|B', side: 'BUY', source: 'LIVE', state: 'CLOSED',
+             outcome: 'NO_ENTRY', armed_at: 1762400000, armed_z: -7.73,
+             edge_ratio: 2.1, edge_required: 1.5, edge_on: false,
+             net_pnl: null, cum_pnl: null, why: 'came back'}]};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis table', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    assert 'A: CFI · CFI Financial Group' in text
+    assert 'B: FxPro · FxPro Financial' in text
+    assert '0.42× / 1.50×' in text
+    # The unconfirmed stretch is counted, not listed...
+    assert '-7.73' not in text
+    assert '1 stretch armed and let go without confirming' in text
+    # ...and one click lists it, with its edge and the filter said OFF.
+    page.click('.monitor .an-toggle-unconfirmed')
+    text = page.text_content('.monitor .analysis')
+    assert '-7.73' in text
+    assert '2.10× / 1.50× (off)' in text
+    page.click('.monitor .an-toggle-unconfirmed')
+    assert '-7.73' not in page.text_content('.monitor .analysis')
+    assert page.errors == []
+
+
+def test_the_analysis_page_shows_the_notional_traded(page):
+    """Today, 7 days and 30 days, per ladder and in all - compact, the
+    exact figure and each leg in the cell's title, and a deal that could
+    not be priced flagged rather than dropped."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        const cell = (n, a, b, fills, lots, unpriced) => ({notional: n,
+            a: a, b: b, fills: fills, lots: lots, unpriced: unpriced || 0});
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis', 'C|D': 'Gold'},
+          summary: {}, drawdown: {}, calibration: {}, shadow: {},
+          excursion: [], journal: [], signals: [], signal_tally: {},
+          notional: {
+            periods: [{key: 'today', label: 'Today'},
+                      {key: '7d', label: 'Last 7 days'},
+                      {key: '30d', label: 'Last 30 days'}],
+            rows: [
+              {pair_key: 'A|B', today: cell(1234567, 600000, 634567, 4, 2),
+               '7d': cell(9876543, 5e6, 4876543, 30, 15),
+               '30d': cell(45e6, 22e6, 23e6, 120, 60)},
+              {pair_key: 'C|D', today: cell(0, 0, 0, 0, 0),
+               '7d': cell(250000, 125000, 125000, 2, 1),
+               '30d': cell(250000, 125000, 125000, 3, 1, 1)}],
+            accounts: [
+              {account: 'CFI 19514405', today: cell(600000, 600000, 0, 2, 1),
+               '7d': cell(5e6, 5e6, 0, 15, 8), '30d': cell(22e6, 22e6, 0, 60, 30)}],
+            account_info: {'CFI 19514405': {login: 19514405,
+                                            broker: 'CFI Financial Group'}},
+            total: {today: cell(1234567, 600000, 634567, 4, 2),
+                    '7d': cell(10126543, 5125000, 5001543, 32, 16),
+                    '30d': cell(45250000, 22125000, 23125000, 123, 61, 1)}}};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .an-notional', timeout=WAIT)
+    text = page.text_content('.monitor .an-notional')
+    for word in ('Today', 'Last 7 days', 'Last 30 days', 'Oil basis', 'Gold',
+                 'All ladders', '1.23M', '9.88M', '45.00M', '250.00K',
+                 '4 deals'):
+        assert word in text, word
+    title = page.locator('.monitor .an-notional td[title]').first \
+        .get_attribute('title')
+    assert '1,234,567' in title and 'leg A 600,000' in title
+    # A ladder that traded nothing today shows a dash there, not 0.
+    gold = page.locator('.monitor .an-notional tr', has_text='Gold')
+    assert gold.locator('td').nth(1).text_content().strip() == '\u2014'
+    assert 'counted but not priced' in page.text_content('.monitor .analysis')
+    # Per ACCOUNT: the login and the broker it is at.
+    accounts = page.text_content('.monitor .an-notional-accounts')
+    assert 'CFI 19514405' in accounts and '#19514405' in accounts
+    assert 'CFI Financial Group' in accounts and '600.00K' in accounts
+    # Nothing priced at all is unmeasured: a dash, never a 0.
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.analysis.notional.rows[1]['30d'] = {notional: 0, a: 0, b: 0,
+            fills: 3, lots: 1, unpriced: 3};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    gold = page.locator('.monitor .an-notional tr', has_text='Gold')
+    assert gold.locator('td').nth(3).locator('b').text_content() == '\u2014'
+    # A day of the trader's choosing: the picker asks the page for it.
+    # `fill` fires the change itself: ONE reload each, waited for.
+    with page.expect_response(lambda r: '/api/analysis' in r.url,
+                              timeout=WAIT) as reply:
+        page.fill('.monitor .an-volume-from', '2026-11-03')
+    assert 'volume_from=2026-11-03' in reply.value.url
+    with page.expect_response(lambda r: '/api/analysis' in r.url,
+                              timeout=WAIT) as reply:
+        page.fill('.monitor .an-volume-to', '2026-11-05')
+    assert 'volume_from=2026-11-03' in reply.value.url
+    assert 'volume_to=2026-11-05' in reply.value.url
+    # Leave the page as found: the reload this asked for has landed and
+    # is not left to arrive in the next test's data, nor the day picked.
+    page.wait_for_timeout(200)
+    # ...and the focus off the picker: the pane is not rebuilt under a
+    # field being typed into, so a focused picker freezes it.
+    page.evaluate("() => { const s = window.MT5Trader.state;"
+                  " s.volumeFrom = ''; s.volumeTo = '';"
+                  " document.activeElement.blur(); }")
+    assert page.errors == []
+
+
+def test_the_monitor_takes_the_room_there_is(page):
+    """A flat 560px default left the bottom third of the screen as bare
+    desktop under a tab that is several screens long."""
+    page.evaluate("""() => {
+        window.localStorage.removeItem('mt5trader.windows.v1');
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis', timeout=WAIT)
+    room = page.evaluate("""() => {
+        const w = document.querySelector('.window.monitor');
+        const d = document.getElementById('desktop');
+        return d.getBoundingClientRect().bottom -
+               w.getBoundingClientRect().bottom;
+    }""")
+    # Within one window's furniture of the foot of the desktop, not a
+    # third of the screen away.
+    assert 0 <= room < 120, room
+
+
+def test_the_z_trigger_count_is_on_the_page_with_its_threshold(page):
+    """'How many times did the z trigger' — split by side, with the
+    band it was counted against named rather than left to be guessed."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {}, drawdown: {}, calibration: {}, shadow: {},
+          excursion: [], journal: [], signals: [],
+          signal_tally: {armed: 9, triggered: 9, triggered_up: 6,
+                         triggered_down: 3, threshold_z: 2.5,
+                         peak_z: 3.41, trough_z: -2.88,
+                         blocked: 2, entered: 5, no_entry: 2, tp: 3, sl: 2,
+                         win_rate: 60.0, net_pnl: 410.0, live: 9,
+                         replayed: 0, priced: 5, settled: 5}};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis .an-tiles', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    assert 'z triggered ±2.50σ' in text
+    assert '↑ above' in text and '↓ below' in text
+    assert 'Furthest z' in text and '3.41σ' in text
+    # The two sides add up to the total, on the screen as in the engine.
+    assert '9' in text and '6' in text and '3' in text
+    assert page.errors == []
+
+
+def test_two_ladders_that_disagree_name_no_band_on_the_tile(page):
+    """CONTROL. Printing either threshold would be wrong on half the
+    rows, so the tile names none."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {}, summary: {}, drawdown: {},
+          calibration: {}, shadow: {}, excursion: [], journal: [],
+          signals: [],
+          signal_tally: {armed: 4, triggered: 4, triggered_up: 2,
+                         triggered_down: 2, threshold_z: null,
+                         peak_z: null, trough_z: null, blocked: 0,
+                         entered: 0, no_entry: 0, tp: 0, sl: 0,
+                         win_rate: null, net_pnl: null, live: 4,
+                         replayed: 0, priced: 0, settled: 0}};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis .an-tiles', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    assert 'z triggered' in text and 'σ' not in text.split('Blocked')[0]
+    assert page.errors == []
+
+
+def test_a_derive_that_found_nothing_reads_as_a_sentence(page):
+    """The engine groups held-back reasons with their NUMBERS taken
+    out, writing '#' where they were. On a live desk that reached the
+    screen as 'edge filter: capture #x the cost, under the #x required
+    1' — which reads as a fault, and runs the count straight on
+    after the word 'required'."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .an-derive', timeout=WAIT)
+    page.evaluate("""() => {
+        // An earlier test in this module leaves its own note behind,
+        // and it also says 'held back'.
+        window.MT5Trader.state.deriveNote = null;
+        window.MT5Trader.state.deriving = false;
+        window.MT5Trader.render();
+        window.__realFetch = window.fetch;
+        const json = (b) => Promise.resolve(new Response(JSON.stringify(b),
+            {status: 200, headers: {'Content-Type': 'application/json'}}));
+        window.fetch = function (url, options) {
+            const at = String(url);
+            if (at.indexOf('/api/command') >= 0) {
+                return json({ok: true, id: 'cmd1'});
+            }
+            if (at.indexOf('/api/result/') >= 0) {
+                return json({ok: true, data: {
+                    ok: true, days: 30, written: 0,
+                    pairs: {'A|B': {ok: true, derived: 0, replaced: 0}},
+                    held: {'edge filter: capture #x the cost, under the #x required': 1}}});
+            }
+            return window.__realFetch(url, options);
+        };
+    }""")
+    page.click('.monitor .an-derive')
+    for _ in range(40):
+        note = page.text_content('.monitor .an-derive-out')
+        if 'held back' in note:
+            break
+        page.wait_for_timeout(100)
+    note = page.text_content('.monitor .an-derive-out')
+    assert 'capture nx the cost, under the nx required (1)' in note
+    assert '#' not in note
+    assert 'required 1' not in note
+    page.evaluate('() => { window.fetch = window.__realFetch; }')
+    assert page.errors == []
+
+
+# -- market sessions -----------------------------------------------------------
+
+def _sessions_at(page, iso):
+    """Stand the sessions clock at `iso` (UTC) and repaint."""
+    page.evaluate("""(iso) => {
+        window.MT5Sessions.now = () => new Date(iso);
+        window.MT5Sessions.tick();
+    }""", iso)
+    return page.evaluate("(iso) => window.MT5Sessions.snapshot(new Date(iso))",
+                         iso)
+
+
+def _clear_session_alerts(page):
+    page.evaluate("""() => {
+        try { Object.keys(localStorage).filter(k => k.startsWith('mkt:'))
+                .forEach(k => localStorage.removeItem(k)); } catch (e) {}
+        document.getElementById('toasts').innerHTML = '';
+    }""")
+
+
+def _restore_sessions_clock(page):
+    page.evaluate("""() => {
+        window.MT5Sessions.now = () => new Date();
+        window.MT5Sessions.tick();
+        document.getElementById('toasts').innerHTML = '';
+        document.getElementById('mkt-panel').hidden = true;
+    }""")
+
+
+def test_the_strip_counts_down_to_the_four_markets(page):
+    open_ladder(page)
+    try:
+        # Wed 23:30 UTC = Thu 08:30 in Tokyo: it opens at 08:45.
+        snap = _sessions_at(page, '2026-11-18T23:30:00Z')
+        rows = {r['name']: r for r in snap['rows']}
+        assert list(rows) == ['Tokyo', 'Singapore/Shanghai', 'London',
+                              'New York']
+        assert rows['Tokyo']['tone'] == 'soon' and not rows['Tokyo']['open']
+        assert round(rows['Tokyo']['toOpen']) == 15
+        assert snap['headline'] == 'Next: Tokyo opens in 15m'
+        strip = page.text_content('#mkt-strip')
+        assert 'Tokyo Thu 08:30 · opens in 15m' in strip
+        assert page.locator('#mkt-strip .mkt-chip').count() == 4
+        assert page.locator('#mkt-strip .mkt-chip.soon').count() == 1
+        # Thu 14:10 UTC: New York opened 10 minutes ago, London is open.
+        snap = _sessions_at(page, '2026-11-19T14:10:00Z')
+        rows = {r['name']: r for r in snap['rows']}
+        assert rows['New York']['tone'] == 'hot'
+        assert rows['London']['tone'] == 'open'
+        assert snap['headline'] == ('New York opened 10m ago — expect '
+                                    'volatility')
+        assert 'JUST OPENED · settles in 5h 20m' in page.text_content(
+            '#mkt-strip')
+    finally:
+        _restore_sessions_clock(page)
+
+
+def test_new_york_daylight_saving_moves_the_open_by_itself(page):
+    """09:00 in New York is 14:00 UTC in November and 13:00 in July."""
+    open_ladder(page)
+    try:
+        summer = {r['name']: r for r in
+                  _sessions_at(page, '2026-07-15T13:05:00Z')['rows']}
+        assert summer['New York']['open'] and \
+            summer['New York']['tone'] == 'hot'
+        winter = {r['name']: r for r in
+                  _sessions_at(page, '2026-11-18T13:05:00Z')['rows']}
+        assert not winter['New York']['open']          # still 08:05 ET
+        assert round(winter['New York']['toOpen']) == 55
+    finally:
+        _restore_sessions_clock(page)
+
+
+def test_the_weekend_counts_to_monday(page):
+    open_ladder(page)
+    try:
+        # Saturday noon UTC: everything shut; Tokyo opens Monday 08:45
+        # JST, which is Sunday 23:45 UTC - 35h 45m away.
+        rows = {r['name']: r for r in
+                _sessions_at(page, '2026-11-21T12:00:00Z')['rows']}
+        assert not any(r['open'] for r in rows.values())
+        assert round(rows['Tokyo']['toOpen']) == 35 * 60 + 45
+    finally:
+        _restore_sessions_clock(page)
+
+
+def test_ten_minutes_before_an_open_a_pop_up_says_so_once(page):
+    open_ladder(page)
+    _clear_session_alerts(page)
+    try:
+        # Control: half an hour before London, too early - nothing said.
+        _sessions_at(page, '2026-11-19T07:30:00Z')
+        assert page.locator('#toasts .toast').count() == 0
+        # 8 minutes before London's 08:00: said.
+        _sessions_at(page, '2026-11-19T07:52:00Z')
+        page.wait_for_selector('#toasts .toast', timeout=WAIT)
+        assert 'London opens in 8m' in page.text_content('#toasts')
+        # ...and only once, however many seconds tick by.
+        _sessions_at(page, '2026-11-19T07:53:00Z')
+        assert page.locator('#toasts .toast').count() == 1
+    finally:
+        _clear_session_alerts(page)
+        _restore_sessions_clock(page)
+
+
+def test_ten_minutes_before_new_yorks_settlement_a_pop_up_says_so(page):
+    open_ladder(page)
+    _clear_session_alerts(page)
+    try:
+        # 14:30 ET is 19:30 UTC in November.
+        _sessions_at(page, '2026-11-19T19:25:00Z')
+        page.wait_for_selector('#toasts .toast', timeout=WAIT)
+        assert 'New York settles in 5m (14:30 local)' in page.text_content(
+            '#toasts')
+        # Control: London's close is not one it alerts on.
+        _clear_session_alerts(page)
+        _sessions_at(page, '2026-11-19T16:25:00Z')
+        assert page.locator('#toasts .toast').count() == 0
+    finally:
+        _clear_session_alerts(page)
+        _restore_sessions_clock(page)
+
+
+def test_sessions_opens_a_timeline_with_the_moment_marked(page):
+    open_ladder(page)
+    try:
+        _sessions_at(page, '2026-11-19T14:10:00Z')
+        assert page.evaluate(
+            "() => document.getElementById('mkt-panel').hidden") is True
+        page.click('#mkt-strip .mkt-more')
+        page.wait_for_selector('#mkt-panel .mkt-row', timeout=WAIT)
+        assert page.locator('#mkt-panel .mkt-row').count() == 4
+        assert page.locator('#mkt-panel .mkt-now').count() == 1
+        # New York's bar starts at 14:00 UTC in November.
+        left = page.evaluate("""() => document.querySelectorAll(
+            '#mkt-panel .mkt-row')[3].querySelector('.mkt-bar').style.left""")
+        assert left.startswith('58.33'), left
+        page.click('#mkt-panel .mkt-close')
+        assert page.evaluate(
+            "() => document.getElementById('mkt-panel').hidden") is True
+    finally:
+        _restore_sessions_clock(page)
+
+
+# -- the Slippage page -----------------------------------------------------------
+
+def _slip_report(**over):
+    """A report as `/api/slippage` builds it, from the real report code."""
+    from mt5trader import slippage
+    from test_slippage_split import position
+    body = slippage.report([position(**over)], names={'OIL': 'USOIL|UKOIL'},
+                           window={'label': 'since Wed 18 Nov 16:55 broker '
+                                            'time', 'clock': 'broker',
+                                   'note': ''})
+    body['journal'] = {'fills': 4}
+    body['account_info'] = {'CFI': {'login': 19514405,
+                                    'broker': 'CFI Financial Markets'},
+                            'AC': {'login': 7001, 'broker': 'AC Markets'}}
+    return body
+
+
+def _show_slippage(page, report):
+    page.evaluate("""(report) => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:']; s.monitorTab = 'slippage';
+        s.slippage = report; s.slippageAt = Date.now() + 60000;
+        window.MT5Trader.render();
+    }""", report)
+    page.wait_for_selector('.monitor .slip-cards', timeout=WAIT)
+
+
+def test_the_slippage_page_says_what_it_cost_and_where_it_came_from(page):
+    open_ladder(page)
+    try:
+        _show_slippage(page, _slip_report())
+        cards = page.text_content('.monitor .slip-cards')
+        assert '$10.00' in cards and '$2.00' in cards and '$8.00' in cards
+        assert '7.4%' in cards and '752 ms' in cards
+        bars = page.text_content('.monitor .slip-splits')
+        assert 'market moved while sending' in bars
+        assert 'broker fill' not in bars             # the broker cost nothing
+        pane = page.text_content('.monitor .pane')
+        assert '#19514405 · CFI Financial Markets' in pane
+        assert '#7001 · AC Markets' in pane
+        assert 'USOIL|UKOIL' in pane and '$124.30' in pane   # net P&L
+        # The full statistics are there, folded away.
+        assert page.evaluate(
+            "() => document.querySelector('.slip-detail').open") is False
+        assert 'Round turn' in pane and 'Entries by ladder' in pane
+    finally:
+        page.evaluate("""() => { const s = window.MT5Trader.state;
+            s.slippage = null; s.monitorTab = 'positions';
+            s.open = []; window.MT5Trader.render(); }""")
+
+
+def test_a_broker_that_filled_off_its_price_shows_as_the_broker(page):
+    open_ladder(page)
+    try:
+        _show_slippage(page, _slip_report(fill_b=91.999))
+        assert 'broker fill' in page.text_content('.monitor .slip-splits')
+        # Control: a leg with no send price is unmeasured, said in words.
+        report = _slip_report()
+        for row in report['rows']:
+            for end in ('entry', 'exit'):
+                row[end + '_broker_money'] = row[end + '_moved_money'] = None
+        report['split'] = {'entry': {'measured': 0},
+                           'exit': {'measured': 0}}
+        _show_slippage(page, report)
+        assert 'not measured' in page.text_content('.monitor .slip-splits')
+    finally:
+        page.evaluate("""() => { const s = window.MT5Trader.state;
+            s.slippage = null; s.monitorTab = 'positions';
+            s.open = []; window.MT5Trader.render(); }""")
+
+
+# -- profit % on margin --------------------------------------------------------
+
+def _open_position(**over):
+    leg = lambda side, price: {'side': side, 'volume': 1.0,
+                               'contract_size': 1000.0, 'price': price,
+                               'symbol': 'X', 'account': 'acct_a',
+                               'position_tickets': [], 'order_ticket': None}
+    base = {'position_id': 'PX', 'side': 'SELL', 'quantity': 2.0,
+            'entry_spread': 9.76, 'closing_spread': 9.90, 'net_pnl': -280.0,
+            'order_type': 'LIMIT', 'entry_slippage': 0.002,
+            'click_to_on_ms': 752.0, 'entry_margin': 1740.0,
+            'entry_margin_source': 'terminal',
+            'leg_a': leg('BUY', 82.0), 'leg_b': leg('SELL', 92.0)}
+    base.update(over)
+    return base
+
+
+def test_the_positions_tab_shows_profit_on_both_legs_margin(page):
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    try:
+        publisher.positions = [_open_position()]
+        publisher.publish()
+        page.wait_for_function(
+            "() => (window.MT5Trader.state.snapshot.pairs['XAUUSD_|GC1226']"
+            ".positions || []).length === 1", timeout=WAIT)
+        page.evaluate("""() => { const s = window.MT5Trader.state;
+            s.open = ['monitor:']; s.monitorTab = 'positions';
+            window.MT5Trader.render(); }""")
+        page.wait_for_selector('.monitor tr[data-position="PX"]',
+                               timeout=WAIT)
+        row = page.text_content('.monitor tr[data-position="PX"]')
+        assert '-8.05%' in row and '$3,480.00' in row     # -280 / (1,740 x 2)
+        assert 'est.' not in row
+        # An estimated margin says so; no margin is a dash, never 0%.
+        publisher.positions = [_open_position(entry_margin_source='leverage')]
+        publisher.publish()
+        page.wait_for_function(
+            "() => (window.MT5Trader.state.snapshot.pairs['XAUUSD_|GC1226']"
+            ".positions || [{}])[0].entry_margin_source === 'leverage'",
+            timeout=WAIT)
+        page.evaluate("() => window.MT5Trader.render()")
+        page.wait_for_function(
+            "() => (document.querySelector('.monitor tr[data-position=\"PX\"]')"
+            " || {textContent: ''}).textContent.includes('est.')",
+            timeout=WAIT)
+        publisher.positions = [_open_position(entry_margin=None)]
+        publisher.publish()
+        page.wait_for_function(
+            "() => ((window.MT5Trader.state.snapshot.pairs['XAUUSD_|GC1226']"
+            ".positions || [{}])[0] || {}).entry_margin === null",
+            timeout=WAIT)
+        page.evaluate("() => window.MT5Trader.render()")
+        page.wait_for_function(
+            "() => !(document.querySelector('.monitor tr[data-position=\"PX\"]')"
+            " || {textContent: '%'}).textContent.includes('-8.05%')",
+            timeout=WAIT)
+        assert '0.00%' not in page.text_content(
+            '.monitor tr[data-position="PX"]')
+    finally:
+        publisher.positions = None
+        publisher.publish()
+        page.evaluate("""() => { const s = window.MT5Trader.state;
+            s.open = []; window.MT5Trader.render(); }""")
+
+
+def test_the_algo_window_says_the_pnl_as_a_share_of_margin(page):
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    levels = page.evaluate(
+        """() => window.MT5Trader.state.snapshot
+             .pairs['XAUUSD_|GC1226'].rows.map(r => r.level)""")
+    held = dict(_combined_short(levels), net_pnl=-280.0, entry_margin=1740.0,
+                entry_margin_source='terminal')
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(state='IN_POSITION', signal=None,
+                                       positions=[held])
+    try:
+        publisher.publish()
+        page.wait_for_function(
+            "() => (document.querySelector('.window.algowin .aw-signal')"
+            " || {textContent: ''}).textContent.includes('margin)')",
+            timeout=WAIT)
+        assert '(-8.05% margin)' in page.text_content(
+            '.window.algowin .aw-signal')
+        # Control: no margin priced, no share shown.
+        held['entry_margin'] = None
+        publisher.publish()
+        page.wait_for_function(
+            "() => !(document.querySelector('.window.algowin .aw-signal')"
+            " || {textContent: 'margin)'}).textContent.includes('margin)')",
             timeout=WAIT)
     finally:
         publisher.algo = 'NONE'

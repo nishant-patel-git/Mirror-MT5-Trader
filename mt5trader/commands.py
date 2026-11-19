@@ -24,6 +24,7 @@ import time
 import uuid
 
 from . import atomicfile
+from .config import _clean_max_positions
 from .models import OrderType, OvernightMode, TimeInForce
 
 
@@ -172,6 +173,8 @@ class CommandRunner:
         #: withheld. Blank = the desk-wide MAX_QUOTE_AGE_SEC.
         'max_quote_age_sec': (
             lambda v: float(v) if v not in (None, '') else None),
+        #: The most positions this ladder may hold; blank = 2, 0 = off.
+        'max_positions': lambda v: _clean_max_positions(v),
         #: Which ALGO this ladder runs — one at a time, NONE by
         #: default. It measures and says what it would do; it does not
         #: trade, and a click on the ladder is unaffected either way.
@@ -194,7 +197,9 @@ class CommandRunner:
     def _do_click(self, payload):
         return self.coordinator.click(payload['pair'], payload['side'],
                                       float(payload['level']),
-                                      payload.get('quantity'))
+                                      payload.get('quantity'),
+                                      rest_only=bool(payload.get(
+                                          'rest_only')))
 
     def _do_refresh_feed(self, payload):
         return self.coordinator.refresh_feed(payload['pair'])
@@ -339,6 +344,22 @@ class CommandRunner:
         """Replay history through one ladder's Algo. Sends nothing."""
         return self.coordinator.algo_backtest(payload['pair'],
                                               payload.get('days', 5))
+
+    def _do_chart_history(self, payload):
+        """One ladder's spread as 15m, 1h or 4h candles from MT5's bars,
+        for the chart window. Reads only."""
+        return self.coordinator.chart_history(
+            payload['pair'], payload.get('timeframe_min', 15))
+
+    def _do_backfill_signals(self, payload):
+        """DERIVE the last N days of signals from MT5's own bars.
+
+        A reading, and it says so: the rows it writes are stamped
+        REPLAY. It sends nothing — `backtest.run` cannot reach an
+        order, and this only writes down what it answers.
+        """
+        return self.coordinator.backfill_signals(
+            payload.get('pair') or None, payload.get('days'))
 
     def _do_reset_excursions(self, payload):
         """Zero the Analysis tab's z-score excursion counters."""

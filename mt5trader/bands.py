@@ -194,6 +194,36 @@ def spread_bars(bars_a, bars_b, beta, timeframe_sec, offset_a, offset_b,
             for bucket in sorted(set(a) & set(b))]
 
 
+def spread_ohlc(bars_a, bars_b, beta, sub_sec, candle_sec, offset_a,
+                offset_b, anchor=0.0):
+    """MT5 bars for the two legs, as SPREAD candles with an open, a high,
+    a low and a close.
+
+    A spread's high is not leg B's high less beta times leg A's: the two
+    highs are seldom the same minute. So the candle is built from FINER
+    bars, each matched across the two legs exactly as `spread_bars`
+    matches them - a 15-minute candle from fifteen 1-minute spreads -
+    and its open, high, low and close are those spreads'. The candle
+    still forming is kept: it is the right-hand end of a chart.
+
+    [] when either leg's clock is unmeasured (see `spread_bars`).
+    """
+    fine = spread_bars(bars_a, bars_b, beta, sub_sec, offset_a, offset_b,
+                       anchor=anchor)
+    candles = []
+    for bucket, close in fine:
+        start = bucket_of(bucket, candle_sec, anchor)
+        if candles and candles[-1]['t'] == start:
+            candle = candles[-1]
+            candle['h'] = max(candle['h'], close)
+            candle['l'] = min(candle['l'], close)
+            candle['c'] = close
+        else:
+            candles.append({'t': start, 'o': close, 'h': close, 'l': close,
+                            'c': close})
+    return candles
+
+
 def round_offset(offset, step=900.0):
     """A broker's offset to the nearest quarter hour.
 
