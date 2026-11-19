@@ -1458,6 +1458,12 @@ table.keys td { padding: 2px 0; font-size: 12px; }
   background: #edf7ee;
 }
 .toast .dismiss { float: right; color: var(--muted); }
+.toast .toast-time {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-weight: 400;
+  opacity: 0.75;
+  margin-right: 8px;
+}
 
 /* -- settings: accounts and pairs ------------------------------------ */
 

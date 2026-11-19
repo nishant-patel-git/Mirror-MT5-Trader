@@ -378,22 +378,293 @@ def test_a_pair_setting_is_saved_on_the_pair(bot):
 # -- what it may send --------------------------------------------------------------
 
 
-def test_the_bot_can_never_place_an_order():
-    """No click, no level, no quantity: it switches, saves and CLOSES."""
+def test_the_bot_places_resting_orders_and_nothing_else():
+    """It switches, saves, closes - and places a WORKING order that
+    rests. No close-at-limit, no market order, nothing else."""
     assert tg.ALLOWED_COMMANDS == {'set_algo', 'set_pair', 'flatten_pair',
-                                   'kill'}
+                                   'kill', 'click', 'cancel_order',
+                                   'cancel_where'}
     source = open(tg.__file__, encoding='utf-8').read()
-    for kind in ('click', 'close_at_limit', 'cancel_order', 'cancel_where'):
-        assert f"'{kind}'" not in source
+    for kind in ('close_at_limit', 'close_position', 'adopt_unclaimed',
+                 'close_unclaimed'):
+        assert f"'{kind}'" not in source, kind
+
+
+class _App:
+    """The web app as the desk sees it: a test client that records."""
+
+    def __init__(self):
+        self.sent = []
+
+    def test_client(self):
+        app = self
+
+        class Client:
+            def post(self, path, json=None, headers=None):
+                app.sent.append(json)
+
+                class R:
+                    status_code = 409
+
+                    def get_json(self, silent=False):
+                        return {'ok': False, 'error': 'test'}
+                return R()
+
+            def get(self, path, headers=None):
+                class R:
+                    def get_json(self, silent=False):
+                        return {}
+                return R()
+        return Client()
+
+
+def test_every_order_the_bot_sends_is_marked_rest_only():
+    """At the one door out: whatever builds the click, it cannot cross."""
+    app = _App()
+    desk = tg.WebDesk(app, 'secret')
+    desk.command('click', {'pair': KEY, 'side': 'BUY', 'level': 1.0,
+                           'rest_only': False})
+    assert app.sent[-1]['payload']['rest_only'] is True
+    # Control: a command that is not an order is passed as it is.
+    desk.command('set_pair', {'pair': KEY, 'fields': {}})
+    assert 'rest_only' not in app.sent[-1]['payload']
 
 
 def test_the_web_desk_refuses_any_other_command():
-    class App:
-        def test_client(self):
-            return None
-    desk = tg.WebDesk(App(), 'secret')
-    with pytest.raises(ValueError):
-        desk.command('click', {'pair': KEY, 'side': 'BUY', 'level': 1})
+    desk = tg.WebDesk(_App(), 'secret')
+    for kind in ('close_at_limit', 'close_position', 'adopt_unclaimed'):
+        with pytest.raises(ValueError):
+            desk.command(kind, {'pair': KEY})
+
+
+# -- a working order, from the phone ---------------------------------------------
+
+
+def priced(bot, **extra):
+    bot.desk.snapshot['pairs'][KEY] = row(
+        market={'short_spread': 9.48, 'long_spread': 9.50},
+        increment=0.01, clip_lots_a=0.1, clip_lots_b=0.1,
+        symbol_a='USOIL_F7', symbol_b='UKOIL_F7', time_in_force='GTC',
+        **extra)
+
+
+def test_a_resting_order_is_placed_from_the_ladder_side_and_price(bot):
+    priced(bot)
+    say(bot, '/order')
+    press(bot, 'Oil')
+    assert 'bid <b>9.48</b>' in bot.api.texts()[-1]
+    press(bot, 'SELL (H to L)')
+    say(bot, '9.52')
+    press(bot, '2')
+    confirm = bot.api.texts()[-1]
+    assert 'SELL' in confirm and '9.52' in confirm and 'Qty <b>2</b>' in confirm
+    assert '0.2 lots UKOIL_F7' in confirm and 'until cancelled' in confirm
+    assert 'restart clears it' in confirm
+    assert bot.desk.commands == []            # nothing before Confirm
+    press(bot, 'Confirm')
+    assert bot.desk.commands == [('click', {'pair': KEY, 'side': 'SELL',
+                                            'level': 9.52, 'quantity': 2})]
+
+
+def test_a_typed_quantity_is_taken_too(bot):
+    priced(bot)
+    say(bot, '/order')
+    press(bot, 'Oil')
+    press(bot, 'BUY (L to H)')
+    say(bot, '9.40')
+    say(bot, '3')
+    press(bot, 'Confirm')
+    assert bot.desk.commands[-1][1]['quantity'] == 3.0
+    assert bot.desk.commands[-1][1]['side'] == 'BUY'
+
+
+@pytest.mark.parametrize('typed,qty', [
+    ('0.5', 0.5), ('1.5', 1.5), ('1,5', 1.5), ('0.5 lots', 0.5),
+    ('1.5 lot', 1.5), ('2.25', 2.25), ('Qty 3', 3.0)])
+def test_a_typed_decimal_qty_is_taken_in_lots(bot, typed, qty):
+    priced(bot)
+    say(bot, '/order')
+    press(bot, 'Oil')
+    press(bot, 'BUY (L to H)')
+    say(bot, '9.40')
+    assert 'Qty 1 = 0.1 lot(s) USOIL_F7 / 0.1 lot(s) UKOIL_F7' in \
+        bot.api.texts()[-1]
+    say(bot, typed)
+    confirm = bot.api.texts()[-1]
+    assert f'Qty <b>{qty:g}</b>' in confirm, confirm
+    assert f'{round(qty * 0.1, 8):g} lots UKOIL_F7' in confirm
+    press(bot, 'Confirm')
+    assert bot.desk.commands[-1][1]['quantity'] == qty
+
+
+def test_the_qty_buttons_offer_half_lots(bot):
+    priced(bot)
+    say(bot, '/order')
+    press(bot, 'Oil')
+    press(bot, 'SELL (H to L)')
+    say(bot, '9.52')
+    assert {'0.5', '1', '1.5', '2', '5'} <= set(bot.api.buttons())
+    press(bot, '1.5')
+    press(bot, 'Confirm')
+    assert bot.desk.commands[-1][1]['quantity'] == 1.5
+
+
+@pytest.mark.parametrize('typed,why', [
+    ('0.005', 'finer than'), ('0', 'more than zero'),
+    ('-1', 'more than zero'), ('half', 'not a number')])
+def test_a_qty_the_ladder_cannot_take_is_refused(bot, typed, why):
+    priced(bot)
+    say(bot, '/order')
+    press(bot, 'Oil')
+    press(bot, 'BUY (L to H)')
+    say(bot, '9.40')
+    say(bot, typed)
+    assert why in bot.api.texts()[-1]
+    assert bot.desk.commands == []
+
+
+@pytest.mark.parametrize('side,button,level', [
+    ('BUY', 'BUY (L to H)', '9.50'),        # at the offer: would cross
+    ('BUY', 'BUY (L to H)', '9.60'),        # through it
+    ('SELL', 'SELL (H to L)', '9.48'),      # at the bid
+])
+def test_a_price_that_would_cross_is_refused_before_anything_is_sent(
+        bot, side, button, level):
+    priced(bot)
+    say(bot, '/order')
+    press(bot, 'Oil')
+    press(bot, button)
+    say(bot, level)
+    assert 'would cross the market' in bot.api.texts()[-1]
+    assert bot.desk.commands == []
+
+
+def test_CONTROL_a_price_away_from_the_market_goes_on(bot):
+    priced(bot)
+    say(bot, '/order')
+    press(bot, 'Oil')
+    press(bot, 'BUY (L to H)')
+    say(bot, '9.45')
+    assert 'Qty?' in bot.api.texts()[-1]
+
+
+def test_a_price_off_the_ladders_steps_is_refused(bot):
+    priced(bot)
+    say(bot, '/order')
+    press(bot, 'Oil')
+    press(bot, 'BUY (L to H)')
+    say(bot, '9.455')
+    assert 'not on this ladder' in bot.api.texts()[-1]
+
+
+def test_a_LIVE_ladder_takes_no_order_from_the_phone_either(bot):
+    priced(bot, algo_mode='LIVE')
+    say(bot, '/order')
+    press(bot, 'Oil')
+    assert 'takes no manual orders' in bot.api.texts()[-1]
+    assert 'BUY (L to H)' not in bot.api.buttons()
+
+
+def test_a_DAY_order_says_it_ends_at_the_cutoff(bot):
+    priced(bot)
+    bot.desk.snapshot['pairs'][KEY]['time_in_force'] = 'DAY'
+    say(bot, '/order')
+    press(bot, 'Oil')
+    press(bot, 'BUY (L to H)')
+    say(bot, '9.40')
+    press(bot, '1')
+    assert 'cancelled at the session cutoff' in bot.api.texts()[-1]
+
+
+def test_working_orders_are_listed_and_cancelled_after_a_confirm(bot):
+    priced(bot, orders=[
+        {'order_id': 'o1', 'side': 'SELL', 'level': 9.52, 'quantity': 2,
+         'filled_quantity': 0, 'state': 'WORKING', 'intent': 'OPEN',
+         'time_in_force': 'GTC'},
+        {'order_id': 'o2', 'side': 'BUY', 'level': 9.40, 'quantity': 1,
+         'filled_quantity': 0, 'state': 'WORKING', 'intent': 'OPEN',
+         'time_in_force': 'GTC'},
+        {'order_id': 'o3', 'side': 'BUY', 'level': 9.30, 'quantity': 1,
+         'filled_quantity': 1, 'state': 'FILLED', 'intent': 'OPEN'}])
+    say(bot, '/orders')
+    text = bot.api.texts()[-1]
+    assert 'SELL 2 at 9.52' in text and 'BUY 1 at 9.40' in text
+    assert '9.30' not in text                  # filled: not working
+    press(bot, 'Cancel SELL 2 @ 9.52')
+    assert bot.desk.commands == []             # nothing before Confirm
+    press(bot, 'Confirm')
+    assert bot.desk.commands == [('cancel_order', {'order_id': 'o1'})]
+    say(bot, '/orders')
+    press(bot, 'Cancel all on Oil')
+    press(bot, 'Confirm')
+    assert bot.desk.commands[-1] == ('cancel_where', {'pair': KEY})
+
+
+def _working_order(side, level, quantity, intent='OPEN'):
+    return {'order_id': 'w' + side, 'side': side, 'level': level,
+            'quantity': quantity, 'filled_quantity': 0, 'state': 'WORKING',
+            'intent': intent, 'time_in_force': 'GTC'}
+
+
+def test_flat_with_an_order_working_the_phone_offers_no_second(bot):
+    priced(bot, orders=[_working_order('BUY', 9.40, 1)])
+    say(bot, '/order')
+    press(bot, 'Oil')
+    text = bot.api.texts()[-1]
+    assert 'One at a time' in text and 'BUY 1 at 9.40' in text
+    assert 'BUY (L to H)' not in bot.api.buttons()
+    assert 'SELL (H to L)' not in bot.api.buttons()
+    assert bot.desk.commands == []
+
+
+def test_CONTROL_flat_with_nothing_working_offers_both_sides(bot):
+    priced(bot)
+    say(bot, '/order')
+    press(bot, 'Oil')
+    assert 'BUY (L to H)' in bot.api.buttons()
+    assert 'SELL (H to L)' in bot.api.buttons()
+
+
+def test_a_position_on_offers_only_the_closing_side(bot):
+    priced(bot, positions=[dict(POSITION, quantity=2)])      # SHORT 2
+    say(bot, '/order')
+    press(bot, 'Oil')
+    text = bot.api.texts()[-1]
+    assert 'only a CLOSING order' in text and 'up to Qty 2' in text
+    assert 'BUY (L to H)' in bot.api.buttons()
+    assert 'SELL (H to L)' not in bot.api.buttons()
+    press(bot, 'BUY (L to H)')
+    say(bot, '9.40')
+    press(bot, '2')
+    assert 'This CLOSES 2 of the position' in bot.api.texts()[-1]
+    press(bot, 'Confirm')
+    assert bot.desk.commands[-1][1]['quantity'] == 2
+
+
+def test_a_close_bigger_than_the_position_is_refused_on_the_phone(bot):
+    priced(bot, positions=[dict(POSITION, quantity=2)],
+           orders=[_working_order('BUY', 9.30, 1, intent='CLOSE')])
+    say(bot, '/order')
+    press(bot, 'Oil')
+    assert 'up to Qty 1' in bot.api.texts()[-1]
+    press(bot, 'BUY (L to H)')
+    say(bot, '9.40')
+    press(bot, '2')
+    assert 'never opens the other way' in bot.api.texts()[-1]
+    assert bot.desk.commands == []
+    # Control: the one spread still open goes to a confirm.
+    say(bot, '/order')
+    press(bot, 'Oil')
+    press(bot, 'BUY (L to H)')
+    say(bot, '9.40')
+    press(bot, '1')
+    assert 'This CLOSES 1 of the position' in bot.api.texts()[-1]
+
+
+def test_no_working_orders_says_so(bot):
+    priced(bot)
+    say(bot, '/orders')
+    assert 'None, on any ladder' in bot.api.texts()[-1]
 
 
 # -- the token stays secret ----------------------------------------------------------
@@ -622,6 +893,30 @@ def test_the_web_desk_saves_through_the_same_checks_as_the_screen(web):
     answer = desk.save_pair(KEY, {'algo_params': {'entry_z': 0}})
     assert answer['ok'] is False and 'entry z' in answer['error']
     assert desk.config_pair(KEY)['name'] == 'Oil'
+
+
+@pytest.mark.parametrize('engine_says,ok', [
+    ({'ok': False, 'refused': True,
+      'reason': 'one at a time from Telegram: cancel it first'}, False),
+    ({'ok': True, 'order': {'order_id': 'SO1'}}, True),       # control
+])
+def test_an_order_the_engine_refuses_is_refused_on_the_phone(engine_says, ok):
+    """The runner's ok means "the command ran"; the ENGINE's answer is
+    inside it. A refusal in there must reach the phone as Refused, in
+    the engine's words - never as Done."""
+    desk = tg.WebDesk(_App(), 's', sleep=lambda s: None)
+    desk._post = lambda path, body: {'ok': True, 'id': 'c1'}
+    desk._get = lambda path: {'ok': True, 'data': engine_says}
+    answer = desk.command('click', {'pair': KEY, 'side': 'BUY',
+                                    'level': 9.4, 'quantity': 1})
+    assert answer['ok'] is ok
+    if not ok:
+        assert answer['reason'] == engine_says['reason']
+    api = FakeAPI()
+    b = tg.Bot(api, desk, {ME}, clock=Clock())
+    b._report(ME, answer, 'working.')
+    assert api.texts()[-1].startswith('<b>Refused.</b>' if not ok
+                                      else '<b>Done.</b>')
 
 
 def test_a_command_with_the_engine_down_is_refused_not_queued(web):

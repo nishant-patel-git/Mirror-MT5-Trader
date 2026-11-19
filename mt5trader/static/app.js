@@ -154,10 +154,29 @@
       minimumFractionDigits: 2, maximumFractionDigits: 2});
   }
 
+  function toastStamp(at) {
+    /* WHEN, at the head of every box: a wall of alerts is a history,
+     * and a history with no times cannot be read in order. This PC's
+     * clock, date and time to the second. `at` is
+     * the engine's epoch seconds - the moment it happened, not the
+     * moment the page drew it. */
+    var when = typeof at === 'number' ? new Date(at * 1000) : new Date();
+    var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+    var time = pad(when.getHours()) + ':' + pad(when.getMinutes()) + ':' +
+      pad(when.getSeconds());
+    time = when.getFullYear() + '-' + pad(when.getMonth() + 1) + '-' +
+      pad(when.getDate()) + ' ' + time;
+    var stamp = document.createElement('span');
+    stamp.className = 'toast-time';
+    stamp.textContent = time;
+    return stamp;
+  }
+
   function toast(message, kind) {
     var box = document.createElement('div');
     box.className = 'toast' + (kind === 'ok' ? ' ok' : '');
     box.innerHTML = '<span class="dismiss">&times;</span>';
+    box.appendChild(toastStamp());
     box.appendChild(document.createTextNode(message));
     // Errors used to stay until dismissed, on purpose — so that a
     // refusal could not scroll past unread. But a refusal that REPEATS
@@ -291,13 +310,14 @@
     }
   }
 
-  function stickyToast(message) {
+  function stickyToast(message, at) {
     /* A SIGNALS alert: it stays until the trader dismisses it. The
      * trade it asks for is theirs to make, so it must not scroll away
      * unread the way an ordinary outcome does. */
     var box = document.createElement('div');
     box.className = 'toast signal';
     box.innerHTML = '<span class="dismiss">&times;</span>';
+    box.appendChild(toastStamp(at));
     box.appendChild(document.createTextNode(message));
     box.addEventListener('click', function () { box.remove(); });
     el('toasts').appendChild(box);
@@ -321,7 +341,7 @@
           typeof snapshot.at === 'number' && snapshot.at - alert.at > 30) {
         return;                       // on load, and not fresh: seen
       }
-      stickyToast((row.name || key) + ': ' + alert.text);
+      stickyToast((row.name || key) + ': ' + alert.text, alert.at);
       sound(alert.kind === 'ENTRY' ? 'signal_entry' : 'signal_exit');
       // The ladder's frame flashes - only if its window is open.
       var node = document.querySelector(

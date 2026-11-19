@@ -39,6 +39,7 @@ import html
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 import time
@@ -57,9 +58,13 @@ TOKEN_TTL_SEC = 600.0
 #: How long a "send me the new value" prompt waits for the reply.
 INPUT_TTL_SEC = 300.0
 
-#: The commands the bot may send to the engine, and nothing else. No
-#: `click`, no `close_at_limit`: it never opens a position.
-ALLOWED_COMMANDS = frozenset({'set_algo', 'set_pair', 'flatten_pair', 'kill'})
+#: The commands the bot may send to the engine, and nothing else.
+#: `click` only ever as a RESTING order: `WebDesk.command` sets
+#: `rest_only` on every one, and the engine refuses a level at or through
+#: the market on its own live price - nothing from a phone fills at once.
+#: No `close_at_limit` and no market order.
+ALLOWED_COMMANDS = frozenset({'set_algo', 'set_pair', 'flatten_pair', 'kill',
+                              'click', 'cancel_order', 'cancel_where'})
 
 
 #: A price problem has to last this long before it is worth a message:
@@ -285,6 +290,8 @@ COMMANDS = [('/status', 'Engine & algo state, every ladder'),
             ('/balance', 'Account balances'),
             ('/settings', 'Every setting, with its key'),
             ('/set', 'Change a setting: /set <key> <value>'),
+            ('/order', 'Place a resting working order on a ladder'),
+            ('/orders', 'Working orders: list and cancel'),
             ('/alerts', 'Alerts on / off'),
             ('/ping', 'Alive check'),
             ('/start', 'Menu')]
@@ -821,6 +828,10 @@ class WebDesk:
         """
         if kind not in ALLOWED_COMMANDS:
             raise ValueError(f'the Telegram bot does not send {kind!r}')
+        if kind == 'click':
+            # Here, at the one door out, not in the menu that builds it:
+            # no path through the bot can send an order that crosses.
+            payload = dict(payload, rest_only=True)
         sent = self._post('/api/command', {'kind': kind, 'payload': payload})
         if not sent.get('ok'):
             return {'ok': False, 'reason': sent.get('error') or 'refused'}
@@ -981,6 +992,10 @@ class Bot:
             return self.on_settings_all(chat)
         if command == '/set':
             return self._set_command(chat, text.split()[1:])
+        if command == '/order':
+            return self.on_order_pairs(chat, None)
+        if command == '/orders':
+            return self.on_orders(chat, None)
         return self.on_main(chat, None)
 
     def _may(self, user):
@@ -1009,6 +1024,8 @@ class Bot:
                 [('Trades', 'trades', ()), ('P&L', 'pnl', ())],
                 [('Balance', 'balance', ()),
                  ('Settings', 'settings_list', ())],
+                [('Place order', 'order_pairs', ()),
+                 ('Working orders', 'orders', ())],
                 [(f'Alerts: {alerts}', 'toggle_alerts', ()),
                  ('KILL ALL', 'kill_ask', ())]]
 
@@ -1737,6 +1754,8 @@ class Bot:
                    [('Cancel', back, args)]])
 
     def _typed_value(self, chat, key, field, text):
+        if isinstance(field, tuple):
+            return self._typed_order(chat, key, field, text)
         from . import algo as algo_module
         from . import session as session_module
         _, label, where, kind = FIELD[field]
@@ -1814,6 +1833,337 @@ class Bot:
         self.on_settings_section(chat, None, key, SECTION_OF[field])
 
     # -- alerts -----------------------------------------------------------------------
+
+    # -- working orders, from the phone ----------------------------------------
+    #
+    # A RESTING order on a ladder of the trader's choosing - Buy below the
+    # offer or Sell above the bid - placed through the same `click` the
+    # ladder sends, so every guard the ladder has (a LIVE Algo refusing
+    # manual orders, the quantity cap, reduce-before-opening) applies as
+    # it does at the screen. It never fills at once: `WebDesk.command`
+    # marks it rest-only and the engine refuses a level at or through the
+    # market on its own live price. Every order and every cancel is
+    # confirmed first.
+
+    #: The quantity buttons, in spreads.
+    ORDER_SIZES = (0.5, 1, 1.5, 2, 5)
+    QTY_STEP = 0.01          # the ladder's own Qty box steps
+
+    def _market_line(self, row):
+        md = row.get('market') or {}
+        bid, offer = md.get('short_spread'), md.get('long_spread')
+        if bid is None or offer is None:
+            return 'no live price on this ladder right now'
+        digits = self._digits(row)
+        return (f'bid <b>{plain(bid, digits)}</b>  |  offer '
+                f'<b>{plain(offer, digits)}</b>')
+
+    @staticmethod
+    def _digits(row):
+        increment = row.get('increment') or 0.01
+        text = f'{float(increment):.10f}'.rstrip('0')
+        return max(2, len(text.split('.')[1]) if '.' in text else 0)
+
+    def on_order_pairs(self, chat, message_id):
+        _, pairs = self._snapshot()
+        if not pairs:
+            return self.show(chat, message_id, 'No ladders are configured.')
+        buttons = [[(row.get('name') or key, 'order_side', (key,))]
+                   for key, row in sorted(pairs.items())]
+        buttons.append([('Menu', 'main', ())])
+        self.show(chat, message_id,
+                  '<b>PLACE A WORKING ORDER</b>\nWhich ladder?\n\nA resting '
+                  'order only: a BUY below the offer, a SELL above the bid. '
+                  'Nothing from here fills at once.', buttons)
+
+    def on_order_side(self, chat, message_id, key):
+        _, pairs = self._snapshot()
+        row = pairs.get(key) or {}
+        name = self._pair_name(pairs, key)
+        if mode_word(row) == 'LIVE':
+            return self.show(chat, message_id,
+                             f'<b>{name}</b>\nThe Algo is LIVE on this ladder, '
+                             f'and a LIVE ladder takes no manual orders. Turn '
+                             f'it off first from Status.',
+                             [[('Back', 'order_pairs', ())]])
+        head = f'<b>{name}</b>\n{self._market_line(row)}\n'
+        sides = self._sides_allowed(row)
+        if not sides:
+            order = self._working(row)[0]
+            return self.show(
+                chat, message_id,
+                head + f'A working order is already on this flat ladder '
+                f'({esc(order.get("side"))} {self._left(order):g} at '
+                f'{plain(order.get("level"), self._digits(row))}). One at a '
+                f'time from here: cancel it first.',
+                [[('Working orders', 'orders', ())],
+                 [('Back', 'order_pairs', ())]])
+        buttons = [(label, 'order_price', (key, side))
+                   for side, label in (('BUY', 'BUY (L to H)'),
+                                       ('SELL', 'SELL (H to L)'))
+                   if side in sides]
+        if len(sides) == 1:
+            ask = (f'A position is on ({esc(net_words(row))}): from here only '
+                   f'a CLOSING order, up to Qty {self._close_room(row):g}.')
+        else:
+            ask = 'Flat. Buy or sell the spread?'
+        self.show(chat, message_id, head + ask,
+                  [buttons, [('Back', 'order_pairs', ())]])
+
+    @staticmethod
+    def _left(order):
+        return (order.get('quantity') or 0) - (order.get('filled_quantity')
+                                               or 0)
+
+    def _sides_allowed(self, row):
+        """One position at a time from the phone: flat with nothing
+        working - either side; flat with an order working - none; a
+        position on - only the side that closes it."""
+        positions = row.get('positions') or ()
+        if not positions:
+            return () if self._working(row) else ('BUY', 'SELL')
+        held = {p.get('side') for p in positions}
+        return tuple(s for s in ('BUY', 'SELL') if s not in held)
+
+    def _close_room(self, row):
+        """Spreads of the position not yet covered by working closes."""
+        sides = self._sides_allowed(row)
+        open_qty = sum(float(p.get('quantity') or 0.0)
+                       for p in row.get('positions') or ())
+        covered = sum(self._left(o) for o in self._working(row)
+                      if o.get('side') in sides)
+        return max(round(open_qty - covered, 8), 0.0)
+
+    def _not_one_at_a_time(self, row, side, quantity):
+        sides = self._sides_allowed(row)
+        if side not in sides:
+            return ('one at a time from here: a working order is already on '
+                    'this flat ladder.' if not sides else
+                    f'a position is on ({net_words(row)}): from here it is '
+                    f'only closed, never added to.')
+        if row.get('positions') and quantity > self._close_room(row) + 1e-9:
+            return (f'a close from here covers at most '
+                    f'Qty {self._close_room(row):g} still open - it '
+                    f'never opens the other way.')
+        return None
+
+    def on_order_price(self, chat, message_id, key, side):
+        _, pairs = self._snapshot()
+        row = pairs.get(key) or {}
+        md = row.get('market') or {}
+        digits = self._digits(row)
+        where = (f'below the offer ({plain(md.get("long_spread"), digits)})'
+                 if side == 'BUY' else
+                 f'above the bid ({plain(md.get("short_spread"), digits)})')
+        self._waiting[chat] = (self.clock() + INPUT_TTL_SEC, key,
+                               ('order_price', side))
+        self.show(chat, message_id,
+                  f'<b>{self._pair_name(pairs, key)}  ·  {side}</b>\n'
+                  f'{self._market_line(row)}\n\nSend the price, {where}, on '
+                  f'the ladder\'s {plain(row.get("increment"), digits)} '
+                  f'steps.', [[('Cancel', 'order_side', (key,))]])
+
+    def _typed_order(self, chat, key, field, text):
+        what = field[0]
+        _, pairs = self._snapshot()
+        row = pairs.get(key) or {}
+        typed = text.replace(',', '.').strip().lower()
+        if what == 'order_qty':
+            # "0.5 lots", "1.5 lot", "qty 2": the words are the trader's.
+            typed = re.sub(r'^(qty|quantity)\s*|\s*(lots?|qty)$', '',
+                           typed).strip()
+        try:
+            value = float(typed)
+        except ValueError:
+            return self.send(chat, f'<b>No order.</b> {esc(text)} is not a '
+                                   f'number.')
+        if what == 'order_price':
+            side = field[1]
+            increment = float(row.get('increment') or 0.0)
+            if increment > 0:
+                steps = value / increment
+                if abs(steps - round(steps)) > 1e-6:
+                    return self.send(
+                        chat, f'<b>No order.</b> {esc(text)} is not on this '
+                              f'ladder\'s {plain(increment, self._digits(row))}'
+                              f' steps.')
+                value = round(round(steps) * increment, 10)
+            return self.on_order_qty(chat, None, key, side, value)
+        side, level = field[1], field[2]
+        if value <= 0:
+            return self.send(chat, '<b>No order.</b> The quantity must be '
+                                   'more than zero.')
+        steps = value / self.QTY_STEP
+        if abs(steps - round(steps)) > 1e-6:
+            return self.send(chat, f'<b>No order.</b> {esc(text)} is finer '
+                                   f'than the ladder\'s 0.01 Qty steps.')
+        value = round(round(steps) * self.QTY_STEP, 2)
+        return self.on_order_ask(chat, None, key, side, level, value)
+
+    def on_order_qty(self, chat, message_id, key, side, level):
+        _, pairs = self._snapshot()
+        row = pairs.get(key) or {}
+        refusal = self._crosses(row, side, level)
+        if refusal:
+            return self.send(chat, f'<b>No order.</b> {esc(refusal)}')
+        self._waiting[chat] = (self.clock() + INPUT_TTL_SEC, key,
+                               ('order_qty', side, level))
+        sizes = [(f'{n:g}', 'order_ask', (key, side, level, n))
+                 for n in self.ORDER_SIZES]
+        self.show(chat, message_id,
+                  f'<b>{self._pair_name(pairs, key)}  ·  {side} at '
+                  f'{plain(level, self._digits(row))}</b>\nQty? The same as '
+                  f'the ladder\'s Qty box: {self._qty_unit(row)}\n\nTap '
+                  f'one, or type any size - 0.5, 1.5, 2.25 lots.',
+                  [sizes, [('Cancel', 'order_side', (key,))]])
+
+    @staticmethod
+    def _qty_unit(row):
+        """What one Qty is on each leg, in lots - the ladder's own
+        Leg A / Leg B lots, a blank read as 1."""
+        a = float(row.get('clip_lots_a') or 1.0)
+        b = float(row.get('clip_lots_b') or 1.0)
+        return (f'Qty 1 = {a:g} lot(s) {esc(row.get("symbol_a") or "leg A")}'
+                f' / {b:g} lot(s) {esc(row.get("symbol_b") or "leg B")}.')
+
+    def _crosses(self, row, side, level):
+        """The phone's own early word on a level that would cross - the
+        engine judges again, on its live price, when it arrives."""
+        md = row.get('market') or {}
+        bid, offer = md.get('short_spread'), md.get('long_spread')
+        if bid is None or offer is None:
+            return 'this ladder has no live price right now.'
+        digits = self._digits(row)
+        if side == 'BUY' and not level < offer:
+            return (f'a BUY at {plain(level, digits)} would cross the market '
+                    f'(offer {plain(offer, digits)}). Only a resting order '
+                    f'from here: a BUY below the offer.')
+        if side == 'SELL' and not level > bid:
+            return (f'a SELL at {plain(level, digits)} would cross the market '
+                    f'(bid {plain(bid, digits)}). Only a resting order from '
+                    f'here: a SELL above the bid.')
+        return None
+
+    def on_order_ask(self, chat, message_id, key, side, level, quantity):
+        self._waiting.pop(chat, None)
+        _, pairs = self._snapshot()
+        row = pairs.get(key) or {}
+        refusal = (self._crosses(row, side, level) or
+                   self._not_one_at_a_time(row, side, quantity))
+        if refusal:
+            return self.send(chat, f'<b>No order.</b> {esc(refusal)}')
+        digits = self._digits(row)
+        closing = bool(row.get('positions'))
+        lots_a = round(quantity * float(row.get('clip_lots_a') or 1.0), 8)
+        lots_b = round(quantity * float(row.get('clip_lots_b') or 1.0), 8)
+        leg_b = 'buy' if side == 'BUY' else 'sell'
+        leg_a = 'sell' if side == 'BUY' else 'buy'
+        tif = row.get('time_in_force') or 'DAY'
+        lasts = ('cancelled at the session cutoff (DAY)' if tif == 'DAY'
+                 else 'until cancelled (GTC)')
+        text = (f'<b>Place this working order?</b>\n\n'
+                f'<b>{self._pair_name(pairs, key)}</b>\n'
+                f'<b>{side}</b> ({side_words(side)}) Qty <b>{quantity:g}</b> '
+                f'at <b>{plain(level, digits)}</b>\n'
+                f'leg B {leg_b} {lots_b:g} lots {esc(row.get("symbol_b"))}, '
+                f'leg A {leg_a} {lots_a:g} lots {esc(row.get("symbol_a"))}\n'
+                f'now: {self._market_line(row)}\n'
+                + (f'This CLOSES {quantity:g} of the position '
+                   f'({esc(net_words(row))}).\n' if closing else '')
+                + f'\nIt rests until the spread reaches it. It lasts {lasts}, and '
+                f'a working order does not outlive the engine: a restart '
+                f'clears it.')
+        self.show(chat, message_id, text,
+                  [[('Confirm', 'order_do', (key, side, level, quantity)),
+                    ('Cancel', 'order_side', (key,))]])
+
+    def on_order_do(self, chat, message_id, key, side, level, quantity):
+        _, pairs = self._snapshot()
+        row = pairs.get(key) or {}
+        answer = self.desk.command('click', {'pair': key, 'side': side,
+                                             'level': level,
+                                             'quantity': quantity})
+        self._report(chat, answer,
+                     f'{self._pair_name(pairs, key)}: {side} '
+                     f'{quantity:g} at {plain(level, self._digits(row))} '
+                     f'is working. /orders lists it, with a Cancel button.'
+                     + (f' ({esc(answer.get("reason"))})'
+                        if answer.get('reason') else ''))
+
+    def _working(self, row):
+        return [o for o in (row.get('orders') or ())
+                if o.get('state') in ('WORKING', 'FILLING')]
+
+    def on_orders(self, chat, message_id):
+        _, pairs = self._snapshot()
+        lines, buttons = [], []
+        for key, row in sorted(pairs.items()):
+            orders = self._working(row)
+            if not orders:
+                continue
+            digits = self._digits(row)
+            lines.append(f'\n<b>{self._pair_name(pairs, key)}</b>  '
+                         f'({self._market_line(row)})')
+            for order in orders:
+                left = (order.get('quantity') or 0) - \
+                    (order.get('filled_quantity') or 0)
+                what = ('close' if order.get('intent') == 'CLOSE'
+                        else 'open')
+                lines.append(f'{order.get("side")} {left:g} at '
+                             f'{plain(order.get("level"), digits)}  ·  '
+                             f'{what}  ·  '
+                             f'{order.get("time_in_force") or ""}')
+                buttons.append([(f'Cancel {order.get("side")} {left:g} @ '
+                                 f'{plain(order.get("level"), digits)}',
+                                 'cancel_ask', (key, order.get('order_id')))])
+            if len(orders) > 1:
+                buttons.append([(f'Cancel all on {row.get("name") or key}',
+                                 'cancel_all_ask', (key,))])
+        if not lines:
+            return self.show(chat, message_id,
+                             '<b>WORKING ORDERS</b>\nNone, on any ladder.',
+                             [[('Place order', 'order_pairs', ()),
+                               ('Menu', 'main', ())]])
+        buttons.append([('Refresh', 'orders', ()), ('Menu', 'main', ())])
+        self.show(chat, message_id,
+                  '<b>WORKING ORDERS</b>' + '\n'.join(lines), buttons)
+
+    def on_cancel_ask(self, chat, message_id, key, order_id):
+        _, pairs = self._snapshot()
+        row = pairs.get(key) or {}
+        order = next((o for o in self._working(row)
+                      if o.get('order_id') == order_id), None)
+        if order is None:
+            return self.show(chat, message_id, 'That order is no longer '
+                             'working.', [[('Working orders', 'orders', ())]])
+        self.show(chat, message_id,
+                  f'<b>Cancel this order?</b>\n{self._pair_name(pairs, key)}: '
+                  f'{order.get("side")} {order.get("quantity"):g} at '
+                  f'{plain(order.get("level"), self._digits(row))}',
+                  [[('Confirm', 'cancel_do', (key, order_id)),
+                    ('Keep it', 'orders', ())]])
+
+    def on_cancel_do(self, chat, message_id, key, order_id):
+        answer = self.desk.command('cancel_order', {'order_id': order_id})
+        self._report(chat, answer, 'Cancelled.')
+
+    def on_cancel_all_ask(self, chat, message_id, key):
+        _, pairs = self._snapshot()
+        count = len(self._working(pairs.get(key) or {}))
+        self.show(chat, message_id,
+                  f'<b>Cancel all {count} working orders on '
+                  f'{self._pair_name(pairs, key)}?</b>',
+                  [[('Confirm', 'cancel_all_do', (key,)),
+                    ('Keep them', 'orders', ())]])
+
+    def on_cancel_all_do(self, chat, message_id, key):
+        _, pairs = self._snapshot()
+        answer = self.desk.command('cancel_where', {'pair': key})
+        data = answer.get('data') if isinstance(answer.get('data'),
+                                                dict) else {}
+        self._report(chat, answer,
+                     f'{data.get("cancelled", 0)} order(s) cancelled on '
+                     f'{self._pair_name(pairs, key)}.')
 
     def _price_problem(self, row):
         # A feed that is silent because this ladder's market is shut -
