@@ -5810,9 +5810,10 @@ def test_an_ordinary_toast_is_stamped_too(page):
     page.evaluate("() => document.getElementById('toasts').innerHTML = ''")
 
 
-def test_your_position_is_marked_on_the_ladder_and_named_yours(page):
-    """A manual position the Algo watches: YOUR SHORT in its window, and
-    its entry / target / stop tagged on the ladder's own prices."""
+def test_a_position_is_marked_on_the_ladder_and_named_plainly(page):
+    """A manual position the Algo watches: SHORT in its window - not
+    "YOUR SHORT", the desk's own word - and its entry / target / stop
+    tagged on the ladder's own prices."""
     open_ladder(page)
     publisher = page.paths['publisher']
     levels = page.evaluate(
@@ -5834,16 +5835,152 @@ def test_your_position_is_marked_on_the_ladder_and_named_yours(page):
         assert page.locator('.ladder .lvl-tag.be').count() == 0
         page.wait_for_function(
             "() => (document.querySelector('.window.algowin .aw-pos')"
-            " || {textContent: ''}).textContent.includes('YOUR SHORT')",
+            " || {textContent: ''}).textContent.indexOf('SHORT 1') === 0",
             timeout=WAIT)
-        # The control: the Algo's own position is not called yours.
-        held['source'] = 'ALGO'
+        assert 'YOUR' not in page.text_content('.window.algowin .aw-pos')
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def _combined_short(levels, covered=0.0):
+    return {'position_id': 'AVG:P1+P2', 'combined': True,
+            'position_ids': ['P1', 'P2'], 'side': 'SELL', 'quantity': 2.0,
+            'source': 'MANUAL', 'entry_spread': levels[4],
+            'closing_spread': levels[5], 'break_even': levels[4],
+            'tp': levels[7], 'sl': levels[2], 'tp_money': 6.0,
+            'sl_money': -9.0, 'net_pnl': -1.5, 'exit': None,
+            'opened_at': time.time() - 600, 'age_sec': 600.0,
+            'leg_a_side': 'BUY', 'leg_a_volume': 0.2, 'leg_a_entry': 4607.5,
+            'leg_a_now': 4607.4, 'leg_b_side': 'SELL', 'leg_b_volume': 0.2,
+            'leg_b_entry': 4666.6, 'leg_b_now': 4660.8,
+            'fills': [{'position_id': 'P1', 'quantity': 1.0,
+                       'entry_spread': levels[6], 'opened_at': time.time() - 600,
+                       'net_pnl': -3.0},
+                      {'position_id': 'P2', 'quantity': 1.0,
+                       'entry_spread': levels[2], 'opened_at': time.time() - 60,
+                       'net_pnl': 1.5}],
+            'close_covered': covered}
+
+
+def test_two_fills_read_as_one_averaged_position(page):
+    """The ladder and the Algo window show ONE position: its size, its
+    average, one set of tags - and the fills behind it folded away."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    levels = page.evaluate(
+        """() => window.MT5Trader.state.snapshot
+             .pairs['XAUUSD_|GC1226'].rows.map(r => r.level)""")
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(state='IN_POSITION', signal=None,
+                                       positions=[_combined_short(levels)])
+    try:
         publisher.publish()
         page.wait_for_function(
             "() => (document.querySelector('.window.algowin .aw-pos')"
-            " || {textContent: ''}).textContent.indexOf('SHORT') === 0",
+            " || {textContent: ''}).textContent.indexOf('SHORT 2') === 0",
             timeout=WAIT)
+        line = page.text_content('.window.algowin .aw-line')
+        assert 'SELL 2 @' in line and 'avg' in line, line
+        signal = page.text_content('.window.algowin .aw-signal')
+        assert 'Avg entry' in signal and '(2 fills)' in signal
+        assert 'Leg B (SELL 0.2)' in signal and '(oldest)' in signal
+        # One set of tags, the entry marked as the average.
+        assert page.locator('.ladder .lvl-tag.entry').count() == 1
+        assert page.text_content('.ladder .lvl-tag.entry') == 'AVG'
+        # The fills: folded by default...
+        assert page.evaluate(
+            "() => document.querySelector('.aw-fills').open") is False
+        page.click('.aw-fills summary')
+        page.wait_for_timeout(700)               # three repaints later
+        assert page.evaluate(
+            "() => document.querySelector('.aw-fills').open") is True
+        assert '#2 SELL 1' in page.text_content('.aw-fills')
+        page.click('.aw-fills summary')          # folded again
+        page.wait_for_timeout(500)
+        assert page.evaluate(
+            "() => document.querySelector('.aw-fills').open") is False
+        # No close order, or one that covers the whole: no warning.
+        assert page.locator('.aw-cover').count() == 0
     finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def test_a_close_that_covers_part_of_the_whole_is_said(page):
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    levels = page.evaluate(
+        """() => window.MT5Trader.state.snapshot
+             .pairs['XAUUSD_|GC1226'].rows.map(r => r.level)""")
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(
+        state='IN_POSITION', signal=None,
+        positions=[_combined_short(levels, covered=1.0)])
+    try:
+        publisher.publish()
+        page.wait_for_selector('.aw-cover', timeout=WAIT)
+        text = page.text_content('.aw-cover')
+        assert 'covers 1 of 2' in text and 'other 1 has no close' in text
+        # Control: covering the whole, nothing to say.
+        publisher.algo_block = _algo_block(
+            state='IN_POSITION', signal=None,
+            positions=[_combined_short(levels, covered=2.0)])
+        publisher.publish()
+        page.wait_for_function(
+            "() => !document.querySelector('.aw-cover')", timeout=WAIT)
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def test_the_position_limit_is_said_once_it_is_reached(page):
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    levels = page.evaluate(
+        """() => window.MT5Trader.state.snapshot
+             .pairs['XAUUSD_|GC1226'].rows.map(r => r.level)""")
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(
+        state='IN_POSITION', signal=None,
+        positions=[_combined_short(levels)])
+    two = [{'position_id': 'P%d' % i, 'side': 'SELL', 'quantity': 1.0,
+            'entry_spread': levels[4], 'source': 'MANUAL',
+            'leg_a': {'volume': 0.1}, 'leg_b': {'volume': 0.1}}
+           for i in (1, 2)]
+    try:
+        publisher.pair_extra = {'max_positions': 2, 'positions': two}
+        publisher.publish()
+        page.wait_for_selector('.aw-limit', timeout=WAIT)
+        assert '2 of 2 positions on' in page.text_content('.aw-limit')
+        assert 'Closes always work' in page.text_content('.aw-limit')
+        # Control: one on, nothing working - under the limit, not said.
+        publisher.pair_extra = {'max_positions': 2, 'positions': two[:1]}
+        publisher.publish()
+        page.wait_for_function(
+            "() => !document.querySelector('.aw-limit')", timeout=WAIT)
+        # A working add counts: one on + one working = the limit.
+        publisher.pair_extra = {'max_positions': 2, 'positions': two[:1],
+                                'orders': [{'order_id': 'W1', 'side': 'SELL',
+                                            'level': levels[1],
+                                            'quantity': 1.0,
+                                            'filled_quantity': 0.0,
+                                            'state': 'WORKING',
+                                            'position_id': None}]}
+        publisher.publish()
+        page.wait_for_selector('.aw-limit', timeout=WAIT)
+        assert '1 on + 1 working add = 2 of 2' in page.text_content(
+            '.aw-limit')
+        # Control: the limit off, never said.
+        publisher.pair_extra = {'max_positions': 0, 'positions': two}
+        publisher.publish()
+        page.wait_for_function(
+            "() => !document.querySelector('.aw-limit')", timeout=WAIT)
+    finally:
+        publisher.pair_extra = {}
         publisher.algo = 'NONE'
         publisher.algo_block = None
         publisher.publish()

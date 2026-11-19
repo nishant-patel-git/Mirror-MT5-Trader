@@ -2359,3 +2359,22 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
 .window.chartwin .cw-tip tr.cols th, .window.chartwin .cw-tip tr.cols td {
   font: 600 10px var(--font); color: #6c757d; text-transform: uppercase;
   letter-spacing: .03em; }
+
+/* -- one position per side: the fills behind it, and the limit ---------- */
+.aw-limit {
+  background: #fdecea; border: 1px solid #d93025; color: #8a1c12;
+  padding: 4px 6px; margin: 4px 0; font-size: 11px; border-radius: 3px;
+}
+.aw-cover {
+  background: #fff4d6; border: 1px solid #e0b040; color: #6b4a00;
+  padding: 4px 6px; margin: 4px 0; font-size: 11px; border-radius: 3px;
+}
+.aw-fills { margin: 4px 0; font-size: 11px; }
+.aw-fills summary { cursor: pointer; font-weight: 600; }
+.aw-fill-rows {
+  display: grid; grid-template-columns: auto auto auto auto;
+  gap: 2px 12px; font-family: var(--mono, ui-monospace, monospace);
+  margin-top: 3px;
+}
+.aw-fill-rows .up { color: var(--traded, #1e8e3e); }
+.aw-fill-rows .down { color: #c0392b; }
