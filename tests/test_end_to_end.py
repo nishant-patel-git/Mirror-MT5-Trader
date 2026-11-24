@@ -636,7 +636,73 @@ def test_the_analysis_tab_is_on_the_screen(desk, browser_page, round_turn):
     assert '1 closed' in text
     # The tab button is there for the trader to find.
     assert page.locator('.monitor .tabs button[data-tab="analysis"]').count() == 1
+    # Net P&L masked, then left out, from the bar - and the report link
+    # carries the choice.
+    page.select_option('.monitor .an-pnl', 'mask')
+    page.wait_for_function(
+        "() => document.querySelector('.monitor .pane').textContent"
+        ".includes('\u2022\u2022\u2022\u2022\u2022')", timeout=8000)
+    trader = page.get_attribute('.monitor .an-report-trader', 'href')
+    client = page.get_attribute('.monitor .an-report-client', 'href')
+    assert 'pnl=mask' in trader and 'view=trader' in trader
+    assert 'pnl=mask' in client and 'view=client' in client
+    assert page.text_content('.monitor .an-report-trader') == 'Trader report'
+    assert page.text_content('.monitor .an-report-client') == 'Client report'
+    page.select_option('.monitor .an-pnl', 'hide')
+    page.wait_for_function(
+        "() => !Array.from(document.querySelector('.monitor .an-table')"
+        ".querySelectorAll('th'))"
+        ".some(th => th.textContent === 'Running')", timeout=8000)
+    page.select_option('.monitor .an-pnl', 'show')
     assert page.errors == []
+
+
+def test_the_printable_report_covers_the_same_trade(desk, round_turn):
+    """/report: the Analysis record as a printable page - the logo, the
+    headline returns and the trade journal - and the trader's own logo
+    in place of the Nexus mark once one is put beside config.json."""
+    import os
+    app = create_app(desk.paths['status'], desk.paths['commands'],
+                     desk.paths['results'], desk.paths['config'],
+                     desk.paths['db'])
+    app.config.update(TESTING=True)
+    client = app.test_client()
+    response = client.get('/report?days=1')
+    assert response.status_code == 200
+    page = response.get_data(as_text=True)
+    assert 'Trading Report' in page and 'class="mark"' in page
+    for heading in ('Net P&amp;L', 'Return on capital', 'Return on margin',
+                    'Win rate', 'Max drawdown', 'Breakdown',
+                    'Trade journal', 'Print / Save as PDF'):
+        assert heading in page, heading
+    assert '1 closed' in page and 'Last day' in page
+    # MT5's words, not OKX's.
+    assert 'MetaTrader 5' in page and 'XAUUSD_|GC1226' in page
+    assert 'OKX' not in page and 'Funding' not in page
+    hidden = client.get('/report?days=1&pnl=hide').get_data(as_text=True)
+    assert '<th>Net P&amp;L</th>' not in hidden
+    assert 'href="/report?days=1&amp;pnl=show"' in hidden
+    # The CLIENT's report: returns only - the ladder, the journal and
+    # the count of trades are not on it. (The trader's page above, the
+    # control, carries all three.)
+    mine = client.get('/report?view=client&days=1').get_data(as_text=True)
+    assert 'Performance Report' in mine and 'Return on capital' in mine
+    assert 'Returns by day' in mine and 'Max drawdown' in mine
+    for detail in ('XAUUSD_|GC1226', 'Trade journal', 'Breakdown',
+                   '1 closed', 'MetaTrader 5', 'Win rate'):
+        assert detail not in mine, detail
+    assert 'view=client' in client.get(
+        '/report?view=client&days=1&pnl=hide').get_data(as_text=True)
+    logo = os.path.join(os.path.dirname(desk.paths['config']),
+                        'report_logo.png')
+    with open(logo, 'wb') as f:
+        f.write(b'\x89PNG\r\n\x1a\nlogo')
+    try:
+        page = client.get('/report?days=1').get_data(as_text=True)
+        assert 'src="data:image/png;base64,' in page
+        assert 'class="mark"' not in page
+    finally:
+        os.remove(logo)
 
 
 def test_a_session_with_nothing_traded_is_not_a_slippage_of_zero(desk,

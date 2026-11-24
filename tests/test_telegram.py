@@ -1273,9 +1273,10 @@ def test_status_opens_each_ladder_with_w3s_rows(bot):
     assert '<b>SYSTEM STATUS  ·  ' in text
     in_order(text, ['Algo</b>  <code>Enabled', 'Mode</b>  <code>Signals',
                     'Position</b>  <code>H to L 0.50',
-                    'Z-score</b>  <code>+1.2345',
                     'Regime</b>  <code>mean reverting',
                     'Half-Life</b>  <code>296.5 periods  (4,447 min)'])
+    # No mid z: it is not the z anything trades on.
+    assert 'Z-score' not in text and '1.2345' not in text
 
 
 def test_the_CONTROL_a_ladder_with_the_algo_off_says_disabled_and_flat(bot):
@@ -1294,8 +1295,8 @@ def test_end_of_day_is_w3s_report_per_ladder():
     assert text.startswith('<b>END OF DAY  ·  2027-01-15 08:00 UTC</b>')
     in_order(text, ['Trades', 'PnL</b>  <code>$+4.10', 'Equity',
                     'Unrealized', 'Position</b>  <code>flat',
-                    'Z-score</b>  <code>-0.5000',
                     'Regime</b>  <code>trending'])
+    assert 'Z-score' not in text
 
 
 def test_an_unmeasured_gross_is_a_dash_not_a_zero(bot):

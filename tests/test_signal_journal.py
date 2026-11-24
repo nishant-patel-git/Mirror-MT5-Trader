@@ -548,3 +548,20 @@ def test_CONTROL_the_filter_on_is_said_as_on(config, pair, legs, tmp_path):
     desk.push(HOME, ARM)
     [row] = desk.rows()
     assert row['edge_on'] is True
+
+
+def test_a_signal_keeps_the_spread_price_its_z_was_read_off(
+        config, pair, legs, tmp_path):
+    """The z in alone does not say where the spread was. Each row keeps
+    the spread price the arming z was read off - the side's own
+    executable price, the bid for H to L - BLOCKED or not, and it is not
+    `entry`, which is where an entry would have been taken."""
+    desk = Desk(config, pair, legs, tmp_path, edge_on=True,
+                edge_multiple=1000.0, **REENTRY)
+    desk.push(HOME, ARM)
+    md = desk.co.market[pair.key]
+    desk.push(WINDOW, HOME)
+    [row] = desk.rows()
+    assert row['outcome'] == 'BLOCKED' and row['entry'] is None
+    assert row['armed_spread'] == pytest.approx(md['short_spread'],
+                                                abs=1e-6)

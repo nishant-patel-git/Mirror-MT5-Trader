@@ -311,7 +311,25 @@ def returns(row, pnl):
                              else round(pnl / notional * 100.0, 6))}
 
 
-def summary(positions):
+def on_capital(pnl, margin, notional, capital):
+    """One trade against the CAPITAL the trader manages: its net as a
+    share of it (return on capital), the margin it tied up as a share of
+    it (capital used), and its two legs' face value over it (exposure,
+    x). Each None while the capital is not set or its base was not
+    measured."""
+    capital = float(capital or 0.0)
+    if capital <= 0:
+        return {'pct_capital': None, 'pct_capital_used': None,
+                'exposure': None}
+    return {'pct_capital': (None if pnl is None
+                            else round(pnl / capital * 100.0, 4)),
+            'pct_capital_used': (None if not margin
+                                 else round(margin / capital * 100.0, 2)),
+            'exposure': (None if not notional
+                         else round(notional / capital, 3))}
+
+
+def summary(positions, capital=0.0):
     """Trades opened in the window, the closed ones' net and win rate."""
     rows = list(positions or ())
     closed = [r for r in rows if r.get('closed_at') is not None
@@ -323,7 +341,21 @@ def summary(positions):
     based = [(r, returns(r, _pnl(r))['margin']) for r in closed]
     based = [(r, m) for r, m in based if m]
     used = sum(m for _r, m in based)
-    return {'count': len(rows), 'closed': len(closed),
+    # ON CAPITAL: the window's net over the capital managed, and how
+    # much of it the trades tied up - on average and at most, each trade
+    # by its own margin.
+    capital = float(capital or 0.0)
+    shares = ([m / capital * 100.0 for _r, m in based] if capital > 0
+              else [])
+    net = sum(_pnl(r) for r in closed) if closed else None
+    return {'capital': capital or None,
+            'return_on_capital': (round(net / capital * 100.0, 4)
+                                  if capital > 0 and net is not None
+                                  else None),
+            'capital_used_avg': (round(sum(shares) / len(shares), 2)
+                                 if shares else None),
+            'capital_used_max': round(max(shares), 2) if shares else None,
+            'count': len(rows), 'closed': len(closed),
             'open': sum(1 for r in rows if r.get('closed_at') is None),
             'net_pnl': (round(sum(_pnl(r) for r in closed), 2)
                         if closed else None),
@@ -334,23 +366,56 @@ def summary(positions):
             'margin_trades': len(based)}
 
 
-def drawdown(positions):
+def drawdown(positions, capital=0.0):
     """The equity curve over closed trades, oldest first: its peak, its
-    worst fall from a peak, and how far below the peak it is now."""
+    worst fall from a peak, and how far below the peak it is now.
+
+    And the DEEPEST OPEN DRAWDOWN: the same curve, but each trade taken
+    at its worst point while it was still open (its MAE, `trough_pnl`)
+    rather than where it closed - the low the account actually went
+    through. A trade that dipped to -$233 and closed at -$91 was a $233
+    fall, not a $91 one. Each trade is counted from the closed P&L
+    before it; trades open at the same time are counted one at a time,
+    so it is the deepest any ONE trade took the account. Against
+    `capital` (the capital managed) as a %, where it is set."""
     closed = sorted((r for r in positions or ()
                      if r.get('closed_at') is not None
                      and _pnl(r) is not None),
                     key=lambda r: r['closed_at'])
     if not closed:
         return {'trades': 0, 'max': None, 'max_pct': None, 'current': None,
-                'peak_equity': None, 'worst_trade': None, 'best_trade': None}
+                'peak_equity': None, 'worst_trade': None, 'best_trade': None,
+                'max_pct_capital': None, 'open_max': None,
+                'open_max_pct_capital': None, 'open_max_trade': None}
     peak = running = worst = 0.0
+    deepest, deepest_row = None, None
     for row in closed:
+        trough = row.get('trough_pnl')
+        if trough is not None and float(trough) < 0:
+            fall = peak - (running + float(trough))
+            if deepest is None or fall > deepest:
+                deepest, deepest_row = fall, row
         running += _pnl(row)
         peak = max(peak, running)
         worst = max(worst, peak - running)
     current = max(0.0, peak - running)
+    capital = float(capital or 0.0)
+
+    def on_capital(money):
+        return (round(100.0 * money / capital, 2)
+                if capital > 0 and money is not None else None)
+    deepest = None if deepest is None else round(max(deepest, worst), 2)
     return {'trades': len(closed), 'max': round(worst, 2),
+            'max_pct_capital': on_capital(worst),
+            'open_max': deepest,
+            'open_max_pct_capital': on_capital(deepest),
+            'open_max_trade': None if deepest_row is None else {
+                'position_id': deepest_row.get('position_id'),
+                'pair_key': deepest_row.get('pair_key'),
+                'side': deepest_row.get('side'),
+                'closed_at': deepest_row.get('closed_at'),
+                'trough_pnl': round(float(deepest_row['trough_pnl']), 2),
+                'pnl': round(_pnl(deepest_row), 2)},
             'max_pct': (round(100.0 * worst / peak, 1) if peak else None),
             'current': round(current, 2), 'peak_equity': round(peak, 2),
             'equity': round(running, 2),
@@ -504,6 +569,71 @@ def excursion_rows(positions):
     return sorted(rows, key=lambda r: -(r['closed_at'] or 0))
 
 
+#: The stops the winners' worst points are tried against, in % of the
+#: margin both legs tied up (the base the desk's SL % is set on).
+STOP_STUDY_PCTS = (0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0)
+
+
+def stop_study(positions, capital=0.0, levels=STOP_STUDY_PCTS):
+    """WHERE A STOP WOULD HAVE COST LEAST, from the trades themselves.
+
+    Every closed trade with its worst point (MAE) and its margin: how far
+    it went against, as a % of its margin and in spread points. Then,
+    for each stop level, what it would have done to THESE trades: a
+    trade that went that far against would have been stopped there -
+    net -(level x its margin) - instead of closing where it did. That
+    cuts the winners that dipped that far and caps the losers.
+
+    The stop is assumed filled AT its level and nothing after it is
+    changed: a real stop in a spike fills worse, so the savings are a
+    best case and the cost of cutting winners is exact.
+    """
+    capital = float(capital or 0.0)
+    trades = []
+    for row in positions or ():
+        pnl = _pnl(row)
+        trough = row.get('trough_pnl')
+        margin = returns(row, pnl)['margin'] if pnl is not None else None
+        if row.get('closed_at') is None or pnl is None or trough is None \
+                or not margin:
+            continue
+        mae = max(0.0, -float(trough))
+        units = row.get('spread_units')
+        trades.append({'pnl': pnl, 'margin': float(margin), 'mae': mae,
+                       'mae_pct': 100.0 * mae / float(margin),
+                       'mae_points': (mae / float(units) if units else None)})
+    winners = [t for t in trades if t['pnl'] > 0]
+    losers = [t for t in trades if t['pnl'] <= 0]
+
+    def spread_of(values):
+        values = sorted(values)
+        if not values:
+            return None
+        return {'median': round(percentile(values, 50), 2),
+                'p75': round(percentile(values, 75), 2),
+                'p90': round(percentile(values, 90), 2),
+                'max': round(values[-1], 2)}
+    rows = []
+    for level in levels:
+        hit = [t for t in trades if t['mae_pct'] >= level]
+        change = sum(-level / 100.0 * t['margin'] - t['pnl'] for t in hit)
+        rows.append({
+            'pct_margin': level,
+            'winners_cut': sum(1 for t in hit if t['pnl'] > 0),
+            'losers_stopped': sum(1 for t in hit if t['pnl'] <= 0),
+            'net_change': round(change, 2),
+            'net_change_pct_capital': (round(100.0 * change / capital, 2)
+                                       if capital > 0 else None)})
+    return {'trades': len(trades), 'winners': len(winners),
+            'losers': len(losers),
+            'winners_mae_pct': spread_of([t['mae_pct'] for t in winners]),
+            'winners_mae_points': spread_of(
+                [t['mae_points'] for t in winners
+                 if t['mae_points'] is not None]),
+            'losers_mae_pct': spread_of([t['mae_pct'] for t in losers]),
+            'levels': rows}
+
+
 def percentile(values, pct):
     """Linear-interpolated percentile of a sorted list, or None."""
     if not values:
@@ -539,7 +669,7 @@ def calibration(positions):
                                        else round(hold, 1))}
 
 
-def journal(positions, entry_z=None, exit_z=None):
+def journal(positions, entry_z=None, exit_z=None, capital=0.0):
     """Every closed round trip, newest first, with a running total in
     the order they closed. `entry_z` / `exit_z` map position id to the
     Algo's z at that end (manual trades have none)."""
@@ -568,6 +698,7 @@ def journal(positions, entry_z=None, exit_z=None):
                          'symbol': fill.get('symbol')}
         opened = row.get('opened_at')
         gross = _gross(row)
+        based = returns(row, pnl)
         out.append({
             'position_id': row.get('position_id'),
             'pair_key': row.get('pair_key'), 'side': row.get('side'),
@@ -589,7 +720,8 @@ def journal(positions, entry_z=None, exit_z=None):
             # hit from a stop that was in the wrong place.
             'exit': exit_columns(row),
             'pnl': None if pnl is None else round(pnl, 2),
-            **returns(row, pnl),
+            **based,
+            **on_capital(pnl, based['margin'], based['notional'], capital),
             # The spread's move times k, before commission; the fees
             # are what lies between that and the net. Either is None
             # when a side of it was not measured.
@@ -629,18 +761,21 @@ def algo_z(events):
     return entry, exit_
 
 
-def report(positions, events=(), shadows=(), excursions=None, now=0.0):
-    """Everything the tab shows, from what is recorded."""
+def report(positions, events=(), shadows=(), excursions=None, now=0.0,
+           capital=0.0):
+    """Everything the tab shows, from what is recorded. `capital`: what
+    the trader manages (CAPITAL_MANAGED), 0 when not set."""
     positions = list(positions or ())
     entry_z, exit_z = algo_z(events)
-    return {'summary': summary(positions),
-            'drawdown': drawdown(positions),
+    return {'summary': summary(positions, capital),
+            'drawdown': drawdown(positions, capital),
+            'stop_study': stop_study(positions, capital),
             'excursion': excursion_rows(positions),
             'calibration': calibration(positions),
             'shadow': shadow_summary(shadows),
             'z_excursions': {key: excursions_view(data, now)
                              for key, data in (excursions or {}).items()},
-            'journal': journal(positions, entry_z, exit_z)}
+            'journal': journal(positions, entry_z, exit_z, capital)}
 
 
 #: The windows the volume is counted over: the broker's own TODAY, and

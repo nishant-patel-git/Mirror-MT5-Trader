@@ -1121,7 +1121,9 @@ class Bot:
                 ('Mode', {'OFF': '—', 'DRY': 'Signals',
                           'LIVE': 'Live'}[mode]),
                 ('Position', net_words(row)),
-                ('Z-score', plain(block.get('z_mid'), 4, True)),
+                # No mid z: the H to L and L to H lines below carry the z
+                # at the price each side would actually trade, which is
+                # the one the Algo arms and enters on.
                 ('Regime', (regime_now.get('state') or '—').lower()
                  .replace('_', ' ') if regime_now.get('state') else '—')]
         candles = filters_now.get('half_life_candles')
@@ -2445,7 +2447,6 @@ class AlertWatch:
                 ('Unrealized', w3(row.get('open_pnl'))),
                 None,
                 ('Position', net_words(row)),
-                ('Z-score', plain(block.get('z_mid'), 4, True)),
                 ('Regime', (regime.get('state') or '—').lower()
                  .replace('_', ' ') if regime.get('state') else '—'),
                 # What this desk adds.
