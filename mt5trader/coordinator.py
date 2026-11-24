@@ -3668,6 +3668,11 @@ class Coordinator:
                 'algo_block': self.algo_block(pair, md, row_exit),
                 'show_fair_window': pair.algo_window,   # the old name
                 'default_quantity': pair.default_quantity,
+                # Commission for ONE spread's round turn, both legs, both
+                # ends - the Sizing tab scales it to a capital's size.
+                # The same sum break-even uses; display only.
+                'commission_per_spread': takeprofit.commission(
+                    pair, settings, 1.0),
                 # The largest Qty either broker will take, so the
                 # keypad can stop offering a size that is a guaranteed
                 # refusal. None where neither broker caps volume.

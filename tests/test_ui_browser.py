@@ -6749,6 +6749,14 @@ def test_the_slippage_page_says_what_it_cost_and_where_it_came_from(page):
         assert page.evaluate(
             "() => document.querySelector('.slip-detail').open") is False
         assert 'Round turn' in pane and 'Entries by ladder' in pane
+        # EVERY FILL, in one line and then one row each: sent against
+        # filled, per leg, per end.
+        head = page.text_content('.monitor .slip-fills-head')
+        assert 'leg fills filled exactly at the price sent' in head
+        heads = page.locator('.monitor .slip-fills th').all_text_contents()
+        for word in ('Sent at', 'Filled at', 'Slip', 'bp', '$'):
+            assert word in heads, word
+        assert page.locator('.monitor .slip-fills tbody tr').count() >= 2
     finally:
         page.evaluate("""() => { const s = window.MT5Trader.state;
             s.slippage = null; s.monitorTab = 'positions';
@@ -6993,3 +7001,128 @@ def test_tidy_tiles_the_desk_edge_to_edge(page):
         publisher.algo_block = None
         publisher.publish()
         tidy(page)
+
+
+def test_the_monitor_maximizes_and_never_hides_a_confirmation(page):
+    """The Trading Monitor's own button fills the desk; the same again
+    (or a double-click on the title bar) puts it back. Maximized, it
+    stays UNDER the confirmation an order asks - a full-screen Monitor
+    must never hide the question."""
+    open_ladder(page)
+    page.evaluate("() => window.MT5Trader.openPanel('monitor:')")
+    page.wait_for_selector('.window.monitor .winbtn.max', timeout=WAIT)
+    # The Monitor to the front, as a trader's click on it would: a
+    # floating window an earlier test left over it would otherwise take
+    # the click meant for its button.
+    page.evaluate(
+        "() => { document.querySelector('.window.monitor').style.zIndex"
+        " = 899; }")
+    try:
+        before = page.locator('.window.monitor').bounding_box()
+        page.click('.window.monitor .winbtn.max')
+        page.wait_for_selector('.window.monitor.maximized', timeout=WAIT)
+        desk = page.locator('#desktop').bounding_box()
+        box = page.locator('.window.monitor').bounding_box()
+        assert abs(box['y'] - desk['y']) <= 2
+        assert abs((box['y'] + box['height']) -
+                   (desk['y'] + desk['height'])) <= 2
+        assert box['width'] >= desk['width'] - 12
+        # Kept across a redraw.
+        page.evaluate("() => window.MT5Trader.render()")
+        assert page.locator('.window.monitor.maximized').count() == 1
+        # A confirmation opened now is ON TOP of the maximized Monitor.
+        page.evaluate("""() => window.MT5Trader.ask('Cross both legs now?',
+            'test', 'Send', () => {})""")
+        page.wait_for_selector('#modal:not(.hidden)', timeout=WAIT)
+        on_top = page.evaluate("""() => {
+            const b = document.getElementById('modal-confirm')
+                .getBoundingClientRect();
+            const hit = document.elementFromPoint(b.x + b.width / 2,
+                                                  b.y + b.height / 2);
+            return hit && hit.id === 'modal-confirm'; }""")
+        assert on_top, 'the maximized Monitor covered the confirmation'
+        page.click('#modal-cancel')
+        # Control: a double-click on the title bar restores it, to the
+        # size and place it had.
+        page.dblclick('.window.monitor .titlebar .title')
+        page.wait_for_selector('.window.monitor:not(.maximized)',
+                               timeout=WAIT)
+        after = page.locator('.window.monitor').bounding_box()
+        assert abs(after['width'] - before['width']) <= 2
+        assert abs(after['x'] - before['x']) <= 2
+        assert page.errors == []
+    finally:
+        page.evaluate("""() => { const s = window.MT5Trader.state;
+            s.maximized = {}; window.MT5Trader.closePanel('monitor:'); }""")
+
+
+def _sizing_tab(page):
+    page.evaluate("""() => { const t = window.MT5Trader;
+        t.openPanel('monitor:'); t.state.monitorTab = 'sizing';
+        t.state.sizing = null; t.render(); }""")
+    page.wait_for_selector('.monitor .sz', timeout=WAIT)
+
+
+def test_the_sizing_tab_works_a_capital_through_on_mt5s_figures(page):
+    """The Sizing tab, for MT5: one ladder's margin per spread (as the
+    terminals price it), k and commission per lot, worked through for
+    each capital level. No OKX fee tiers, maker/taker or funding."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    try:
+        # Unmeasured is not zero: without MT5's margin there is no sheet.
+        publisher.exits = None
+        publisher.publish()
+        _sizing_tab(page)
+        page.wait_for_selector('.monitor .sz-missing', timeout=WAIT)
+        assert 'has not priced the margin' in page.text_content(
+            '.monitor .sz-missing')
+        assert page.locator('.monitor .sz-table').count() == 0
+        # Control: with the margin priced, the sheet is drawn.
+        publisher.exits = {'margin_per_spread': 1000.0,
+                           'margin_source': 'terminal'}
+        publisher.pair_extra = {'commission_per_spread': 10.0,
+                                'spread_units': 1000.0}
+        publisher.publish()
+        page.evaluate("() => window.MT5Trader.render()")
+        page.wait_for_selector('.monitor .sz-table', timeout=WAIT)
+        # $5k ... $10M: 2 + 8 + 3 + 38 rows.
+        assert page.locator('.monitor .sz-table tbody tr').count() == 51
+        # The arithmetic, at $100k: 60% in margin = $60k = 60 spreads;
+        # $60,000 a point; commission 60 x $10 = $600; target 1.5% of
+        # margin = $900; stop 1.5% of capital = $1,500.
+        r = page.evaluate("""() => { const t = window.MT5Trader;
+            return t.sizingRow(100000, {win: 65, perDay: 3, freePct: 40,
+              target: 1.5, targetBase: 'margin', stop: 1.5,
+              stopBase: 'capital'}, t.sizingMarket()); }""")
+        assert r['spreads'] == 60 and r['point'] == 60000
+        assert r['fees'] == 600 and r['target'] == 900 and r['stop'] == 1500
+        assert abs(r['targetPts'] - 0.025) < 1e-9       # (900 + 600) / 60k
+        assert abs(r['stopPts'] - 0.015) < 1e-9         # (1500 - 600) / 60k
+        assert abs(r['breakEven'] - 62.5) < 1e-9        # 1500 / 2400
+        assert abs(r['month'] - 5400) < 1e-6            # (585 - 525) x 90
+        summary = page.text_content('.monitor .sz-sum')
+        assert '60 spread(s)' in summary and "MT5’s own" in summary
+        # MT5's words: commission per lot, swap - not OKX's.
+        text = page.text_content('.monitor .sz')
+        for word in ('Commission / trade', 'Lots A / B', 'swap'):
+            assert word in text, word
+        for word in ('VIP', 'Maker', 'AED', 'funding', 'Leverage'):
+            assert word not in text, word
+        # A win rate button re-works the month.
+        page.click('.monitor .sz-win[data-win="55"]')
+        page.wait_for_selector('.monitor .sz-win.on[data-win="55"]',
+                               timeout=WAIT)
+        assert 'at 55%' in page.text_content('.monitor .sz-sum')
+        # The print sheet carries the ladder and the table.
+        sheet = page.evaluate("() => window.MT5Trader.sizingSheetHtml()")
+        assert 'Position Sizing Sheet' in sheet and 'sz-table' in sheet
+        assert 'Ladder' in sheet
+        assert page.errors == []
+    finally:
+        publisher.exits = None
+        publisher.pair_extra = {}
+        publisher.publish()
+        page.evaluate("""() => { const t = window.MT5Trader;
+            t.state.sizing = null; t.state.monitorTab = 'positions';
+            t.closePanel('monitor:'); }""")
