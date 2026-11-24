@@ -1520,7 +1520,9 @@ def tidy(page):
     moving when the click returns; a position read then is where a
     window WAS.
     """
-    page.click('#tidy')
+    # Shift: the plain row, the known baseline these tests start from.
+    # A plain click TILES the desk (test_tidy_tiles_the_desk...).
+    page.click('#tidy', modifiers=['Shift'])
     # A fresh baseline: two readings from THIS layout, not one left
     # over from a previous test's.
     page.evaluate("() => { window.__settleWas = {}; }")
@@ -6601,30 +6603,31 @@ def test_the_strip_counts_down_to_the_four_markets(page):
         assert 'Tokyo Thu 08:30 · opens in 15m' in strip
         assert page.locator('#mkt-strip .mkt-chip').count() == 4
         assert page.locator('#mkt-strip .mkt-chip.soon').count() == 1
-        # Thu 14:10 UTC: New York opened 10 minutes ago, London is open.
-        snap = _sessions_at(page, '2026-11-19T14:10:00Z')
+        # Thu 14:40 UTC: New York (09:30 ET) opened 10 minutes ago,
+        # London is open.
+        snap = _sessions_at(page, '2026-11-19T14:40:00Z')
         rows = {r['name']: r for r in snap['rows']}
         assert rows['New York']['tone'] == 'hot'
         assert rows['London']['tone'] == 'open'
         assert snap['headline'] == ('New York opened 10m ago — expect '
                                     'volatility')
-        assert 'JUST OPENED · settles in 5h 20m' in page.text_content(
+        assert 'JUST OPENED · settles in 4h 50m' in page.text_content(
             '#mkt-strip')
     finally:
         _restore_sessions_clock(page)
 
 
 def test_new_york_daylight_saving_moves_the_open_by_itself(page):
-    """09:00 in New York is 14:00 UTC in November and 13:00 in July."""
+    """09:30 in New York is 14:30 UTC in November and 13:30 in July."""
     open_ladder(page)
     try:
         summer = {r['name']: r for r in
-                  _sessions_at(page, '2026-07-15T13:05:00Z')['rows']}
+                  _sessions_at(page, '2026-07-15T13:35:00Z')['rows']}
         assert summer['New York']['open'] and \
             summer['New York']['tone'] == 'hot'
         winter = {r['name']: r for r in
-                  _sessions_at(page, '2026-11-18T13:05:00Z')['rows']}
-        assert not winter['New York']['open']          # still 08:05 ET
+                  _sessions_at(page, '2026-11-18T13:35:00Z')['rows']}
+        assert not winter['New York']['open']          # still 08:35 ET
         assert round(winter['New York']['toOpen']) == 55
     finally:
         _restore_sessions_clock(page)
@@ -6690,10 +6693,10 @@ def test_sessions_opens_a_timeline_with_the_moment_marked(page):
         page.wait_for_selector('#mkt-panel .mkt-row', timeout=WAIT)
         assert page.locator('#mkt-panel .mkt-row').count() == 4
         assert page.locator('#mkt-panel .mkt-now').count() == 1
-        # New York's bar starts at 14:00 UTC in November.
+        # New York's bar starts at 14:30 UTC in November (09:30 ET).
         left = page.evaluate("""() => document.querySelectorAll(
             '#mkt-panel .mkt-row')[3].querySelector('.mkt-bar').style.left""")
-        assert left.startswith('58.33'), left
+        assert left.startswith('60.41'), left
         page.click('#mkt-panel .mkt-close')
         assert page.evaluate(
             "() => document.getElementById('mkt-panel').hidden") is True
@@ -6924,3 +6927,69 @@ def test_the_analysis_page_reads_trades_against_the_capital_managed(page):
         time.sleep(0.1)
     assert saved['settings']['CAPITAL_MANAGED'] == 5000
     assert page.errors == []
+
+
+def test_tidy_tiles_the_desk_edge_to_edge(page):
+    """Tidy lays the desk out in one click: ladders full height on the
+    left, the Algo window beside them with the Trading Monitor under it,
+    the chart and the fair window stacked down the right - every window
+    touching its neighbour, the desk filled, and saved like a layout
+    made by hand. Shift-Tidy (the control) is the plain row."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block()
+    key = 'XAUUSD_|GC1226'
+    write_chart_history(page, key, 15)
+    try:
+        publisher.publish()
+        page.wait_for_selector('.window.algowin', timeout=WAIT)
+        page.evaluate("""(key) => { window.MT5Trader.openPanel('monitor:');
+            window.MT5Trader.openPanel('chart:' + key);
+            window.MT5Trader.showFairWindow(key, true); }""", key)
+        page.wait_for_selector('.window.fairwin', timeout=WAIT)
+        page.wait_for_selector('.window.chartwin', timeout=WAIT)
+        page.errors.clear()
+        page.click('#tidy')
+        page.wait_for_timeout(300)
+        box = {name: page.locator(sel).first.bounding_box() for name, sel in (
+            ('ladder', '.window.ladder'), ('algo', '.window.algowin'),
+            ('monitor', '.window.monitor'), ('chart', '.window.chartwin'),
+            ('fair', '.window.fairwin'))}
+        desk = page.locator('#desktop').bounding_box()
+        near = lambda a, b: abs(a - b) <= 4
+        right = lambda b: b['x'] + b['width']
+        bottom = lambda b: b['y'] + b['height']
+        # Ladder on the left, full height.
+        assert near(box['ladder']['x'], desk['x'])
+        assert box['ladder']['height'] >= desk['height'] - 12
+        # The Algo window beside it, the Monitor under it, same column.
+        assert near(box['algo']['x'], right(box['ladder']))
+        assert near(box['monitor']['x'], box['algo']['x'])
+        assert near(box['monitor']['y'], bottom(box['algo']))
+        assert near(bottom(box['monitor']), bottom(box['ladder']))
+        # Chart and fair window stacked down the right, to the bottom.
+        assert near(box['chart']['x'], right(box['algo']))
+        assert near(box['fair']['x'], box['chart']['x'])
+        # ...and as wide as the column: no cap leaves a gap beside it.
+        assert near(box['fair']['width'], box['chart']['width'])
+        assert near(box['fair']['y'], bottom(box['chart'])) or \
+            near(box['chart']['y'], bottom(box['fair']))
+        assert near(max(bottom(box['chart']), bottom(box['fair'])),
+                    bottom(box['ladder']))
+        # Saved like a layout made by hand.
+        saved = page.evaluate(
+            "() => JSON.parse(localStorage.getItem('mt5trader.windows.v1'))")
+        assert saved['monitor:']['auto'] is False
+        assert page.errors == []
+        # Control - Shift-Tidy: the plain row, nothing floating.
+        tidy(page)
+        assert page.locator('.window.floating').count() == 0
+    finally:
+        page.evaluate("""(key) => { const t = window.MT5Trader;
+            t.closePanel('monitor:'); t.closePanel('chart:' + key);
+            t.showFairWindow(key, false); }""", key)
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+        tidy(page)

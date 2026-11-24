@@ -2488,3 +2488,11 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
   .monitor .an-table td { font-size: 10px; padding: 1px 3px; }
   .monitor .an-table th { font-size: 9.5px; padding: 2px 3px; }
 }
+
+/* An Algo window given a size - by Tidy, or by its corner - takes it:
+ * the 420px cap is for the window as it first opens. */
+.window.algowin.sized { max-width: none; }
+
+/* Likewise the fair window: given a size by Tidy (tiled down the right)
+ * or by its corner, it fills it - the 260px cap is for first opening. */
+.window.fairwin.sized { max-width: none; }
