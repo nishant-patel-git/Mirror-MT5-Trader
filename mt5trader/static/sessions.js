@@ -22,7 +22,9 @@
      close: '17:00', alert: ['open']},
     {name: 'London', zone: 'Europe/London', open: '08:00', close: '16:30',
      alert: ['open']},
-    {name: 'New York', zone: 'America/New_York', open: '09:00',
+    // The US open: the NYSE bell, 09:30 New York time - the same moment
+    // Stat_Arb_W3 counts to. Oil's settlement at 14:30 stays the close.
+    {name: 'New York', zone: 'America/New_York', open: '09:30',
      close: '14:30', alert: ['open', 'close'], closeWord: 'settles'}
   ];
   var SOON_MIN = 30;        // amber: opens or closes within this
