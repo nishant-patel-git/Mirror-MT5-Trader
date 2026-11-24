@@ -25,11 +25,13 @@ import re
 import secrets
 import time
 from datetime import date
+from urllib.parse import urlencode
 
 from flask import Flask, jsonify, render_template, request
 
 from . import analysis, atomicfile, config as cfg, diagnostics, fairvalue, \
     hedgeratio, signals, sizing, slippage
+from . import report as trade_report
 from .commands import CommandLog
 from .legs import RemoteLeg
 
@@ -526,6 +528,56 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
             body['journal'] = None
         return body, None
 
+    # -- the printable report ---------------------------------------------------
+
+    @app.get('/report')
+    def trading_report():
+        """The Analysis tab's record as a printable report: the same
+        trades, period (`days`) and ladder (`pair`), laid out for A4 and
+        the browser's Print / Save as PDF, with the logo on top."""
+        db = store()
+        if db is None:
+            return 'the database could not be opened', 503
+        try:
+            days = float(request.args.get('days', 7))
+        except ValueError:
+            days = 7.0
+        pair_key = request.args.get('pair') or None
+        now = time.time()
+        start = None if days <= 0 else now - days * 86400.0
+        positions = db.positions_between(start, None, pair_key=pair_key)
+        events = db.events_between(('algo_signal', 'algo_order'), start)
+        if pair_key:
+            events = [e for e in events if e.get('pair_key') == pair_key]
+        raw = cfg.load_raw(config_path)
+        names = {key: (pair or {}).get('name') or key
+                 for key, pair in (raw.get('pairs') or {}).items()}
+        try:
+            capital = max(0.0, float((raw.get('settings') or {}).get(
+                'CAPITAL_MANAGED') or 0.0))
+        except (TypeError, ValueError):
+            capital = 0.0
+        body = analysis.report(positions, events, now=now, capital=capital)
+        folder = os.path.dirname(os.path.abspath(config_path))
+        pnl = request.args.get('pnl') or 'show'
+
+        def link(mode):
+            query = dict(request.args.items(), pnl=mode)
+            return '/report?' + urlencode(query)
+        if request.args.get('view') == 'client':
+            # Returns only: never what was traded, or how often.
+            page = trade_report.render_client(
+                body, days, now, logo=trade_report.logo_html(folder),
+                pnl=pnl, link=link)
+        else:
+            page = trade_report.render(body, names, days, pair_key, now,
+                                       logo=trade_report.logo_html(folder),
+                                       pnl=pnl, link=link)
+        response = app.make_response(page)
+        response.headers['Content-Type'] = 'text/html; charset=utf-8'
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+
     # -- the Analysis tab ------------------------------------------------------
 
     @app.get('/api/analysis')
@@ -567,7 +619,13 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         raw = cfg.load_raw(config_path)
         names = {key: (pair or {}).get('name') or key
                  for key, pair in (raw.get('pairs') or {}).items()}
-        body = analysis.report(positions, events, shadows, excursions, now)
+        try:
+            capital = max(0.0, float((raw.get('settings') or {}).get(
+                'CAPITAL_MANAGED') or 0.0))
+        except (TypeError, ValueError):
+            capital = 0.0
+        body = analysis.report(positions, events, shadows, excursions, now,
+                               capital=capital)
         try:
             zone_days = float(request.args.get('zone_days', 1))
         except ValueError:

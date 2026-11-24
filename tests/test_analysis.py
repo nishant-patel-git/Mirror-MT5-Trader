@@ -520,3 +520,57 @@ def test_and_a_real_total_from_the_first_priced_trade_on():
             closed(None, 3, peak=1.0, trough=-1.0)]
     assert [r['cum_pnl'] for r in analysis.journal(rows)] == \
         [-205.0, -205.0, None]
+
+
+def test_the_deepest_open_drawdown_counts_each_trade_at_its_worst():
+    """23 Nov: +$68.91 of winners, then a short that went to -$233.04
+    while open and closed at -$90.64. Closed, the fall is $90.64 (2.59%
+    of $3,500); while open it was $233.04 (6.66%) - the one that
+    matters."""
+    from mt5trader import analysis
+    rows = [{'position_id': 'W', 'closed_at': 1.0, 'realized_pnl': 68.91,
+             'trough_pnl': -5.0},
+            {'position_id': 'L', 'closed_at': 2.0, 'realized_pnl': -90.64,
+             'trough_pnl': -233.04, 'pair_key': 'ethbtc', 'side': 'SELL'},
+            {'position_id': 'X', 'closed_at': 3.0, 'realized_pnl': 10.02,
+             'trough_pnl': -1.0}]
+    d = analysis.drawdown(rows, capital=3500)
+    assert d['max'] == 90.64 and d['max_pct_capital'] == 2.59
+    assert d['open_max'] == 233.04 and d['open_max_pct_capital'] == 6.66
+    assert d['open_max_trade']['position_id'] == 'L'
+    assert d['open_max_trade']['trough_pnl'] == -233.04
+    # No capital set: the money, no %.
+    assert analysis.drawdown(rows)['open_max_pct_capital'] is None
+    # No trough recorded: unmeasured, never zero.
+    bare = [{'closed_at': 1.0, 'realized_pnl': -5.0}]
+    assert analysis.drawdown(bare)['open_max'] is None
+
+
+def test_the_stop_study_weighs_winners_cut_against_losers_stopped():
+    """Three winners that dipped 0.5%, 1% and 3% of their margin, and one
+    loser that went to 10% and closed at -5%. A 2% stop cuts the 3%
+    winner and stops the loser at -2% instead of -5%."""
+    from mt5trader import analysis
+
+    def trade(pnl, trough, i):
+        return {'position_id': f'T{i}', 'closed_at': float(i),
+                'realized_pnl': pnl, 'trough_pnl': trough,
+                'entry_margin': 100.0, 'quantity': 1.0,
+                'spread_units': 10.0}
+    rows = [trade(2.0, -0.5, 1), trade(2.0, -1.0, 2), trade(2.0, -3.0, 3),
+            trade(-5.0, -10.0, 4)]
+    st = analysis.stop_study(rows, capital=1000)
+    assert (st['trades'], st['winners'], st['losers']) == (4, 3, 1)
+    assert st['winners_mae_pct']['median'] == 1.0
+    assert st['winners_mae_pct']['max'] == 3.0
+    assert st['winners_mae_points']['max'] == 0.3       # $3 / $10 a point
+    at2 = next(r for r in st['levels'] if r['pct_margin'] == 2.0)
+    assert (at2['winners_cut'], at2['losers_stopped']) == (1, 1)
+    # Winner: -2 instead of +2 (-4); loser: -2 instead of -5 (+3).
+    assert at2['net_change'] == -1.0
+    assert at2['net_change_pct_capital'] == -0.1
+    at5 = next(r for r in st['levels'] if r['pct_margin'] == 5.0)
+    assert (at5['winners_cut'], at5['losers_stopped'], at5['net_change']) \
+        == (0, 1, 0.0)
+    # Nothing measured: nothing claimed.
+    assert analysis.stop_study([])['trades'] == 0

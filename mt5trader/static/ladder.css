@@ -2457,3 +2457,34 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
 .broker-t { color: #c0392b; }
 .slip-detail { margin-top: 10px; }
 .slip-detail summary { cursor: pointer; font-weight: 600; }
+
+/* -- Analysis: the capital managed, and the printable report ------------- */
+.monitor .an-bar input.an-capital { font: 11px var(--font); width: 90px;
+  margin-left: 2px; }
+.monitor .an-report { margin-left: 10px; padding: 1px 10px; border: 1px solid #808080;
+  background: #fff; color: #16324f; font-weight: 600; text-decoration: none; }
+.monitor .an-report:hover { background: #16324f; color: #fff; }
+
+/* THE ANALYSIS TABLES FIT THE WINDOW. Every Monitor cell is one line by
+ * default, so a 22-column trade journal ran ~1,800px wide and its last
+ * columns sat off to the right. Here headings and words wrap - a pair's
+ * name, an exit reason, "Net % on margin" - and numbers stay on one
+ * line, where a broken one would be misread. */
+.monitor .an-table { width: 100%; min-width: 0; }
+.monitor .an-table th { white-space: normal; vertical-align: bottom;
+  line-height: 1.15; }
+.monitor .an-table td.l { white-space: normal; overflow-wrap: normal;
+  word-break: normal; min-width: 52px; }
+.monitor .an-table th, .monitor .an-table td { padding-left: 4px;
+  padding-right: 4px; }
+/* ...and on a narrow window a cell may break at a SPACE: a date above
+ * its time, "9.40 →" above "9.27", a side above its price. A number has
+ * no space in it, so no number is ever split. */
+.monitor .an-table td { white-space: normal; }
+/* A narrow Monitor window: the journal's numbers a point smaller, so all
+ * its columns still fit; a wide one is untouched. */
+.monitor .analysis { container-type: inline-size; }
+@container (max-width: 1250px) {
+  .monitor .an-table td { font-size: 10px; padding: 1px 3px; }
+  .monitor .an-table th { font-size: 9.5px; padding: 2px 3px; }
+}
