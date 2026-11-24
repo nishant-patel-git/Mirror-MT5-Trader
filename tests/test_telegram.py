@@ -1376,3 +1376,90 @@ def test_the_settings_list_has_the_exits_per_side(bot):
     assert 'EXITS PER SIDE' in listing.upper()
     assert 'stop_mode_sell' in listing and 'tp_pct_buy' in listing
     assert 'same as ladder' in listing
+
+
+def test_a_webhook_on_the_bot_is_cleared_so_commands_are_read():
+    """Live: alerts arrived, every command went unanswered. A webhook
+    on the bot makes Telegram refuse getUpdates (409), while sending
+    still works. The bot clears it and reads commands again."""
+    from mt5trader import telegram as tg
+
+    class Api:
+        def __init__(self):
+            self.calls, self.webhook = [], True
+
+        def call(self, method, **p):
+            self.calls.append(method)
+            if method == 'deleteWebhook':
+                self.webhook = False
+                return True
+            if method == 'getUpdates' and self.webhook:
+                raise tg.TelegramError("getUpdates: HTTP 409 Conflict: can't "
+                                       "use getUpdates method while webhook "
+                                       "is active; use deleteWebhook")
+            return []
+    api = Api()
+    bot = tg.Bot(api, None, {1})
+    try:
+        bot.poll_once(timeout=0)
+    except tg.TelegramError:
+        pass
+    assert 'deleteWebhook' in api.calls
+    assert bot.poll_once(timeout=0) == 0            # reading now
+
+
+def test_CONTROL_without_a_webhook_nothing_is_cleared():
+    from mt5trader import telegram as tg
+
+    class Api:
+        def __init__(self):
+            self.calls = []
+
+        def call(self, method, **p):
+            self.calls.append(method)
+            return []
+    api = Api()
+    assert tg.Bot(api, None, {1}).poll_once(timeout=0) == 0
+    assert 'deleteWebhook' not in api.calls
+
+
+def test_another_program_on_the_same_bot_is_named_in_the_log(caplog):
+    from mt5trader import telegram as tg
+
+    class Api:
+        def call(self, method, **p):
+            raise tg.TelegramError('getUpdates: HTTP 409 Conflict: terminated '
+                                   'by other getUpdates request')
+    bot = tg.Bot(Api(), None, {1})
+    import logging
+    with caplog.at_level(logging.ERROR):
+        try:
+            bot.poll_once(timeout=0)
+        except tg.TelegramError:
+            pass
+    assert 'ANOTHER PROGRAM' in caplog.text
+
+
+def test_the_start_says_which_bot_and_clears_a_webhook(monkeypatch, caplog):
+    """At start: 'connected as @name' in the log, and any webhook
+    cleared before the first read. No thread is started here."""
+    from mt5trader import telegram as tg
+    import logging
+
+    class Api:
+        def __init__(self):
+            self.calls = []
+
+        def call(self, method, **p):
+            self.calls.append(method)
+            return {'username': 'Nexus_MT5_bot'} if method == 'getMe' else True
+    api = Api()
+    monkeypatch.setattr(tg.threading, 'Thread',
+                        lambda *a, **k: type('T', (), {'start': lambda s: None})())
+
+    from flask import Flask
+    with caplog.at_level(logging.INFO):
+        tg.start(Flask(__name__), env={'TELEGRAM_BOT_TOKEN': 'x',
+                             'TELEGRAM_ALLOWED_USERS': '1'}, api=api)
+    assert 'connected as @Nexus_MT5_bot' in caplog.text
+    assert api.calls.index('getMe') < api.calls.index('deleteWebhook')
