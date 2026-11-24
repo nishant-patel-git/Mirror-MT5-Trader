@@ -840,6 +840,7 @@
         state.open.indexOf(panelIdOf(b));
     }
     Object.keys(groups).forEach(function (k) { groups[k].sort(byTab); });
+    state.maximized = {};
     var placed = [];
     function put(node, left, top, w, h) {
       placed.push({node: node, left: Math.round(left), top: Math.round(top),
@@ -899,6 +900,7 @@
     placed.forEach(function (p) {
       var id = panelIdOf(p.node);
       delete p.node.dataset.tidied;
+      p.node.classList.remove('maximized');
       layout[id] = {left: p.left, top: p.top, w: p.w, h: p.h,
                     z: 10, auto: false};
     });
@@ -940,6 +942,8 @@
     if (!bar) { return; }
     // The buttons and selects that live IN the title bar keep working.
     if (e.target.closest('button, select, input, a')) { return; }
+    // A maximized window stays put: restore it to move it.
+    if (node.classList.contains('maximized')) { return; }
 
     var box = node.getBoundingClientRect();
     var desktop = desktopOrigin();
@@ -4640,7 +4644,8 @@
         '<button data-tab="slippage">Slippage</button>' +
         '<button data-tab="accounts">Accounts</button>' +
         '<button data-tab="reconcile">Reconciler</button>' +
-        '<button data-tab="analysis">Analysis</button></div>' +
+        '<button data-tab="analysis">Analysis</button>' +
+        '<button data-tab="sizing">Sizing</button></div>' +
         // `monitor-note`, not `note`: the panes have notes of their own,
         // and a bare `.note` selector reaches into them and overwrites
         // the first one it finds.
@@ -4702,6 +4707,29 @@
         }
         if (e.target.classList.contains('an-bt-days')) {
           state.analysisBtDays = Number(e.target.value);
+        }
+        if (e.target.classList.contains('sz-input')) {
+          var next = sizingSettings();
+          var key = e.target.dataset.key;
+          // Let go of the field once its change is taken: the pane is
+          // not redrawn while an input holds the focus, so the sheet
+          // would otherwise wait for a click elsewhere to show it.
+          e.target.blur();
+          if (key === 'pair') {
+            state.sizingPair = e.target.value;
+            render();
+            return;
+          }
+          if (e.target.dataset.kind === 'text') {
+            next[key] = e.target.value;
+          } else {
+            var v = parseFloat(e.target.value);
+            if (!isFinite(v) || v < 0) { return; }
+            if ((key === 'win' || key === 'freePct') && v > 100) { v = 100; }
+            next[key] = v;
+          }
+          state.sizing = next;
+          render();
         }
         // Changing the PAIR clears the two tickets: they belong to that
         // pair's accounts, and carrying them over would leave a choice
@@ -4768,9 +4796,17 @@
       loadAnalysis();
       pane.innerHTML = analysisPane();
     }
+    else if (state.monitorTab === 'sizing') {
+      pane.innerHTML = sizingPane();
+    }
     else { pane.innerHTML = reconcileTable(); }
     node.querySelector('.monitor-note').textContent =
-      state.monitorTab === 'analysis'
+      state.monitorTab === 'sizing'
+      ? 'A planning table, worked out here from the chosen ladder\u2019s ' +
+        'live figures: the margin MT5 asks for one spread, what a point ' +
+        'is worth and the commission per lot. Target is the profit after ' +
+        'every cost; stop is the whole loss. Nothing here sends an order.'
+      : state.monitorTab === 'analysis'
       ? 'Built from what is recorded: closed positions, the Algo\u2019s ' +
         'own audit trail and the trackers. Nothing here sends an order. ' +
         'A figure nobody measured is a dash, never 0 \u2014 trades closed ' +
@@ -5372,6 +5408,395 @@
     return html;
   }
 
+  // -- the Sizing tab ------------------------------------------------------
+  //
+  // The sizing sheet, live: capital in hand down the side, what it
+  // means per trade, a month and in a run of losses. Worked out here
+  // from ONE ladder's own figures, as MT5 prices them now: the margin
+  // the terminals ask for one spread, what a point of spread is worth
+  // (k) and the commission per lot. A planning table only - nothing
+  // here sends an order. Ported from Stat_Arb_W3's, for MT5: no maker /
+  // taker fee tiers, no funding; the margin is the broker's, so there is
+  // no leverage to set.
+
+  var SZ_WINS = [55, 60, 62.5, 65, 70, 75, 80];
+  var SZ_LOSS_SHARES = [5, 10, 15, 20, 25, 30, 35];
+
+  function sizingSettings() {
+    /* Every assumption on the Sizing tab, the trader's to change. */
+    var d = {win: 65, perDay: 3, freePct: 40, target: 1.5,
+             targetBase: 'margin', stop: 1.5, stopBase: 'capital'};
+    return Object.assign(d, state.sizing || {});
+  }
+
+  function sizingMarket() {
+    /* The chosen ladder's figures for ONE spread, as MT5 has them now.
+     * Anything not known yet is null - a sheet is not drawn on a guess. */
+    var pairs = (state.snapshot || {}).pairs || {};
+    var keys = Object.keys(pairs);
+    var key = state.sizingPair && pairs[state.sizingPair]
+      ? state.sizingPair : keys[0];
+    var r = key ? pairs[key] : null;
+    if (!r) { return {key: null, keys: keys}; }
+    var m = r.market || {};
+    var exit = r.exit || {};
+    var notional = null;
+    if (r.contract_a && r.contract_b && m.leg_a_mid && m.leg_b_mid &&
+        r.clip_lots_a && r.clip_lots_b) {
+      notional = r.clip_lots_a * r.contract_a * m.leg_a_mid +
+        r.clip_lots_b * r.contract_b * m.leg_b_mid;
+    }
+    return {key: key, keys: keys, name: r.name || key,
+            margin: exit.margin_per_spread || null,
+            marginSource: exit.margin_source || null,
+            k: r.spread_units || null,
+            commission: r.commission_per_spread,
+            notional: notional,
+            lotsA: r.clip_lots_a, lotsB: r.clip_lots_b,
+            symbolA: r.symbol_a, symbolB: r.symbol_b,
+            spread: m.mid_spread};
+  }
+
+  function sizingRow(capital, cfg, mk) {
+    /* One capital level, worked through. The target is the profit AFTER
+     * every cost and the stop the whole loss, costs included, so the P&L
+     * is just wins x target - losses x stop. The commission sets how far
+     * the spread must move: target + commission to win, stop -
+     * commission before the stop. */
+    var margin = capital * (100 - cfg.freePct) / 100;
+    var spreads = mk.margin ? margin / mk.margin : 0;
+    var point = spreads * (mk.k || 0);
+    var perMonth = cfg.perDay * 30;
+    var fees = mk.commission === null || mk.commission === undefined
+      ? null : spreads * mk.commission;
+    var target = cfg.target / 100 *
+      (cfg.targetBase === 'capital' ? capital : margin);
+    var stop = cfg.stop / 100 * (cfg.stopBase === 'margin' ? margin : capital);
+    var w = cfg.win / 100;
+    var perTrade = w * target - (1 - w) * stop;
+    var breakEven = (target + stop) > 0 ? stop / (target + stop) * 100 : null;
+    var cost = fees || 0;
+    return {capital: capital, margin: margin, free: capital - margin,
+            spreads: spreads,
+            lotsA: spreads * (mk.lotsA || 0), lotsB: spreads * (mk.lotsB || 0),
+            position: mk.notional === null ? null : spreads * mk.notional,
+            point: point, fees: fees, target: target, stop: stop,
+            lossPerStop: stop, perTrade: perTrade,
+            month: perTrade * perMonth, breakEven: breakEven,
+            targetPts: point ? (target + cost) / point : null,
+            stopPts: point ? Math.max(stop - cost, 0) / point : null,
+            feePts: point && fees !== null ? fees / point : null};
+  }
+
+  function sizingSheetHtml() {
+    /* THE PRINTABLE SIZING SHEET: the table as the Sizing tab shows it
+     * now, with the settings it was worked out on, as a page of its own
+     * - A4 landscape, scaled to ONE page. */
+    var cfg = sizingSettings();
+    var mk = sizingMarket();
+    var holder = document.createElement('div');
+    holder.innerHTML = sizingPane();
+    var table = holder.querySelector('.sz-table');
+    var notes = holder.querySelector('.sz-notes');
+    var settings = [
+      ['Ladder', mk.name || DASH],
+      ['Win rate', cfg.win + '%'],
+      ['Free capital', cfg.freePct + '%'],
+      ['Target', cfg.target + '% of ' + cfg.targetBase],
+      ['Stop', cfg.stop + '% of ' + cfg.stopBase],
+      ['Trades a day', cfg.perDay + ' (' + cfg.perDay * 30 + ' a month)'],
+      ['Margin / spread', mk.margin ? money(mk.margin) +
+        (mk.marginSource === 'leverage' ? ' (estimated)' : ' (MT5)') : DASH],
+      ['Spread now', mk.spread === null || mk.spread === undefined ? DASH
+        : fmt(mk.spread, 4)]];
+    var now = new Date();
+    var mark = '<svg class="mark" viewBox="0 0 16 16"><rect x="4" y="7.2" ' +
+      'width="8" height="1.6" fill="#1a1a1a"/><circle cx="4.6" cy="8" ' +
+      'r="2.6" fill="#2f6fb0"/><circle cx="11.4" cy="8" r="2.6" ' +
+      'fill="#c0342f"/></svg>';
+    var css = '@page{size:A4 landscape;margin:6mm}' +
+      '*{box-sizing:border-box}body{margin:0;font:11px "Segoe UI",Arial,' +
+      'sans-serif;color:#1f2933;background:#e9ecf0;' +
+      '-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+      '.bar{position:sticky;top:0;background:#16324f;color:#dbe4ee;' +
+      'padding:8px 14px;display:flex;gap:12px;align-items:center}' +
+      '.bar button{font:600 12px inherit;padding:5px 14px;border:0;' +
+      'border-radius:4px;background:#fff;color:#16324f;cursor:pointer}' +
+      '.sheet{background:#fff;margin:12px auto;padding:10px 12px;' +
+      'width:max-content}' +
+      '.head{display:flex;justify-content:space-between;align-items:flex-end;' +
+      'border-bottom:3px solid #16324f;padding-bottom:6px;margin-bottom:6px;' +
+      'gap:24px}.brand{display:flex;gap:10px;align-items:center}' +
+      '.mark{width:40px;height:40px}.desk{font-weight:700;letter-spacing:' +
+      '.18em;font-size:10px;color:#6b7280}h1{margin:0;font-size:20px;' +
+      'color:#16324f}.set{display:grid;grid-template-columns:repeat(3,auto);' +
+      'gap:1px 16px;font-size:10px}.set span{color:#6b7280;margin-right:4px}' +
+      '.sum{font-size:10px;margin:4px 0 6px;color:#374151;width:0;' +
+      'min-width:100%}' +
+      'table{border-collapse:collapse;font-variant-numeric:tabular-nums;' +
+      'width:1px}' +
+      'th,td{border:1px solid #c9cfd8;padding:1px 4px;text-align:center;' +
+      'white-space:nowrap;font-size:10px}th{background:#16324f;color:#fff;' +
+      'font-weight:600;white-space:normal;line-height:1.15}td small,th small{font-size:8px;opacity:.75}' +
+      'tbody tr:nth-child(even) td{background:#f3f5f8}' +
+      '.up{color:#127a3a}.down{color:#b42318}' +
+      '.notes{font-size:9px;color:#6b7280;margin-top:5px;width:0;' +
+      'min-width:100%;white-space:normal}' +
+      '.head{width:0;min-width:100%}' +
+      '@media print{body{background:#fff}.bar{display:none}' +
+      '.sheet{margin:0;padding:0}}';
+    // ONE PAGE: the sheet is scaled to the printable area of A4
+    // landscape (6 mm margins: about 1077 x 748 px at 96 dpi).
+    var fit = 'function fit(){var s=document.querySelector(".sheet");' +
+      's.style.zoom=1;var k=Math.min(1,1060/s.offsetWidth,' +
+      '735/s.offsetHeight);s.style.zoom=k;}' +
+      'fit();window.addEventListener("load",fit);' +
+      'window.addEventListener("beforeprint",fit);' +
+      'if(document.fonts){document.fonts.ready.then(fit);}';
+    return '<!doctype html><html><head><meta charset="utf-8">' +
+      '<title>Nexus — Position Sizing Sheet</title><style>' + css +
+      '</style></head><body><div class="bar"><button onclick="' +
+      'window.print()">Print / Save as PDF</button><span>One A4 landscape ' +
+      'page. In the print dialog, turn on “Background graphics” ' +
+      'for the colours.</span></div><div class="sheet"><div class="head">' +
+      '<div class="brand">' + mark + '<div><div class="desk">NEXUS</div>' +
+      '<h1>Position Sizing Sheet</h1></div></div><div class="set">' +
+      settings.map(function (kv) {
+        return '<div><span>' + kv[0] + '</span>' + escapeHtml(kv[1]) +
+          '</div>';
+      }).join('') + '<div><span>Prepared</span>' +
+      escapeHtml(now.toLocaleString()) + '</div></div></div>' +
+      '<div class="sum">' + ((holder.querySelector('.sz-sum') || {})
+        .innerHTML || '') + '</div>' + (table ? table.outerHTML : '') +
+      '<div class="notes">' + (notes ? notes.innerHTML : '') + '</div>' +
+      '</div><script>' + fit + '<\/script></body></html>';
+  }
+
+  function printSizingSheet() {
+    var page = window.open('', '_blank');
+    if (!page) {
+      toast('The sheet could not open - allow pop-ups for this page');
+      return;
+    }
+    page.document.open();
+    page.document.write(sizingSheetHtml());
+    page.document.close();
+  }
+
+  function sizingPane() {
+    var cfg = sizingSettings();
+    var mk = sizingMarket();
+    var perMonth = cfg.perDay * 30;
+    function k(x) {
+      var a = Math.abs(x);
+      // A million and up in M: "$1.25M", not "$1,250k".
+      if (a >= 1e6) {
+        return '$' + String(parseFloat((a / 1e6).toFixed(2))) + 'M';
+      }
+      return (a < 100e3 && Math.round(a) % 1000 ? '$' + (a / 1e3).toFixed(1)
+        : '$' + Math.round(a / 1e3).toLocaleString('en-US')) + 'k';
+    }
+    function usd(x) {
+      return '$' + Math.round(Math.abs(x)).toLocaleString('en-US');
+    }
+    function pct(x, d) {
+      return (x >= 0 ? '+' : '−') + Math.abs(x).toFixed(d === undefined
+        ? 1 : d) + '%';
+    }
+    function lots(x) {
+      return x >= 100 ? Math.round(x).toLocaleString('en-US')
+        : String(parseFloat(x.toFixed(2)));
+    }
+    var pairs = (state.snapshot || {}).pairs || {};
+    var picker = '<select class="sz-input sz-pair" data-key="pair" ' +
+      'data-kind="text">' + mk.keys.map(function (key) {
+        return '<option value="' + escapeHtml(key) + '"' +
+          (key === mk.key ? ' selected' : '') + '>' +
+          escapeHtml((pairs[key] || {}).name || key) + '</option>';
+      }).join('') + '</select>';
+    var wins = SZ_WINS.map(function (v) {
+      return '<button type="button" class="sz-win' +
+        (v === cfg.win ? ' on' : '') + '" data-win="' + v + '">' + v +
+        '%</button>';
+    }).join('');
+    function input(key, label, step, unit) {
+      return '<label class="sz-field"><span>' + label + '</span><input ' +
+        'class="sz-input" id="sz-' + key + '" type="number" min="0" step="' +
+        step + '" data-key="' + key + '" value="' + cfg[key] + '">' +
+        (unit || '') + '</label>';
+    }
+    function base(key) {
+      return '<select class="sz-input" id="sz-' + key + '" data-key="' + key +
+        '" data-kind="text"><option value="margin"' +
+        (cfg[key] === 'margin' ? ' selected' : '') + '>of margin</option>' +
+        '<option value="capital"' + (cfg[key] === 'capital' ? ' selected'
+          : '') + '>of capital</option></select>';
+    }
+    var html = '<div class="sz">' +
+      '<div class="sz-bar"><label class="sz-field"><span>Ladder</span>' +
+      picker + '</label><span class="sz-label">Win rate</span>' + wins +
+      input('win', 'or', 0.5, '%') + '</div>' +
+      '<div class="sz-bar sz-fields">' +
+      input('freePct', 'Free capital', 5, '%') +
+      '<label class="sz-field"><span>Profit (target)</span><input ' +
+        'class="sz-input" id="sz-target" type="number" min="0" step="0.1" ' +
+        'data-key="target" value="' + cfg.target + '">%' + base('targetBase') +
+        '</label>' +
+      '<label class="sz-field"><span>Loss (stop)</span><input ' +
+        'class="sz-input" id="sz-stop" type="number" min="0" step="0.1" ' +
+        'data-key="stop" value="' + cfg.stop + '">%' + base('stopBase') +
+        '</label>' +
+      input('perDay', 'Trades / day', 1) +
+      '<button type="button" class="sz-reset">Reset</button>' +
+      '<button type="button" class="sz-print" title="This sheet, with the ' +
+      'settings above, on one A4 landscape page - print it or save it as ' +
+      'a PDF">Print sheet</button></div>';
+    // UNMEASURED IS NOT ZERO: without MT5's margin or k for this ladder
+    // there is no sheet, and it says which number is missing.
+    var missing = !mk.key ? 'no ladder is set up yet'
+      : !mk.margin ? 'MT5 has not priced the margin for one spread of ' +
+        mk.name + ' yet - is the ladder live and both terminals connected?'
+      : !mk.k ? 'the contract size of ' + mk.name + '’s leg B is not ' +
+        'known yet' : null;
+    if (missing) {
+      return html + '<div class="sz-sum sz-missing">No sheet: ' +
+        escapeHtml(missing) + '.</div></div>';
+    }
+    // The summary, at $100k so every percentage reads against one
+    // example; each row has its own figures below.
+    var ex = sizingRow(100e3, cfg, mk);
+    html += '<div class="sz-sum">At $100k capital on <b>' +
+      escapeHtml(mk.name) + '</b>: ' + lots(ex.spreads) + ' spread(s) (' +
+      lots(ex.lotsA) + ' lots A, ' + lots(ex.lotsB) + ' lots B) · ' +
+      'target <b>+' + usd(ex.target) + '</b> net, stop <b>−' +
+      usd(ex.stop) + '</b> all in, commission <b>' + (ex.fees === null
+        ? DASH : usd(ex.fees)) + '</b> a round turn' + (ex.feePts === null
+        ? '' : ' (' + ex.feePts.toFixed(3) + ' pts)') +
+      ' → the spread moves <b>' + (ex.targetPts || 0).toFixed(3) +
+      ' pts</b> to the target, <b>' + (ex.stopPts || 0).toFixed(3) +
+      ' pts</b> to the stop · break-even win rate <b>' +
+      (ex.breakEven === null ? DASH : ex.breakEven.toFixed(1) + '%') +
+      '</b> · at ' + cfg.win + '%: <b class="' +
+      (ex.month >= 0 ? 'up' : 'down') + '">' + pct(ex.month / 1e3, 1)
+        .replace('%', '') + 'k a month (' + pct(ex.month / ex.capital * 100) +
+      ' of capital)</b> · ' + perMonth + ' trades a month · ' +
+      'margin ' + money(mk.margin) + ' a spread' +
+      (mk.marginSource === 'leverage' ? ' (estimated from leverage)'
+        : ' (MT5’s own)') + ', ' + money(mk.k) + ' a point</div>';
+    var losses = SZ_LOSS_SHARES.map(function (p) {
+      return Math.ceil(perMonth * p / 100);
+    });
+    html += '<div class="sz-wrap"><table class="sz-table"><thead>' +
+      '<tr><th rowspan="2">Sr</th><th colspan="6">Size</th>' +
+      '<th colspan="4">Per trade (after all costs)</th>' +
+      '<th colspan="2">Costs</th><th colspan="3">Month at ' + cfg.win +
+      '% wins</th><th colspan="7">Drawdown if this share of the ' +
+      perMonth + ' trades lose, back to back</th></tr><tr>' +
+      '<th>Capital in hand</th><th>Margin / trade</th><th>Free</th>' +
+      '<th>Lots A / B</th><th>Position (both legs)</th><th>$ / point</th>' +
+      '<th>Target</th><th>Stop</th><th>Target move (pts)</th>' +
+      '<th>Stop move (pts)</th>' +
+      '<th>Commission / trade</th><th>Break-even win</th>' +
+      '<th>Net P&amp;L</th><th>Return on capital</th>' +
+      '<th>Return on margin</th>' +
+      SZ_LOSS_SHARES.map(function (p, i) {
+        return '<th>' + p + '%<br><small>' + losses[i] + ' losses</small></th>';
+      }).join('') + '</tr></thead><tbody>';
+    // Capital in hand: $5k, $10k, then $25k steps to $200k, $100k steps
+    // to $500k and $250k steps to $10M.
+    var caps = [5e3, 10e3];
+    for (var c = 25e3; c <= 200e3; c += 25e3) { caps.push(c); }
+    for (c = 300e3; c <= 500e3; c += 100e3) { caps.push(c); }
+    for (c = 750e3; c <= 10e6; c += 250e3) { caps.push(c); }
+    caps.forEach(function (capital, i) {
+      var r = sizingRow(capital, cfg, mk);
+      var cls = r.month >= 0 ? 'up' : 'down';
+      var beCls = r.breakEven !== null && r.breakEven > cfg.win ? 'down' : '';
+      html += '<tr><td>' + (i + 1) + '</td><td>' + k(capital) + '</td><td>' +
+        k(r.margin) + '</td><td>' + k(r.free) + '</td><td>' +
+        lots(r.lotsA) + ' / ' + lots(r.lotsB) + '</td><td>' +
+        (r.position === null ? DASH : r.position >= 1e6
+          ? '$' + (r.position / 1e6).toFixed(2) + 'M' : k(r.position)) +
+        '</td><td>' + usd(r.point) +
+        '</td><td>+' + usd(r.target) + '</td><td>−' + usd(r.stop) +
+        '</td><td>' + (r.targetPts || 0).toFixed(3) + '</td><td class="' +
+        (r.fees !== null && r.fees >= r.stop ? 'down' : '') + '">' +
+        (r.stopPts || 0).toFixed(3) + '</td><td>' +
+        (r.fees === null ? DASH : usd(r.fees)) + '</td><td class="' + beCls +
+        '">' + (r.breakEven === null ? DASH : r.breakEven.toFixed(1) + '%') +
+        '</td><td class="' + cls + '">' + (r.month >= 0 ? '+' : '−') +
+        k(r.month) + '</td><td class="' + cls + '">' +
+        pct(r.month / capital * 100) + '</td><td class="' + cls + '">' +
+        pct(r.margin ? r.month / r.margin * 100 : 0) + '</td>' +
+        losses.map(function (n) {
+          return '<td>−' + k(n * r.lossPerStop) + ' <small>(' +
+            (n * r.lossPerStop / capital * 100).toFixed(1) + '%)</small></td>';
+        }).join('') + '</tr>';
+    });
+    html += '</tbody></table></div><div class="sz-notes">' +
+      '<b>Target</b> is the profit after every cost; <b>Stop</b> is the ' +
+      'whole loss, costs included. <b>Commission</b> is the per-lot ' +
+      'commission in the settings, both legs, both ends; it sets how far ' +
+      'the spread must move: target + commission to win, stop − ' +
+      'commission before the stop. <b>Break-even win</b> = stop ÷ ' +
+      '(target + stop). <b>Stop move in red:</b> the commission alone ' +
+      'uses up the stop. <b>Margin</b> is what the terminals ask for one ' +
+      'spread, both legs, scaled to the row; <b>$ / point</b> is the P&amp;L ' +
+      'for one point of spread. <b>Lots</b> are before the brokers’ ' +
+      'lot steps. <b>Not included:</b> slippage on stops, swap ' +
+      '(overnight financing).</div></div>';
+    return html;
+  }
+
+  function slipFillsHtml(f, byPair) {
+    /* EVERY FILL: each leg, each end, the price it was sent at against
+     * the price the broker filled it at. Said first and in one line -
+     * how many filled exactly where sent - because 'was there slippage
+     * on my fills?' is the question this tab is opened to answer. */
+    if (!f || !f.rows || !f.rows.length) { return ''; }
+    var s = f.summary || {};
+    function names(key) { return escapeHtml(((byPair[key] || {}).name) || key); }
+    var head = s.measured
+      ? '<b>' + s.exact + ' of ' + s.measured + '</b> leg fills filled ' +
+        'exactly at the price sent' +
+        (s.worse ? ' \u00b7 <span class="down"><b>' + s.worse +
+          '</b> worse, ' + money(-s.worse_money) + '</span>' : '') +
+        (s.better ? ' \u00b7 <span class="up"><b>' + s.better +
+          '</b> better, ' + money(-s.better_money) + '</span>' : '') +
+        (s.unmeasured ? ' \u00b7 ' + s.unmeasured + ' not measured' : '')
+      : 'no fill with its send price recorded yet';
+    var html = '<h4 class="slip-h">Slippage on every fill <small>\u2014 ' +
+      'each leg against the price it was sent at; positive is a cost. A ' +
+      'limit filled at its own price reads 0.' +
+      '</small></h4><div class="slip-fills-head">' + head + '</div>' +
+      '<table class="journal slip-fills"><thead><tr><th>Time</th>' +
+      '<th class="l">Ladder</th><th class="l">End</th><th class="l">Leg</th>' +
+      '<th class="l">Side</th><th>Lots</th><th>Sent at</th><th>Filled at</th>' +
+      '<th>Slip</th><th>bp</th><th>$</th></tr></thead><tbody>';
+    f.rows.forEach(function (r) {
+      var cls = r.slip === null || r.slip === undefined ? ''
+        : r.slip > 1e-9 ? 'down' : (r.slip < -1e-9 ? 'up' : '');
+      var when = r.at ? new Date(r.at * 1000) : null;
+      html += '<tr><td>' + (when ? when.toLocaleString(undefined, {
+          month: 'short', day: 'numeric', hour: '2-digit',
+          minute: '2-digit', second: '2-digit'}) : DASH) + '</td>' +
+        '<td class="l">' + names(r.pair_key) + '</td>' +
+        '<td class="l">' + (r.end === 'entry' ? 'Entry' : 'Exit') + '</td>' +
+        '<td class="l">' + r.leg + ' ' + escapeHtml(String(r.symbol || ''))
+          + '</td><td class="l">' + escapeHtml(r.side || DASH) + '</td>' +
+        '<td>' + fmt(r.volume, 2) + '</td>' +
+        '<td>' + fmt(r.sent, 4) + '</td><td>' + fmt(r.filled, 4) + '</td>' +
+        '<td class="' + cls + '">' + (r.slip === null || r.slip === undefined
+          ? DASH : fmt(r.slip, 4)) + '</td>' +
+        '<td class="' + cls + '">' + (r.slip_bps === null ||
+          r.slip_bps === undefined ? DASH : fmt(r.slip_bps, 2)) + '</td>' +
+        '<td class="' + cls + '">' + (r.slip_money === null ||
+          r.slip_money === undefined ? DASH : money(r.slip_money)) +
+        '</td></tr>';
+    });
+    return html + '</tbody></table>';
+  }
+
   function slippageTable() {
     var report = state.slippage;
     var html = '<div class="journal-controls">' +
@@ -5442,6 +5867,8 @@
                  : Math.round(report.click_to_on_median_ms) + ' ms',
                'median this session') +
       '</div>';
+
+    html += slipFillsHtml(report.fills, report.by_pair || {});
 
     // WHERE IT CAME FROM: the part a faster send would save, and the
     // part the broker's fills cost.
@@ -6867,6 +7294,21 @@
   function onMonitorClick(e) {
     var button = e.target.closest('button');
     if (!button) { return; }
+    if (button.classList.contains('sz-reset')) {
+      state.sizing = null;
+      render();
+      return;
+    }
+    if (button.classList.contains('sz-print')) {
+      printSizingSheet();
+      return;
+    }
+    if (button.classList.contains('sz-win')) {
+      state.sizing = Object.assign(sizingSettings(),
+                                   {win: parseFloat(button.dataset.win)});
+      render();
+      return;
+    }
     if (button.classList.contains('an-toggle-unconfirmed')) {
       state.showUnconfirmed = !state.showUnconfirmed;
       render();
@@ -7193,10 +7635,67 @@
         // come back to its own corner.
         ensureGrip(node);
         applyLayout(node);
+        applyMaximized(node);
       });
 
     renderTabs();
     revealPanel();
+  }
+
+  // -- maximize ------------------------------------------------------------
+  //
+  // The Trading Monitor and a Chart can take the whole desk: the
+  // window's own button (or a double-click on its title bar) fills the
+  // space between the top bar and the taskbar, and the same again puts
+  // it back where it was. Per panel, kept across redraws. Display only.
+
+  //: The windows that can be maximized, by the class they carry.
+  var MAXIMIZABLE = ['monitor', 'chartwin'];
+
+  function canMaximize(node) {
+    return MAXIMIZABLE.some(function (cls) {
+      return node.classList.contains(cls);
+    });
+  }
+
+  function applyMaximized(node) {
+    if (!canMaximize(node)) { return; }
+    var winbtns = node.querySelector('.titlebar .winbtns');
+    var button = winbtns && winbtns.querySelector('.winbtn.max');
+    if (winbtns && !button) {
+      button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'winbtn max';
+      winbtns.insertBefore(button, winbtns.firstChild);
+    }
+    var on = !!(state.maximized || {})[panelIdOf(node)];
+    if (on) {
+      // The desk's own box: below the top bar, above the taskbar.
+      var desk = el('desktop').getBoundingClientRect();
+      node.style.setProperty('--max-top', desk.top + 'px');
+      node.style.setProperty('--max-bottom',
+                             Math.max(0, window.innerHeight - desk.bottom) +
+                             'px');
+    }
+    node.classList.toggle('maximized', on);
+    if (button) {
+      button.innerHTML = on ? '&#10064;' : '&#9744;';
+      button.title = on ? 'Restore the window to its size and place'
+        : 'Maximize: fill the desk (double-click the title bar does too)';
+    }
+  }
+
+  function toggleMaximized(node) {
+    if (!node || !canMaximize(node)) { return; }
+    state.maximized = state.maximized || {};
+    var id = panelIdOf(node);
+    state.maximized[id] = !state.maximized[id];
+    applyMaximized(node);
+    // Charts draw at the size of their box: redraw at the new one.
+    if (node.classList.contains('chartwin')) {
+      node.dataset.drawn = '';
+      chartRedraw(node.dataset.pair);
+    }
   }
 
   function revealPanel() {
@@ -7699,6 +8198,20 @@
     // and go, and a listener per window is a listener per window to
     // forget.
     el('desktop').addEventListener('pointerdown', startDrag);
+    el('desktop').addEventListener('click', function (e) {
+      var button = e.target.closest('.winbtn.max');
+      if (button) { toggleMaximized(button.closest('.window')); }
+    });
+    el('desktop').addEventListener('dblclick', function (e) {
+      if (!e.target.closest('.titlebar') ||
+          e.target.closest('button, select, input, a')) { return; }
+      toggleMaximized(e.target.closest('.window'));
+    });
+    // The desk changes size with the browser: a maximized window follows.
+    window.addEventListener('resize', function () {
+      Array.prototype.forEach.call(
+        document.querySelectorAll('.window.maximized'), applyMaximized);
+    });
     // Tidy tiles the desk; with Shift held, every window back in the
     // plain row instead.
     el('tidy').addEventListener('click', function (e) {
@@ -7737,6 +8250,8 @@
     panelId: panelId, openPanel: openPanel, closePanel: closePanel,
     fmt: fmt, money: money, DASH: DASH,
     tidyWindows: tidyWindows, tileWindows: tileWindows, sound: sound,
+    sizingPane: sizingPane, sizingRow: sizingRow,
+    sizingMarket: sizingMarket, sizingSheetHtml: sizingSheetHtml,
     showFairWindow: showFairWindow, setAlgo: setAlgo,
     toastOutcome: toastOutcome
   };

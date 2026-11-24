@@ -242,3 +242,20 @@ def test_where_the_broker_publishes_no_session_ours_is_used_and_labelled(
     assert session['ours'] is True
     assert session['high'] is not None
     assert session['volume_a'] is None and session['volume_b'] is None
+
+
+def test_the_snapshot_carries_the_commission_for_one_spread(config, pair,
+                                                            legs):
+    """The Sizing tab scales ONE spread's round-turn commission to a
+    capital's size: the same sum break-even uses, for a quantity of 1."""
+    from mt5trader import takeprofit
+    co = Coordinator(config, legs, sleep=lambda s: None)
+    co.start()
+    co.poll_once()
+    row = co.snapshot()['pairs'][pair.key]
+    settings = pair.exit_settings(config.settings)
+    assert row['commission_per_spread'] == pytest.approx(
+        takeprofit.commission(pair, settings, 1.0))
+    # ...and it is ONE spread's: the ladder's default size is not in it.
+    assert row['commission_per_spread'] == pytest.approx(
+        takeprofit.commission(pair, settings, 2.0) / 2.0)

@@ -2496,3 +2496,59 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
 /* Likewise the fair window: given a size by Tidy (tiled down the right)
  * or by its corner, it fills it - the 260px cap is for first opening. */
 .window.fairwin.sized { max-width: none; }
+
+/* Slippage on every fill: the one-line headline above the table. */
+.slip-fills-head { margin: 2px 0 4px; font-size: 12px; }
+.slip-fills-head .down { color: #c0392b; }
+.slip-fills-head .up { color: #2e9e4f; }
+
+/* MAXIMIZED: the Trading Monitor or a Chart filling the desk, between
+ * the top bar and the taskbar. Over the window's own size and place
+ * (kept, and back on restore). */
+.window.maximized {
+  position: fixed !important;
+  left: 4px !important; right: 4px !important;
+  top: var(--max-top, 40px) !important;
+  bottom: var(--max-bottom, 28px) !important;
+  width: auto !important; height: auto !important;
+  max-width: none !important; max-height: none !important;
+  /* Over every window (they stop at MAX_WINDOW_Z, 900) and UNDER the
+   * toasts (2040), a confirmation (2050) and the menus (2060): a
+   * maximized Monitor must never hide the question an order asks. */
+  z-index: 1000 !important;
+  display: flex; flex-direction: column;
+}
+.window.monitor.maximized > .pane { max-height: none; flex: 1 1 auto; }
+.window.chartwin.maximized .cw-body { flex: 1 1 auto; min-height: 0; }
+.winbtn.max { margin-right: 2px; }
+
+/* The Sizing tab: the sizing sheet, live. */
+.monitor .sz { padding: 4px 2px; }
+.monitor .sz-bar { display: flex; flex-wrap: wrap; align-items: center;
+  gap: 4px 6px; margin-bottom: 4px; }
+.monitor .sz-label { font-weight: 600; font-size: 11px; }
+.monitor .sz-win { font: 600 11px inherit; padding: 1px 8px;
+  border: 1px solid #b0b8c4; background: #fff; border-radius: 3px;
+  cursor: pointer; }
+.monitor .sz-win.on { background: #0d6efd; color: #fff; border-color: #0d6efd; }
+.monitor .sz-sum { font-size: 11px; margin: 2px 0 6px; }
+.monitor .sz-sum .up { color: #2e9e4f; } .monitor .sz-sum .down { color: #c0392b; }
+.monitor .sz-missing { color: #8a5a00; }
+.monitor .sz-wrap { overflow-x: auto; }
+.monitor table.sz-table { width: 100%; border-collapse: collapse; }
+.monitor table.sz-table th, .monitor table.sz-table td {
+  border: 1px solid #d5dae1; padding: 2px 5px; text-align: center;
+  white-space: nowrap; font-size: 11px; }
+.monitor table.sz-table th { white-space: normal; }
+.monitor table.sz-table th small { font-weight: 400; color: #6b7280; }
+.monitor table.sz-table td.up { color: #2e9e4f; }
+.monitor table.sz-table td.down { color: #c0392b; }
+.monitor table.sz-table td small { color: #6b7280; }
+.monitor .sz-notes { font-size: 10.5px; margin-top: 6px; color: #444; }
+.monitor .sz-fields { gap: 4px 14px; }
+.monitor .sz-field { display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; }
+.monitor .sz-field input { width: 58px; font: 11px inherit; }
+.monitor .sz-field select { font: 11px inherit; }
+.monitor .sz-reset, .monitor .sz-print { font: 11px inherit;
+  padding: 1px 8px; cursor: pointer; }

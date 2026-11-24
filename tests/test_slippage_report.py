@@ -26,11 +26,31 @@ def position(**overrides):
 
 
 def test_money_uses_the_one_multiplier_and_nothing_else():
-    """`points x k x quantity` — the same conversion as the mark. A
-    second multiplier invented here would put the report and the P&L on
-    different scales."""
+    """`points x spread_units` - the same conversion as the mark, where
+    a position's spread_units is its WHOLE size already (models.py says
+    so). Multiplying by the quantity again put the slippage on a scale
+    `quantity` times the P&L's."""
     assert slippage.money(0.01, position(spread_units=1000.0, quantity=2.0)) \
-        == pytest.approx(20.0)
+        == pytest.approx(10.0)
+    # Control: at Qty 1 the old double count was invisible - and the
+    # answer is the same either way.
+    assert slippage.money(0.01, position(spread_units=1000.0, quantity=1.0)) \
+        == pytest.approx(10.0)
+
+
+def test_the_slippage_money_agrees_with_the_mark():
+    """The report and the P&L on ONE scale: a 0.01 slip on a position
+    is what a 0.01 move of the spread is worth on that position's own
+    mark - whatever its size."""
+    from mt5trader.models import SpreadPosition, SpreadSide
+    held = SpreadPosition.__new__(SpreadPosition)
+    held.side, held.entry_spread, held.spread_units = (
+        SpreadSide.BUY, 10.00, 1000.0)
+    move = held.mark(10.01)
+    for qty in (1.0, 10.0, 100.0):
+        assert slippage.money(0.01, position(spread_units=1000.0,
+                                             quantity=qty)) == \
+            pytest.approx(move)
 
 
 def test_money_is_unmeasured_when_the_size_is_unknown():
@@ -234,3 +254,52 @@ def test_the_report_runs_over_the_store_end_to_end(tmp_path):
 
     assert body['counts']['positions'] == 1
     assert body['overall']['entry']['money_total'] == pytest.approx(10.0)
+
+
+def _leg(side, sent, price, exit_sent=None, exit_price=None, volume=0.35,
+         contract=1000.0, symbol='#USOil_F27'):
+    return {'side': side, 'sent_price': sent, 'price': price,
+            'exit_sent_price': exit_sent, 'exit_price': exit_price,
+            'volume': volume, 'contract_size': contract, 'symbol': symbol}
+
+
+def test_every_fill_against_the_price_it_was_sent_at():
+    """One row per leg per end: sent at, filled at, the slip in price,
+    bp and money - positive a cost. A fill at its own price is 0, said
+    as 'exact'; a send price not kept is unmeasured, not 0."""
+    pos = position(
+        leg_a=_leg('SELL', 61.20, 61.20, 61.40, 61.42, volume=1.0,
+                   symbol='#UKOil_F27'),
+        leg_b=_leg('BUY', 70.30, 70.31, None, 70.50))
+    body = slippage.fills([pos])
+    rows = {(r['end'], r['leg']): r for r in body['rows']}
+    # Leg A entry: filled exactly where sent.
+    assert rows[('entry', 'A')]['slip'] == 0.0
+    # Leg B entry: bought 0.01 above the price sent - a cost.
+    b = rows[('entry', 'B')]
+    assert b['slip'] == pytest.approx(0.01)
+    assert b['slip_bps'] == pytest.approx(0.01 / 70.30 * 1e4)
+    assert b['slip_money'] == pytest.approx(0.01 * 0.35 * 1000.0)
+    # Leg A exit: a SELL's close is a BUY - paid 0.02 above what was sent.
+    assert rows[('exit', 'A')]['side'] == 'BUY'
+    assert rows[('exit', 'A')]['slip'] == pytest.approx(0.02)
+    # Leg B exit: the send price was not kept - unmeasured, not 0.
+    assert rows[('exit', 'B')]['slip'] is None
+    s = body['summary']
+    assert (s['fills'], s['measured'], s['exact'], s['worse'], s['better'],
+            s['unmeasured']) == (4, 3, 1, 2, 0, 1)
+
+
+def test_an_open_position_has_its_entry_fills_only():
+    pos = position(closed_at=None,
+                   leg_a=_leg('SELL', 61.2, 61.2),
+                   leg_b=_leg('BUY', 70.3, 70.3))
+    body = slippage.fills([pos])
+    assert [r['end'] for r in body['rows']] == ['entry', 'entry']
+    assert body['summary']['exact'] == 2
+
+
+def test_the_report_carries_the_fills():
+    body = slippage.report([position(leg_a=_leg('SELL', 1.0, 1.0),
+                                     leg_b=_leg('BUY', 2.0, 2.0))])
+    assert body['fills']['summary']['measured'] == 2
