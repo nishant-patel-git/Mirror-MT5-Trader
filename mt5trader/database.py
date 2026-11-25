@@ -427,6 +427,8 @@ class Store:
         ('positions', 'trough_min', 'REAL'),
         # The ATR frozen when the position was first priced.
         ('positions', 'entry_atr', 'REAL'),
+        # The bid-ask round turn (spread points) frozen at first pricing.
+        ('positions', 'entry_width', 'REAL'),
         # JSON: the break-even, take-profit and stop this position was
         # last judged against, and which setting produced each. NULL on
         # every row closed before it was kept, which is why the Analysis
@@ -494,9 +496,9 @@ class Store:
                     closed_at, close_reason, realized_pnl, entry_slippage,
                     exit_slippage, click_to_on_ms, naked_ms, leg_a, leg_b,
                     source, entry_margin, peak_pnl, peak_min, trough_pnl,
-                    trough_min, entry_atr, exit_levels)
+                    trough_min, entry_atr, exit_levels, entry_width)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                           ?)""",
+                           ?,?)""",
                 (row['position_id'], row['pair_key'], row['side'],
                  row['quantity'], row['entry_spread'], row['exit_spread'],
                  row['spread_units'], row['order_type'], row['opened_at'],
@@ -509,7 +511,8 @@ class Store:
                  row.get('trough_pnl'), row.get('trough_min'),
                  row.get('entry_atr'),
                  json.dumps(row['exit_levels'])
-                 if row.get('exit_levels') else None))
+                 if row.get('exit_levels') else None,
+                 row.get('entry_width')))
         return position
 
     def remember_tickets(self, rows):

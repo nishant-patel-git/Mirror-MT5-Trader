@@ -611,6 +611,19 @@ def test_the_analysis_covers_the_round_turn_just_traded(desk, round_turn):
     assert trip['entry_spread'] is not None and trip['exit_spread'] is not None
     assert trip['leg_a']['entry'] is not None
     assert trip['cum_pnl'] == pytest.approx(trip['pnl'])
+    # TRADE NO over the whole record, and what the round trip COST: the
+    # bid-ask frozen at entry, and MT5's own charges from the trade's
+    # four deals (two legs, two ends) - matched by position ticket.
+    assert trip['trade_no'] == 1
+    assert trip['costs_source'] == 'MT5' and trip['deals'] == 4
+    assert trip['bid_ask'] is not None and trip['bid_ask'] > 0
+    assert trip['round_trip'] == pytest.approx(trip['bid_ask'] +
+                                               trip['charges'])
+    assert str(trip['swap']) != '-0.0'
+    assert body['cost_tally']['measured'] == 1
+    # Nothing typed: the accounts' balance is the capital, said as such.
+    assert body['summary']['capital_source'] == 'balance'
+    assert body['summary']['capital'] > 0
     # A manual trade has no Algo z at either end — a dash, not 0.
     assert trip['entry_z'] is None
     assert body['drawdown']['trades'] == 1

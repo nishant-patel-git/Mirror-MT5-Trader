@@ -1913,6 +1913,20 @@ class Coordinator:
                 self.remember(position)
         return position.entry_atr
 
+    def entry_width(self, position, md):
+        """The round turn of both legs' bid-ask (long - short, in spread
+        points) the first time a position is priced, then FROZEN on it
+        and saved: the Analysis tab's bid-ask cost for the trade is this
+        times k. Display only - nothing reads it to decide anything.
+        None until the market can be read - never a guess."""
+        if position.entry_width is None and md:
+            long_ = md.get('long_spread')
+            short = md.get('short_spread')
+            if long_ is not None and short is not None:
+                position.entry_width = float(long_) - float(short)
+                self.remember(position)
+        return position.entry_width
+
     @staticmethod
     def _leg_marks(position, md):
         """Each leg's fill and the price it would CLOSE at now.
@@ -3578,6 +3592,7 @@ class Coordinator:
             for position in self.book.positions(key):
                 gross, net_pnl, closing = mark_position(
                     position, md, settings)
+                self.entry_width(position, md)
                 row = position.to_dict()
                 row.update({'gross_pnl': gross, 'net_pnl': net_pnl,
                             'closing_spread': closing,

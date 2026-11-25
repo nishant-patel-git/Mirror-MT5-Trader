@@ -528,6 +528,58 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
             body['journal'] = None
         return body, None
 
+    # -- the Analysis tab's capital and costs ------------------------------
+
+    def desk_capital(raw):
+        """THE CAPITAL returns are read against: the CAPITAL_MANAGED
+        setting when one is set, otherwise the BALANCE the accounts hold
+        now - the equity of the accounts the ladders trade, added up.
+        (capital, 'set' | 'balance' | None)."""
+        try:
+            typed = max(0.0, float((raw.get('settings') or {}).get(
+                'CAPITAL_MANAGED') or 0.0))
+        except (TypeError, ValueError):
+            typed = 0.0
+        if typed:
+            return typed, 'set'
+        snapshot = read_status_file() or {}
+        accounts = snapshot.get('accounts') or {}
+        names = set()
+        for pair in (snapshot.get('pairs') or {}).values():
+            for leg in ('account_a', 'account_b'):
+                if (pair or {}).get(leg):
+                    names.add(pair[leg])
+        names = names or set(accounts)
+        total = 0.0
+        for name in names:
+            try:
+                total += float((accounts.get(name) or {}).get('equity')
+                               or 0.0)
+            except (TypeError, ValueError):
+                continue
+        return (round(total, 2), 'balance') if total > 0 else (0.0, None)
+
+    def attach_costs(db, body, positions, now):
+        """TRADE NO over the whole record, and WHAT EACH ROUND TRIP COST -
+        the bid-ask, and MT5's own commission, swap and fee from the
+        deals - for the Analysis tab and the trader report alike."""
+        try:
+            analysis.number_trades(body, analysis.trade_numbers(
+                db.positions_between(None, None)))
+        except Exception as e:
+            logging.error('the trades could not be numbered: %s', e)
+        try:
+            first = min((p.get('opened_at') or now for p in positions),
+                        default=now)
+            fills = db.fills(ours_only=True,
+                             since_ms=int((first - 86400.0) * 1000),
+                             limit=200000)
+            body['cost_tally'] = analysis.attach_costs(
+                body.get('journal'), positions, fills)
+        except Exception as e:
+            logging.error('the deals could not be matched: %s', e)
+            body['cost_tally'] = None
+
     # -- the printable report ---------------------------------------------------
 
     @app.get('/report')
@@ -552,12 +604,10 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         raw = cfg.load_raw(config_path)
         names = {key: (pair or {}).get('name') or key
                  for key, pair in (raw.get('pairs') or {}).items()}
-        try:
-            capital = max(0.0, float((raw.get('settings') or {}).get(
-                'CAPITAL_MANAGED') or 0.0))
-        except (TypeError, ValueError):
-            capital = 0.0
+        capital, capital_source = desk_capital(raw)
         body = analysis.report(positions, events, now=now, capital=capital)
+        body.setdefault('summary', {})['capital_source'] = capital_source
+        attach_costs(db, body, positions, now)
         folder = os.path.dirname(os.path.abspath(config_path))
         pnl = request.args.get('pnl') or 'show'
 
@@ -619,13 +669,11 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         raw = cfg.load_raw(config_path)
         names = {key: (pair or {}).get('name') or key
                  for key, pair in (raw.get('pairs') or {}).items()}
-        try:
-            capital = max(0.0, float((raw.get('settings') or {}).get(
-                'CAPITAL_MANAGED') or 0.0))
-        except (TypeError, ValueError):
-            capital = 0.0
+        capital, capital_source = desk_capital(raw)
         body = analysis.report(positions, events, shadows, excursions, now,
                                capital=capital)
+        body.setdefault('summary', {})['capital_source'] = capital_source
+        attach_costs(db, body, positions, now)
         try:
             zone_days = float(request.args.get('zone_days', 1))
         except ValueError:

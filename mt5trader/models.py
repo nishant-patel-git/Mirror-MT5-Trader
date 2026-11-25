@@ -299,6 +299,12 @@ class SpreadPosition:
         #: priced, and kept - an ATR stop or target is sized from it and
         #: stays where it was set. None until read.
         self.entry_atr = None
+        #: The round turn of both legs' bid-ask (long - short, spread
+        #: points) when this position was first priced, and kept: what
+        #: the trade paid the market to get in and out, times k. Already
+        #: inside the gross P&L - shown, never charged again. None until
+        #: read.
+        self.entry_width = None
         #: The best and worst net P&L while open, and the minute (from
         #: the open) each was reached — the trade's MFE and MAE. None
         #: until measured: a trade never marked has no extremes, not 0.
@@ -425,6 +431,7 @@ class SpreadPosition:
             'entry_margin': self.entry_margin,
             'entry_margin_source': self.entry_margin_source,
             'entry_atr': self.entry_atr,
+            'entry_width': self.entry_width,
             'peak_pnl': self.peak_pnl, 'peak_min': self.peak_min,
             'trough_pnl': self.trough_pnl, 'trough_min': self.trough_min,
             'exit_levels': self.exit_levels,
@@ -461,6 +468,7 @@ class SpreadPosition:
         position.entry_margin = raw.get('entry_margin')
         position.entry_margin_source = raw.get('entry_margin_source')
         position.entry_atr = raw.get('entry_atr')
+        position.entry_width = raw.get('entry_width')
         for name in ('peak_pnl', 'peak_min', 'trough_pnl', 'trough_min',
                      'exit_levels'):
             setattr(position, name, raw.get(name))
