@@ -6050,7 +6050,16 @@
      * typed, until the next one reads it back. 0 / null: not set. */
     if (state.capitalManaged !== undefined) { return state.capitalManaged; }
     var s = (state.analysis || {}).summary || {};
+    // The account balance stands in when nothing is typed: it is the
+    // placeholder, not a saved setting.
+    if (s.capital_source === 'balance') { return null; }
     return s.capital || null;
+  }
+
+  function anBalanceCapital() {
+    var s = (state.analysis || {}).summary || {};
+    return s.capital_source === 'balance' && state.capitalManaged === undefined
+      ? s.capital : null;
   }
 
   function saveCapital(value) {
@@ -6719,6 +6728,45 @@
       '" title="' + title + '">' + label + '</a>';
   }
 
+  // WHAT A ROUND TRIP COST, per trade - MT5 has no maker / taker: the
+  // bid-ask the trade paid (already in its P&L), the commission and
+  // swap MT5 booked on its own deals, and the sum.
+  function anCostCells(t, cash) {
+    function cell(v, title, estimate) {
+      if (v === null || v === undefined) { return '<td>' + DASH + '</td>'; }
+      return '<td' + (estimate ? ' class="hint"' : '') +
+        (title ? ' title="' + escapeHtml(title) + '"' : '') + '>' +
+        (estimate ? '~' : '') + cash(v) + '</td>';
+    }
+    var mt5 = t.costs_source === 'MT5';
+    var commission = t.commission === null || t.commission === undefined
+      ? null : t.commission + (mt5 && t.fee ? t.fee : 0);
+    return cell(t.bid_ask, t.bid_ask_points === null ||
+        t.bid_ask_points === undefined ? '' : fmt(t.bid_ask_points, 4) +
+        ' of spread at entry, both legs’ bid-ask', false) +
+      cell(commission, mt5 ? 'commission ' + money(t.commission) +
+        (t.fee ? ' + fee ' + money(t.fee) : '') + ', from MT5’s ' +
+        t.deals + ' deal(s)' : 'the desk’s estimate: commission per ' +
+        'lot, both legs, both ends', !mt5) +
+      cell(t.swap, mt5 ? 'from MT5’s deals' : '', false) +
+      cell(t.round_trip, 'bid-ask + commission + swap', false);
+  }
+
+  // THE TALLY under the journal: every round-trip cost, added up.
+  function costTallyHtml(f, cash) {
+    if (!f || (!f.trades && !f.bid_ask_trades)) { return ''; }
+    return '<p class="an-cost-tally"><b>Round trip costs</b> ' +
+      cash(f.round_trip) + ' · <b>bid-ask</b> ' + cash(f.bid_ask) +
+      ' (' + f.bid_ask_trades + ' trade(s), already in the P&amp;L)' +
+      ' · <b>commission</b> ' + cash(f.commission + (f.fee || 0)) +
+      ' · <b>swap</b> ' + cash(f.swap) +
+      (f.measured ? ' · ' + f.measured + ' trade(s) from MT5’s ' +
+        'own ' + f.deals + ' deals' : '') +
+      (f.estimated ? ' · <span class="hint">' + f.estimated +
+        ' trade(s) estimated (~): their deals are not in the journal' +
+        '</span>' : '') + '</p>';
+  }
+
   function analysisPane() {
     var a = state.analysis;
     var pairs = state.snapshot.pairs || {};
@@ -6744,9 +6792,14 @@
       'trade\u2019s return on capital and the capital it used are read ' +
       'against it; nothing is sized or sent from it.">Capital managed $' +
       '<input class="an-capital" type="number" min="0" step="100" ' +
-      'placeholder="not set" value="' +
+      'placeholder="' + (anBalanceCapital() ? escapeHtml(
+        Math.round(anBalanceCapital()).toLocaleString('en-US')) : 'not set') +
+      '" value="' +
       (anCapital() ? escapeHtml(String(anCapital())) : '') +
-      '"></label> \u00b7 <label title="Show the money each trade made, ' +
+      '">' + (anBalanceCapital() ? ' <small class="hint" title="Nothing ' +
+        'typed: the balance the accounts hold now (the equity of the ' +
+        'accounts the ladders trade) is the capital. Type a figure to fix ' +
+        'it instead.">= account balance</small>' : '') + '</label> \u00b7 <label title="Show the money each trade made, ' +
       'mask it with dots, or leave the column out - for a screen or a ' +
       'report that others see. The percentages stay.">Net P&amp;L ' +
       '<select class="an-pnl">' + [['show', 'show'], ['mask', 'mask'],
@@ -6818,7 +6871,10 @@
     html += '<h4>Trade journal <small>— ' + trips.length + ' closed' +
       (pnlHidden ? '' : ', running total ' + pnlCash(total)) +
       '</small></h4>' +
-      '<table class="an-table"><thead><tr><th>Closed</th><th class="l">Pair</th>' +
+      '<table class="an-table"><thead><tr><th title="Every closed trade on ' +
+      'the desk\u2019s record, numbered in the order it closed \u2014 a ' +
+      'trade keeps its number whatever this tab is showing">Trade no</th>' +
+      '<th>Closed</th><th class="l">Pair</th>' +
       '<th class="l">Side</th><th class="l">Who</th><th>Size</th><th>z in → out</th>' +
       '<th>Spread in → out</th>' +
       '<th title="After every cost. The level the other two are ' +
@@ -6831,7 +6887,21 @@
       'close actually went">vs level</th>' +
       '<th>Leg A in</th><th>Leg B in</th>' +
       '<th>Held</th><th class="l">Exit</th>' +
-      (pnlHidden ? '' : '<th>Net P&amp;L</th>') +
+      (pnlHidden ? '' :
+        '<th title="The round turn of both legs\u2019 bid-ask when the ' +
+        'trade was entered, times its size: what the market took. ALREADY ' +
+        'in the P&amp;L - the fills were at the bid and the offer - so it ' +
+        'is shown, not charged again">Bid-ask</th>' +
+        '<th title="The commission (and any fee) MT5 booked on this ' +
+        'trade\u2019s own deals. ~ is the desk\u2019s estimate from the ' +
+        'commission per lot, where the deals are not in the journal">' +
+        'Commission</th>' +
+        '<th title="The swap (overnight financing) MT5 booked on the ' +
+        'trade\u2019s deals; positive a cost, negative a credit. Not in ' +
+        'the Net P&amp;L">Swap</th>' +
+        '<th title="Bid-ask + commission + swap: everything the round ' +
+        'trip cost">Round trip</th>' +
+        '<th>Net P&amp;L</th>') +
       '<th title="net P&amp;L \u00f7 the margin BOTH legs tied up at entry - ' +
       'the base the TP % and SL % are set on. NET: after every fee">' +
       'Net % on margin</th>' +
@@ -6839,18 +6909,19 @@
       'Net % of notional</th>' +
       '<th title="The margin BOTH legs tied up at entry \u00f7 the capital ' +
       'managed (set above). Hover a cell for the money">Capital used</th>' +
-      '<th title="Both legs\u2019 face value at entry \u00f7 the capital ' +
-      'managed: 1.0x is a position as big as the capital">Exposure</th>' +
+      '<th title="Both legs\u2019 value at entry: lots \u00d7 contract ' +
+      'size \u00d7 price, leg A plus leg B">Notional value</th>' +
       '<th title="net P&amp;L \u00f7 the capital managed">Net % on capital</th>' +
       (pnlHidden ? '' : '<th>Running</th>') +
       '</tr></thead><tbody>';
     if (!trips.length) {
-      html += '<tr><td colspan="22" class="hint">no closed trade in this ' +
+      html += '<tr><td colspan="27" class="hint">no closed trade in this ' +
         'window</td></tr>';
     }
     trips.forEach(function (t) {
       var x = t.exit || {};
-      html += '<tr><td>' + anClock(t.closed_at) + '</td><td class="l">' +
+      html += '<tr><td class="an-no">' + (t.trade_no ? '#' + t.trade_no
+        : DASH) + '</td><td>' + anClock(t.closed_at) + '</td><td class="l">' +
         name(t.pair_key) + '</td><td class="l">' + anSide(t.side) +
         '</td><td class="l">' +
         (t.source === 'ALGO' ? '<b>Algo</b>' : 'Manual') + '</td><td>' +
@@ -6867,22 +6938,22 @@
         '</td><td>' + (t.leg_b.side || '') + ' ' + fmt(t.leg_b.entry, 3) +
         '</td><td>' + anHeld(t.held_sec) + '</td><td class="l">' +
         escapeHtml(t.exit_reason || DASH) + '</td>' +
-        (pnlHidden ? '' : '<td class="' + anSign(t.pnl) + '">' +
+        (pnlHidden ? '' : anCostCells(t, pnlCash) +
+          '<td class="' + anSign(t.pnl) + '">' +
           pnlCash(t.pnl) + '</td>') + pctCell(t.pct_margin, 2, t.margin_estimated) +
         pctCell(t.pct_notional, 3, false) +
         '<td' + (t.margin ? ' title="' + escapeHtml(money(t.margin)) +
           ' of margin"' : '') + '>' +
         (t.pct_capital_used === null || t.pct_capital_used === undefined
           ? DASH : fmt(t.pct_capital_used, 1) + '%') + '</td>' +
-        '<td' + (t.notional ? ' title="' + escapeHtml(money(t.notional)) +
-          ' of notional"' : '') + '>' +
-        (t.exposure === null || t.exposure === undefined ? DASH
-          : fmt(t.exposure, 2) + 'x') + '</td>' +
+        '<td>' + (t.notional ? (pnlMode === 'show' ? money(t.notional)
+          : '\u2022\u2022\u2022\u2022\u2022') : DASH) + '</td>' +
         pctCell(t.pct_capital, 2, false) +
         (pnlHidden ? '' : '<td class="' + anSign(t.cum_pnl) + '">' +
           pnlCash(t.cum_pnl) + '</td>') + '</tr>';
     });
     html += '</tbody></table>';
+    if (!pnlHidden) { html += costTallyHtml(a.cost_tally, pnlCash); }
 
     // 1. The summary.
     html += '<h4>Summary</h4><div class="an-tiles">' +
@@ -6955,26 +7026,57 @@
            ? DASH : money(-d.current), d.current ? 'down' : '') +
       anTile('Peak equity', money(d.peak_equity), 'up') + '</div>';
     var rows = a.excursion || [];
-    html += '<table class="an-table"><thead><tr><th>Closed</th><th class="l">Pair</th>' +
+    html += '<table class="an-table"><thead><tr><th title="The trade\u2019s ' +
+      'number on the desk\u2019s record, as in the journal">Trade no</th>' +
+      '<th>Closed</th><th class="l">Pair</th>' +
       '<th class="l">Side</th><th class="l">Exit</th>' +
       '<th title="Maximum adverse excursion: the worst net P&L while open">' +
       'MAE (worst)</th>' +
+      '<th title="The worst point as a share of the capital: what the ' +
+      'account would have lost had the trade closed there">' +
+      'MAE % capital</th>' +
+      '<th title="The worst point as a share of the margin both legs tied ' +
+      'up at entry - the base the SL % is set on">MAE % margin</th>' +
       '<th title="Maximum favourable excursion: the best net P&L while open">' +
-      'MFE (best)</th><th>Net P&amp;L</th>' +
+      'MFE (best)</th>' +
+      '<th title="The best point as a share of the capital: what the ' +
+      'account would have made had the trade closed there">' +
+      'MFE % capital</th>' +
+      '<th title="The best point as a share of the margin both legs tied ' +
+      'up at entry - the base the TP % is set on">MFE % margin</th>' +
+      '<th>Net P&amp;L</th>' +
       '<th title="How much of its best a WINNING trade kept: net / MFE">Kept</th>' +
       '<th title="Minutes from the open to the best point">Best at</th>' +
       '</tr></thead><tbody>';
     if (!rows.length) {
-      html += '<tr><td colspan="9" class="hint">no closed trade with its ' +
+      html += '<tr><td colspan="14" class="hint">no closed trade with its ' +
         'best and worst point yet \u2014 they are kept from this version on' +
         '</td></tr>';
     }
+    // On the capital: the typed figure, or the account balance.
+    var excCapital = (a.summary || {}).capital || null;
+    function onBase(value, base, missing) {
+      if (value === null || value === undefined || !base) {
+        return '<td' + (base ? '' : ' title="' + missing + '"') +
+          '>' + DASH + '</td>';
+      }
+      var share = value / base * 100;
+      return '<td class="' + anSign(share) + '">' +
+        (share >= 0 ? '+' : '\u2212') + Math.abs(share).toFixed(2) +
+        '%</td>';
+    }
     rows.forEach(function (r) {
-      html += '<tr><td>' + anClock(r.closed_at) + '</td><td class="l">' +
+      var mae = r.mae === null || r.mae === undefined ? null : -r.mae;
+      html += '<tr><td class="an-no">' + (r.trade_no ? '#' + r.trade_no
+        : DASH) + '</td><td>' + anClock(r.closed_at) + '</td><td class="l">' +
         name(r.pair_key) + '</td><td class="l">' + anSide(r.side) +
         '</td><td class="l">' + escapeHtml(r.exit_reason || DASH) + '</td>' +
         '<td class="down">' + (r.mae === null ? DASH : money(-r.mae)) + '</td>' +
+        onBase(mae, excCapital, 'set the capital above') +
+        onBase(mae, r.margin, 'the margin was not priced') +
         '<td class="up">' + money(r.mfe) + '</td>' +
+        onBase(r.mfe, excCapital, 'set the capital above') +
+        onBase(r.mfe, r.margin, 'the margin was not priced') +
         '<td class="' + anSign(r.pnl) + '">' + money(r.pnl) + '</td>' +
         '<td>' + anPct(r.utilisation_pct, 0) + '</td>' +
         '<td>' + anMin(r.peak_min) + '</td></tr>';

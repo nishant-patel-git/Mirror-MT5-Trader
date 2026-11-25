@@ -2552,3 +2552,7 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
 .monitor .sz-field select { font: 11px inherit; }
 .monitor .sz-reset, .monitor .sz-print { font: 11px inherit;
   padding: 1px 8px; cursor: pointer; }
+
+/* The Analysis journal's Trade no, and the round-trip cost tally. */
+.monitor td.an-no { font-weight: 600; color: #16324f; }
+.an-cost-tally { margin: 6px 0 14px; font-size: 12px; }

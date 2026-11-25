@@ -555,7 +555,10 @@ def excursion_row(row):
                                 if mfe and pnl is not None and pnl > 0
                                 else None),
             'peak_min': row.get('peak_min'),
-            'trough_min': row.get('trough_min')}
+            'trough_min': row.get('trough_min'),
+            # The margin BOTH legs tied up at entry: the worst and best
+            # points read on it, as the TP % and SL % are set on it.
+            'margin': returns(row, pnl)['margin']}
 
 
 def excursion_rows(positions):
@@ -732,6 +735,123 @@ def journal(positions, entry_z=None, exit_z=None, capital=0.0):
     out.reverse()
     return out
 
+
+def trade_numbers(positions):
+    """TRADE NO: every closed trade on the desk's record, numbered in the
+    order it closed - #1 the first ever. Taken over the WHOLE record, so a
+    trade keeps its number whatever window or ladder the tab is showing.
+    {position id: number}."""
+    closed = sorted((r for r in positions or ()
+                     if r.get('closed_at') is not None),
+                    key=lambda r: (r['closed_at'], str(r.get('position_id'))))
+    return {r.get('position_id'): i for i, r in enumerate(closed, 1)}
+
+
+def number_journal(journal, numbers):
+    """Each journal row's Trade no, from `trade_numbers`."""
+    for row in journal or ():
+        row['trade_no'] = numbers.get(row.get('position_id'))
+    return journal
+
+
+def number_trades(body, numbers):
+    """The same Trade no on every table of trades: the journal and the
+    worst / best points."""
+    for key in ('journal', 'excursion'):
+        number_journal(body.get(key), numbers)
+    return body
+
+
+def _cost(values):
+    """MT5 books a charge as a NEGATIVE amount on the deal; a cost here
+    is positive. None when no deal carried the field at all."""
+    seen = [float(v) for v in values if v is not None]
+    # `+ 0.0`: a charge of nothing is 0.00, never '-0.00'.
+    return None if not seen else -sum(seen) + 0.0
+
+
+def attach_costs(journal, positions, fills):
+    """WHAT EACH ROUND TRIP COST, beside its P&L - for MT5, where there
+    is no maker / taker: the BID-ASK the trade paid, and the commission,
+    swap and any fee MT5 itself booked on the trade's deals.
+
+    - Bid-ask: the round turn of both legs' bid-ask frozen when the
+      position was first priced (`entry_width`), times its k
+      (`spread_units`, the whole size). It is ALREADY INSIDE the gross
+      P&L - the fills were at the bid and the offer - so it is shown as
+      what the market took, never subtracted again. None for a trade
+      priced before it was recorded.
+    - Commission, swap, fee: summed over the deals whose position ticket
+      is one of the trade's legs' tickets, each deal counted once. A
+      trade whose deals are not in the journal keeps the desk's own
+      commission estimate (gross less net), said as one ('estimate'),
+      and its swap is unmeasured - never 0.
+
+    Then the totals over the window. Returns the tally."""
+    by_ticket = {}
+    for f in fills or ():
+        ticket = f.get('position_ticket')
+        if ticket not in (None, ''):
+            by_ticket.setdefault(str(ticket), []).append(f)
+    of = {p.get('position_id'): p for p in positions or ()}
+    tally = {'bid_ask': 0.0, 'bid_ask_trades': 0, 'commission': 0.0,
+             'swap': 0.0, 'fee': 0.0, 'measured': 0, 'estimated': 0,
+             'trades': 0, 'deals': 0}
+    for row in journal or ():
+        position = of.get(row.get('position_id')) or {}
+        width = position.get('entry_width')
+        units = position.get('spread_units')
+        row['bid_ask_points'] = None if width is None else float(width)
+        row['bid_ask'] = (None if width is None or not units
+                          else round(float(width) * float(units), 2))
+        seen, deals = set(), []
+        for leg in ('a', 'b'):
+            for t in ((position.get('leg_' + leg) or {})
+                      .get('position_tickets') or ()):
+                for f in by_ticket.get(str(t), ()):
+                    key = (f.get('account'), f.get('deal_id'))
+                    if key not in seen:
+                        seen.add(key)
+                        deals.append(f)
+        row['deals'] = len(deals)
+        if deals:
+            commission = _cost(f.get('commission') for f in deals)
+            row['commission'] = round(commission or 0.0, 2)
+            swap = _cost(f.get('swap') for f in deals)
+            row['swap'] = None if swap is None else round(swap, 2)
+            fee = _cost(f.get('fee') for f in deals)
+            row['fee'] = None if fee is None else round(fee, 2)
+            row['costs_source'] = 'MT5'
+        else:
+            row['commission'] = row.get('fees')
+            row['swap'] = row['fee'] = None
+            row['costs_source'] = (None if row['commission'] is None
+                                   else 'estimate')
+        charges = [row['commission'], row['swap'], row['fee']]
+        row['charges'] = (None if row['commission'] is None else
+                          round(sum(c for c in charges if c is not None), 2))
+        row['round_trip'] = (None if row['bid_ask'] is None
+                             or row['charges'] is None
+                             else round(row['bid_ask'] + row['charges'], 2))
+        if row['bid_ask'] is not None:
+            tally['bid_ask'] += row['bid_ask']
+            tally['bid_ask_trades'] += 1
+        if row['costs_source'] is not None:
+            tally['trades'] += 1
+            tally['commission'] += row['commission']
+            if row['costs_source'] == 'MT5':
+                tally['measured'] += 1
+                tally['deals'] += len(deals)
+                tally['swap'] += row['swap'] or 0.0
+                tally['fee'] += row['fee'] or 0.0
+            else:
+                tally['estimated'] += 1
+    for key in ('bid_ask', 'commission', 'swap', 'fee'):
+        tally[key] = round(tally[key], 2)
+    tally['charges'] = round(tally['commission'] + tally['swap'] +
+                             tally['fee'], 2)
+    tally['round_trip'] = round(tally['bid_ask'] + tally['charges'], 2)
+    return tally
 
 def algo_z(events):
     """(entry_z, exit_z) by position id, from the Algo's own audit trail.

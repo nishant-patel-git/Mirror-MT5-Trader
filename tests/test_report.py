@@ -171,3 +171,52 @@ def test_the_client_report_masks_and_hides_the_money():
 def test_without_capital_the_client_report_says_so():
     page = report.render_client(_client_body(capital=0), 7, 1_700_200_000)
     assert 'capital not set' in page and 'not set' in page
+
+
+# -- what each round trip cost (MT5: bid-ask, commission, swap) ----------------
+
+def _costed_body(capital=1000):
+    rows = [_trip(0, 1.0), _trip(1, -0.5, side='SELL', source='MANUAL')]
+    for r in rows:
+        r['entry_width'] = 0.5
+        r['leg_a'] = {'position_tickets': ['10' + r['position_id']]}
+        r['leg_b'] = {'position_tickets': ['20' + r['position_id']]}
+    body = analysis.report(rows, now=1_700_100_000, capital=capital)
+    fills = [{'deal_id': 'd1', 'account': 'A', 'position_ticket': '10p0',
+              'commission': -0.12, 'swap': -0.03, 'fee': 0.0}]
+    body['cost_tally'] = analysis.attach_costs(body['journal'], rows, fills)
+    analysis.number_trades(body, {'p0': 41, 'p1': 42})
+    return body
+
+
+def test_the_report_says_what_each_round_trip_cost():
+    page = report.render(_costed_body(), {'oil': 'USOIL vs UKOIL'}, 7, None,
+                         1_700_100_000)
+    for head in ('Trade no', 'Bid-ask', 'Commission', 'Swap',
+                 'Notional value', 'Round trip costs'):
+        assert head in page, head
+    assert '>41<' in page and '>42<' in page          # the record's numbers
+    assert '$0.12' in page and '$0.03' in page         # MT5's own
+    assert '~$' in page                                # the estimate, said
+    assert 'already in the P&amp;L' in page
+    for word in ('Maker', 'Taker', 'maker', 'taker'):
+        assert word not in page, word
+
+
+def test_CONTROL_hidden_pnl_leaves_the_costs_out():
+    page = report.render(_costed_body(), {}, 7, None, 1_700_100_000,
+                         pnl='hide')
+    assert '<th>Bid-ask</th>' not in page and 'Round trip costs' not in page
+    masked = report.render(_costed_body(), {}, 7, None, 1_700_100_000,
+                           pnl='mask')
+    assert '<th>Bid-ask</th>' in masked and '$0.12' not in masked
+
+
+def test_the_capital_says_when_it_is_the_account_balance():
+    body = _costed_body()
+    body['summary']['capital_source'] = 'balance'
+    assert '(account balance)' in report.render(body, {}, 7, None,
+                                                1_700_100_000)
+    body['summary']['capital_source'] = 'set'                 # control
+    assert '(account balance)' not in report.render(body, {}, 7, None,
+                                                    1_700_100_000)

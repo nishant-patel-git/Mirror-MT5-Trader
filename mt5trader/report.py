@@ -312,22 +312,45 @@ def render(body, names=None, days=7.0, pair_key=None, now=None,
              f'commission {cash(fees, sign=False)}'),
     ])
 
+    def cost(value, estimate=False):
+        if value is None:
+            return DASH
+        # ~ : the desk's estimate, where MT5's deals are not recorded.
+        return ('~' if estimate and pnl == 'show' else '') + \
+            cash(value, sign=False)
+
+    def commission(t):
+        value = t.get('commission', t.get('fees'))
+        if value is not None and t.get('costs_source') == 'MT5':
+            value += t.get('fee') or 0.0
+        return cost(value, t.get('costs_source') == 'estimate')
+
+    def stacked(at):
+        # The date over the time: one column narrower than a line each,
+        # and a number is never split.
+        text = clock(at)
+        return text if text == DASH else text.replace(' ', '&nbsp;', 1) \
+            .replace(' ', '<br>', 1)
+
     rows = []
     for i, t in enumerate(trips, 1):
         rows.append(
-            f'<tr><td>{i}</td><td>{clock(t.get("opened_at"))}</td>'
-            f'<td>{clock(t.get("closed_at"))}</td>'
+            f'<tr><td>{t.get("trade_no") or i}</td>'
+            f'<td>{stacked(t.get("opened_at"))}</td>'
+            f'<td>{stacked(t.get("closed_at"))}</td>'
             f'<td class="l">{_joints(name(t.get("pair_key")))}</td>'
             f'<td>{side(t.get("side"))}</td>'
             f'<td>{"Algo" if t.get("source") == "ALGO" else "Manual"}</td>'
             f'<td>{size(t.get("quantity"))}</td>'
-            f'<td>{spread(t.get("entry_spread"))} → '
+            f'<td>{spread(t.get("entry_spread"))} →<br>'
             f'{spread(t.get("exit_spread"))}</td>'
             f'<td>{held(t.get("held_sec"))}</td>'
             f'<td class="l">{_e(t.get("exit_reason") or DASH)}</td>'
             + ('' if hide else
                f'<td>{cash(t.get("gross_pnl"))}</td>'
-               f'<td>{cash(t.get("fees"), sign=False)}</td>'
+               f'<td>{cost(t.get("bid_ask"))}</td>'
+               f'<td>{commission(t)}</td>'
+               f'<td>{cost(t.get("swap"))}</td>'
                f'<td class="{tone(t.get("pnl"))}"><b>{cash(t.get("pnl"))}</b>'
                '</td>') +
             f'<td class="{tone(t.get("pct_margin"))}">'
@@ -335,21 +358,86 @@ def render(body, names=None, days=7.0, pair_key=None, now=None,
             f'<td class="{tone(t.get("pct_capital"))}">'
             f'{pct(t.get("pct_capital"), 3)}</td>'
             + ('' if hide else
+               '<td>' + (DASH if t.get('notional') is None else
+                         MASK if pnl != 'show' else
+                         f'${t["notional"]:,.0f}') + '</td>'
                f'<td class="{tone(t.get("cum_pnl"))}">{cash(t.get("cum_pnl"))}'
                '</td>') +
             '</tr>')
-    journal = ('<table class="journal"><thead><tr><th>#</th><th>Opened</th>'
+    journal = ('<table class="journal"><thead><tr><th>Trade no</th>'
+               '<th>Opened</th>'
                '<th>Closed</th><th class="l">Ladder</th><th>Side</th>'
                '<th>Who</th><th>Size</th><th>Spread in → out</th>'
                '<th>Held</th><th class="l">Exit</th>' +
-               ('' if hide else '<th>Gross</th><th>Commission</th>'
+               ('' if hide else '<th>Gross</th><th>Bid-ask</th>'
+                                '<th>Commission</th><th>Swap</th>'
                                 '<th>Net P&amp;L</th>') +
                '<th>On margin</th><th>On capital</th>' +
-               ('' if hide else '<th>Running</th>') +
+               ('' if hide else '<th>Notional value</th><th>Running</th>') +
                '</tr></thead><tbody>' +
-               (''.join(rows) or '<tr><td colspan="16">No closed trade in '
+               (''.join(rows) or '<tr><td colspan="20">No closed trade in '
                                  'this period.</td></tr>') +
                '</tbody></table>')
+
+    tally = body.get('cost_tally') or {}
+    cost_line = ''
+    if not hide and (tally.get('trades') or tally.get('bid_ask_trades')):
+        parts = [f'<b>Round trip costs</b> '
+                 f'{cash(tally.get("round_trip"), sign=False)}',
+                 f'<b>bid-ask</b> {cash(tally.get("bid_ask"), sign=False)} '
+                 f'({tally.get("bid_ask_trades") or 0} trade(s), already in '
+                 'the P&amp;L)',
+                 f'<b>commission</b> '
+                 f'{cash((tally.get("commission") or 0.0) + (tally.get("fee") or 0.0), sign=False)}',
+                 f'<b>swap</b> {cash(tally.get("swap"), sign=False)}']
+        if tally.get('measured'):
+            parts.append(f'{tally["measured"]} trade(s) from MT5\u2019s own '
+                         f'{tally.get("deals") or 0} deals')
+        if tally.get('estimated'):
+            parts.append(f'{tally["estimated"]} trade(s) estimated (~): '
+                         'their deals are not on record')
+        cost_line = '<p class="tally">' + ' · '.join(parts) + '</p>'
+
+    def share(value, base):
+        if value is None or not base:
+            return DASH
+        return pct(value / base * 100.0)
+    ex_rows = []
+    for r in reversed(body.get('excursion') or []):        # oldest first
+        mae = None if r.get('mae') is None else -r['mae']
+        mfe = r.get('mfe')
+        ex_rows.append(
+            f'<tr><td>{r.get("trade_no") or DASH}</td>'
+            f'<td>{clock(r.get("closed_at"))}</td>'
+            f'<td class="l">{_joints(name(r.get("pair_key")))}</td>'
+            f'<td>{side(r.get("side"))}</td>'
+            f'<td class="l">{_e(r.get("exit_reason") or DASH)}</td>'
+            + ('' if hide else f'<td class="down">{cash(mae)}</td>') +
+            f'<td class="{tone(mae)}">{share(mae, capital)}</td>'
+            f'<td class="{tone(mae)}">{share(mae, r.get("margin"))}</td>'
+            + ('' if hide else f'<td class="up">{cash(mfe)}</td>') +
+            f'<td class="{tone(mfe)}">{share(mfe, capital)}</td>'
+            f'<td class="{tone(mfe)}">{share(mfe, r.get("margin"))}</td>'
+            + ('' if hide else
+               f'<td class="{tone(r.get("pnl"))}">{cash(r.get("pnl"))}</td>')
+            + '<td>' + (DASH if r.get('utilisation_pct') is None
+                        else f'{r["utilisation_pct"]:.0f}%') + '</td></tr>')
+    excursion = ''
+    if ex_rows:
+        excursion = (
+            '<section class="panel jr"><h2>Worst and best points '
+            '<small>MAE: the worst net P&amp;L while open · MFE: the best · '
+            'each on the capital and on the margin the trade tied up'
+            '</small></h2><table class="journal excursion"><thead><tr>'
+            '<th>Trade no</th><th>Closed</th><th class="l">Ladder</th>'
+            '<th>Side</th><th class="l">Exit</th>' +
+            ('' if hide else '<th>MAE</th>') +
+            '<th>MAE<br>% capital</th><th>MAE<br>% margin</th>' +
+            ('' if hide else '<th>MFE</th>') +
+            '<th>MFE<br>% capital</th><th>MFE<br>% margin</th>' +
+            ('' if hide else '<th>Net P&amp;L</th>') +
+            '<th>Kept</th></tr></thead><tbody>' + ''.join(ex_rows) +
+            '</tbody></table></section>')
 
     by_pair = split_table('Ladder', _group(
         trips, lambda t: name(t.get('pair_key'))), cash=cash, hide=hide)
@@ -368,7 +456,10 @@ def render(body, names=None, days=7.0, pair_key=None, now=None,
     meta = [('Period', period_text(days) + (f' · {span}' if span
                                             else '')),
             ('Ladders', name(pair_key) if pair_key else 'Every ladder'),
-            ('Capital managed', (money(capital, sign=False)
+            ('Capital managed', ((money(capital, sign=False)
+                                  + (' (account balance)' if
+                                     s.get('capital_source') == 'balance'
+                                     else ''))
                                  if pnl == 'show' else 'not shown')
              if capital else 'not set'),
             ('Prepared', time.strftime('%d %b %Y, %H:%M',
@@ -399,10 +490,15 @@ for the colours.</span></div>
   <div><span>Capital used / trade</span><b>{'' if s.get('capital_used_avg') is None else f"{s['capital_used_avg']:.1f}% avg · {s.get('capital_used_max') or 0:.1f}% max"}</b></div></div></div>
 </section>
 <section class="panel jr"><h2>Trade journal <small>{len(trips)} closed
-trade(s), oldest first</small></h2>{journal}</section>
+trade(s), oldest first</small></h2>{journal}{cost_line}</section>
+{excursion}
 <footer class="notes"><b>Net P&amp;L</b> is the move of the spread at the
 prices both legs filled at, less the commission per lot set in the
-settings, both legs, both ends. <b>On margin</b>:
+settings, both legs, both ends. <b>Bid-ask</b>: the round turn of both
+legs' bid-ask when the trade was entered, times its size - already in
+the P&amp;L, shown not charged again. <b>Commission</b> and <b>Swap</b>:
+what MT5 booked on the trade's own deals (~ the desk's estimate where
+they are not on record). <b>On margin</b>:
 net ÷ the margin both legs tied up at entry. <b>On capital</b>: net ÷
 the capital managed. <b>Max drawdown</b>: the worst fall of the running
 net from a peak, closed trades only. Swap (overnight financing) is not
@@ -609,12 +705,14 @@ td.l, th { white-space: normal; overflow-wrap: normal; word-break: normal; }
 .split { margin-bottom: 8px; font-size: 11px; }
 .split th, .split td { white-space: nowrap; }
 .split td.l, .split th.l { width: 34%; white-space: normal; }
-.journal { font-size: 10px; }
+.journal { font-size: 9.5px; }
+.tally { margin: 6px 0 0; font-size: 10.5px; }
+.excursion { margin-top: 2px; }
 .returns { font-size: 12px; max-width: 760px; }
 .returns td, .returns th { padding: 5px 10px; }
 .tiles.client { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
 .tiles.client .tv { font-size: 22px; }
-.journal th, .journal td { padding: 3px 4px; }
+.journal th, .journal td { padding: 2px 3px; }
 /* On a narrow screen a journal cell may break at a SPACE - a date above
  * its time, "26h" above "30m" - and never inside a number. */
 @media screen and (max-width: 960px) {

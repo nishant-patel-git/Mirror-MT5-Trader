@@ -6918,11 +6918,12 @@ def test_the_analysis_page_reads_trades_against_the_capital_managed(page):
     assert 'Capital used' in tiles and '5.0%' in tiles
     table = page.locator('.monitor table.an-table', has_text='% on capital')
     heads = table.locator('th').all_text_contents()
-    for word in ('Capital used', 'Exposure', 'Net % on capital',
+    for word in ('Capital used', 'Notional value', 'Net % on capital',
                  'Net % on margin', 'Net % of notional'):
         assert word in heads, word
+    assert 'Exposure' not in heads
     row = table.locator('tbody tr').first.text_content()
-    assert '5.0%' in row and '1.00x' in row and '+2.00%' in row
+    assert '5.0%' in row and '3,500' in row and '+2.00%' in row
     # Typing a capital saves it as the setting.
     box = page.locator('.monitor .an-capital')
     box.fill('5000')
@@ -7014,9 +7015,13 @@ def test_the_monitor_maximizes_and_never_hides_a_confirmation(page):
     # The Monitor to the front, as a trader's click on it would: a
     # floating window an earlier test left over it would otherwise take
     # the click meant for its button.
+    # A floating fair window an earlier test left would sit over the
+    # Monitor's title bar and take the click meant for its button; the
+    # stacking is re-applied from the saved layout on every redraw, so
+    # it is closed here rather than out-stacked.
     page.evaluate(
-        "() => { document.querySelector('.window.monitor').style.zIndex"
-        " = 899; }")
+        "() => window.MT5Trader.showFairWindow('XAUUSD_|GC1226', false)")
+    page.wait_for_selector('.window.fairwin', state='detached', timeout=WAIT)
     try:
         before = page.locator('.window.monitor').bounding_box()
         page.click('.window.monitor .winbtn.max')
@@ -7126,3 +7131,121 @@ def test_the_sizing_tab_works_a_capital_through_on_mt5s_figures(page):
         page.evaluate("""() => { const t = window.MT5Trader;
             t.state.sizing = null; t.state.monitorTab = 'positions';
             t.closePanel('monitor:'); }""")
+
+
+def _costs_analysis(page, capital_source='set', capital=10000):
+    # Away from any field first: the pane is - rightly - not redrawn
+    # under a cursor, and these tests share one page. Leaving a field
+    # can save it and reload the record, so let that land BEFORE the
+    # test's own record goes in.
+    page.evaluate("() => document.activeElement && "
+                  "document.activeElement.blur()")
+    page.wait_for_timeout(600)
+    page.evaluate("""([source, capital]) => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        delete s.capitalManaged;
+        s.analysisPnl = 'show';
+        const leg = {side: 'BUY', entry: 1.0};
+        s.analysis = {ok: true, names: {'A|B': 'USOIL vs UKOIL'},
+          summary: {count: 2, closed: 2, net_pnl: 30, wins: 1, losses: 1,
+                    capital: capital, capital_source: source},
+          drawdown: {}, calibration: {}, shadow: {}, signals: [],
+          signal_tally: {},
+          excursion: [{trade_no: 7, pair_key: 'A|B', side: 'SELL',
+                       closed_at: Date.now() / 1000, mae: 50, mfe: 200,
+                       pnl: 120, margin: 1000, utilisation_pct: 60}],
+          cost_tally: {round_trip: 63.75, bid_ask: 50, bid_ask_trades: 2,
+                       commission: 12, fee: 0.5, swap: 1.25, measured: 1,
+                       deals: 4, estimated: 1, trades: 2},
+          journal: [
+            {trade_no: 7, pair_key: 'A|B', side: 'SELL', source: 'ALGO',
+             quantity: 1, closed_at: Date.now() / 1000, pnl: 120,
+             cum_pnl: 30, leg_a: leg, leg_b: leg, exit: {},
+             notional: 160000, bid_ask: 40, bid_ask_points: 0.04,
+             commission: 6, fee: 0.5, swap: 1.25, costs_source: 'MT5',
+             deals: 4, round_trip: 47.75},
+            {trade_no: 6, pair_key: 'A|B', side: 'BUY', source: 'MANUAL',
+             quantity: 1, closed_at: Date.now() / 1000 - 60, pnl: -90,
+             cum_pnl: -90, leg_a: leg, leg_b: leg, exit: {},
+             bid_ask: 10, commission: 6, swap: null,
+             costs_source: 'estimate', deals: 0, round_trip: null}]};
+        // An hour ahead: the tab's own refresh must not replace this
+        // with the real record while the test reads it.
+        s.analysisAt = Date.now() + 3600e3;
+        window.MT5Trader.render();
+    }""", [capital_source, capital])
+    page.wait_for_selector('.monitor .an-cost-tally', timeout=WAIT)
+
+
+def test_the_journal_says_what_each_round_trip_cost_on_mt5(page):
+    """For MT5 - no maker / taker - each trade's bid-ask, the commission
+    and swap MT5 booked on its deals, and the round trip, with Trade no;
+    the tally under it; MAE / MFE on the capital and on the margin."""
+    page.errors.clear()
+    try:
+        _costs_analysis(page)
+        table = page.locator('.monitor table.an-table', has=page.locator(
+            'th', has_text='Round trip'))
+        heads = table.locator('th').all_text_contents()
+        for word in ('Trade no', 'Bid-ask', 'Commission', 'Swap',
+                     'Round trip'):
+            assert word in heads, word
+        for word in ('Maker', 'Taker', 'Fills A/B'):
+            assert not any(word in h for h in heads), word
+        rows = []
+        for _ in range(50):
+            rows = page.evaluate("""() => {
+                const th = [...document.querySelectorAll(
+                    '.monitor table.an-table th')].find(
+                    h => h.textContent === 'Round trip');
+                return th ? [...th.closest('table').querySelectorAll(
+                    'tbody tr')].map(r => r.textContent) : []; }""")
+            if len(rows) >= 2:
+                break
+            time.sleep(0.1)
+        first, second = rows[:2]
+        assert first.startswith('#7')
+        assert '$40.00' in first and '$6.50' in first      # 6 + fee 0.50
+        assert '$1.25' in first and '$47.75' in first
+        assert '~$6.00' in second                           # the estimate
+        tally = page.text_content('.monitor .an-cost-tally')
+        assert 'Round trip costs' in tally and '$63.75' in tally
+        assert 'already in the P&L' in tally
+        assert '1 trade(s) estimated' in tally
+        excursion = page.locator('.monitor table.an-table',
+                                 has_text='MAE % capital')
+        row = excursion.locator('tbody tr').first.text_content()
+        assert row.startswith('#7')
+        assert '\u22120.50%' in row and '\u22125.00%' in row  # 50 on 10k, 1k
+        assert '+2.00%' in row and '+20.00%' in row         # 200 on 10k, 1k
+        assert page.errors == []
+        # Masked: the costs are dots too - money says the size.
+        page.evaluate("""() => { window.MT5Trader.state.analysisPnl = 'mask';
+            window.MT5Trader.render(); }""")
+        tally = page.text_content('.monitor .an-cost-tally')
+        assert '$63.75' not in tally and '\u2022' in tally
+    finally:
+        page.evaluate("""() => { const s = window.MT5Trader.state;
+            s.analysisPnl = 'show'; s.analysis = null;
+            s.monitorTab = 'positions'; }""")
+
+
+def test_nothing_typed_the_capital_box_shows_the_account_balance(page):
+    page.errors.clear()
+    try:
+        _costs_analysis(page, 'balance', 123456)
+        box = page.locator('.monitor .an-capital')
+        assert box.input_value() == ''                    # not a setting
+        assert box.get_attribute('placeholder') == '123,456'
+        assert '= account balance' in page.text_content('.monitor .an-bar')
+        # Control: a typed capital is the value, and says nothing more.
+        _costs_analysis(page, 'set', 5000)
+        assert page.locator('.monitor .an-capital').input_value() == '5000'
+        assert '= account balance' not in page.text_content(
+            '.monitor .an-bar')
+        assert page.errors == []
+    finally:
+        page.evaluate("""() => { const s = window.MT5Trader.state;
+            s.analysis = null; s.monitorTab = 'positions'; }""")
