@@ -19,6 +19,7 @@ short-lived leg on every poll.
 """
 
 import logging
+import threading
 import time
 
 from . import ipc
@@ -52,6 +53,9 @@ class LocalLeg:
         return {
             'account': self.name,
             'login': info.login, 'server': info.server,
+            # The broker's own name for itself ("CFI Financial Group"),
+            # where the server is a machine's name ("CFI3-Real").
+            'company': getattr(info, 'company', None) or None,
             'name': getattr(info, 'name', ''),
             'currency': getattr(info, 'currency', 'USD'),
             'leverage': getattr(info, 'leverage', None),
@@ -263,6 +267,17 @@ class RemoteLeg:
         self.endpoint_label = f'{self.host}:{self.port}'
         self.timeout = timeout
         self.conn = None
+        #: ONE request at a time on this connection, whichever thread
+        #: sends it. The poll, the command thread and the reconciler all
+        #: talk to the same leg; without this, two of them read each
+        #: other's replies. It happened: a chart's 200 KB of bars was
+        #: half-read by the price poll, every reply after it was read out
+        #: of step, and the leg read as dark until the engine restarted.
+        self._io = threading.RLock()
+        self._last_reconnect = None
+
+    #: How often a connection that failed is tried again, at most.
+    RECONNECT_SEC = 2.0
 
     def connect(self, retries=5, delay=2.0):
         for attempt in range(1, retries + 1):
@@ -302,14 +317,37 @@ class RemoteLeg:
             self.conn = None
 
     def _request(self, msg):
-        if not self.conn:
-            return None
-        try:
-            return self.conn.request(msg)
-        except (OSError, ValueError) as e:
-            logging.error("IPC failure to leg '%s': %s", self.name, e)
-            self.close()
-            return None
+        with self._io:
+            if not self.conn and not self._reconnect():
+                return None
+            try:
+                return self.conn.request(msg)
+            except (OSError, ValueError) as e:
+                # The connection is closed, not reused: whatever is left
+                # of a reply in it would be read as the answer to the
+                # next question.
+                logging.error("IPC failure to leg '%s': %s", self.name, e)
+                self.close()
+                return None
+
+    def _reconnect(self):
+        """A connection that failed is opened again by itself, once
+        every RECONNECT_SEC at most - the leg runner and its MT5 session
+        are still there. It used to stay closed until the engine was
+        restarted, with the leg reading as unknown all that time.
+
+        Nothing is re-sent: a request that failed has already answered
+        None (unknown), and the caller has treated it as that."""
+        now = time.monotonic()
+        if self._last_reconnect is not None and \
+                now - self._last_reconnect < self.RECONNECT_SEC:
+            return False
+        self._last_reconnect = now
+        if self.connect(retries=1, delay=0.0):
+            logging.warning("leg '%s': reconnected after an IPC failure",
+                            self.name)
+            return True
+        return False
 
     def ping(self):
         reply = self._request({'cmd': 'ping'})

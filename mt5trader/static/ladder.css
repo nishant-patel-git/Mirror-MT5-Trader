@@ -12,6 +12,9 @@
 
 :root {
   --chrome: #d4d0c8;          /* the button/input furniture grey */
+  --analysis-bg: #eef2f7;     /* the Analysis page's own ground */
+  --analysis-tile: #ffffff;
+  --analysis-line: #c8d2de;
   --chrome-dark: #a9a9a9;
   --panel: #f0f0f0;
   --grid-line: #808080;
@@ -339,7 +342,7 @@ body {
    window is narrow enough for the title to fill the bar — the ladders.
    The wide Exchanges window put its close button against the title, on
    the left, where every other window on the screen has none. */
-.titlebar .winbtns { margin-left: auto; }
+.titlebar .winbtns { margin-left: auto; white-space: nowrap; flex-shrink: 0; }
 .winbtn {
   background: var(--chrome);
   border: 1px solid #666;
@@ -1097,6 +1100,14 @@ table.legbook tr.spread .c-width { color: #7a4b00; }
   text-align: right;
 }
 .monitor tr.detail td { background: #fafafa; font-size: 10px; }
+/* The level an exit was actually measured against. One cell of three
+ * is marked, so the eye finds the stop that fired without reading the
+ * Exit column first — and a target that was never reached stays a
+ * plain number beside it. */
+.monitor td.on-level {
+  font-weight: 700;
+  box-shadow: inset 0 -2px 0 var(--chrome-dark);
+}
 /* An order that stopped working, kept on screen with its reason. */
 .monitor tr.dead td { background: #f6eeee; color: var(--muted); }
 .monitor .up { color: var(--traded); font-weight: 600; }
@@ -1111,7 +1122,17 @@ table.legbook tr.spread .c-width { color: #7a4b00; }
 
 /* -- the Analysis tab ------------------------------------------------- */
 
-.monitor .analysis { padding: 4px 8px 8px; font: 11px var(--font); }
+.monitor .analysis {
+  padding: 4px 8px 8px;
+  font: 11px var(--font);
+  /* ITS OWN GROUND. With no background of its own the pane showed
+   * whatever was behind it, which on a desktop of stacked windows is
+   * a flat mid-grey the tables disappear into. A reading page is read
+   * for minutes at a time; it gets a light, slightly cool ground of
+   * its own and white tiles on it. */
+  background: var(--analysis-bg);
+  color: var(--text);
+}
 .monitor .analysis h4 {
   margin: 12px 0 4px;
   font: 600 12px var(--font);
@@ -1119,14 +1140,28 @@ table.legbook tr.spread .c-width { color: #7a4b00; }
   padding-bottom: 2px;
 }
 .monitor .analysis h4 small { font-weight: 400; color: var(--muted); }
+/* The two halves of the page: what the desk did, and what the Algo
+ * would have done. Heavier than an h4 on purpose - they are the only
+ * thing telling a reader which of the two they are looking at. */
+.monitor .analysis .an-half {
+  margin: 16px 0 6px;
+  font: 700 13px var(--font);
+  border-bottom: 2px solid var(--chrome-dark);
+  padding-bottom: 3px;
+}
+.monitor .analysis .an-half:first-of-type { margin-top: 4px; }
+.monitor .analysis .an-half small {
+  font: 400 11px var(--font);
+  color: var(--muted);
+}
 .monitor .analysis h4 .btn { float: right; font-size: 10px; padding: 0 6px; }
 .monitor .an-bar { display: flex; gap: 6px; align-items: center; margin: 2px 0 4px; }
 .monitor .an-bar select { font: 11px var(--font); }
 .monitor .an-tiles { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0; }
 .monitor .an-tile {
   flex: 1 1 110px;
-  background: #fafafa;
-  border: 1px solid #d5d5d5;
+  background: var(--analysis-tile);
+  border: 1px solid var(--analysis-line);
   padding: 4px 6px;
   text-align: center;
 }
@@ -1134,6 +1169,7 @@ table.legbook tr.spread .c-width { color: #7a4b00; }
 .monitor .an-lbl { font: 10px var(--font); color: var(--muted); }
 .monitor .an-table { width: 100%; min-width: 0; margin: 4px 0; }
 .monitor .an-table td.l, .monitor .an-table th.l { text-align: left; }
+.monitor .an-table .an-legs { font-size: 0.85em; line-height: 1.2; white-space: nowrap; }
 .monitor .an-sub { margin: 8px 0 0; font-weight: 600; }
 .monitor .an-bt-out { margin: 4px 0; }
 .monitor .analysis .hint { color: var(--muted); }
@@ -1422,6 +1458,12 @@ table.keys td { padding: 2px 0; font-size: 12px; }
   background: #edf7ee;
 }
 .toast .dismiss { float: right; color: var(--muted); }
+.toast .toast-time {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-weight: 400;
+  opacity: 0.75;
+  margin-right: 8px;
+}
 
 /* -- settings: accounts and pairs ------------------------------------ */
 
@@ -1484,6 +1526,9 @@ table.grid-form input,
 table.grid-form select { font: 11px var(--font); width: 100%; padding: 1px 2px; }
 table.grid-form tr.new td { background: #f4f9ff; }
 table.grid-form td.actions { white-space: nowrap; width: 1%; }
+/* The installed MetaTrader 5s, under the path they fill: pick, then
+ * Save. Under it rather than beside it, so the path stays readable. */
+table.grid-form .f-terminal-pick { display: block; margin-top: 2px; }
 table.grid-form td.actions .btn { margin-right: 3px; }
 
 /* Is the system connected — the first thing on the page, and the one
@@ -2202,3 +2247,312 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
 .ladder .price .lvl-tag.be { background: #8a6d00; }
 .ladder .price .lvl-tag.tp { background: #1a7f37; }
 .ladder .price .lvl-tag.sl { background: #b42318; }
+
+/* -- the pair chart ------------------------------------------------------
+ * Arrow-statarb's two charts for one ladder: the Algo's z between its
+ * entry and stop lines, and the spread. A window like any other -
+ * dragged, resized, closed - opened from the ladder's Chart button. */
+.window.chartwin { display: flex; flex-direction: column; }
+.window.chartwin .cw-body {
+  flex: 1; display: flex; flex-direction: column; gap: 6px;
+  padding: 6px 8px; overflow: auto; min-height: 0;
+}
+.window.chartwin .cw-bar { font-size: 12px; display: flex; gap: 6px;
+  align-items: center; }
+.window.chartwin .cw-now { margin-left: auto; font-weight: 600; }
+.window.chartwin .cw-card { flex: 1; display: flex; flex-direction: column;
+  min-height: 140px; border: 1px solid rgba(128,128,128,.35);
+  border-radius: 3px; background: var(--panel-bg, #fff); }
+.window.chartwin .cw-head { font-size: 12px; font-weight: 600;
+  padding: 3px 6px; border-bottom: 1px solid rgba(128,128,128,.25);
+  display: flex; align-items: center; gap: 8px; }
+.window.chartwin .cw-key { font-weight: 400; color: #6c757d;
+  margin-left: auto; display: flex; gap: 6px; align-items: center; }
+.window.chartwin .cw-key i { display: inline-block; width: 14px; height: 0;
+  border-top: 2px solid; vertical-align: middle; margin-right: 2px; }
+.window.chartwin .cw-key .k-sd { border-top: 1px dotted rgba(13,110,253,.8); }
+.window.chartwin .cw-key .k-mean { border-top: 2px solid #fd7e14; }
+.window.chartwin .cw-tfs { display: inline-flex; }
+.window.chartwin .cw-tfs button { font: 700 11px var(--font); padding: 1px 8px;
+  border: 1px solid rgba(0, 0, 0, .3); background: var(--chrome);
+  cursor: pointer; margin-right: -1px; }
+.window.chartwin .cw-tfs button:first-child { border-radius: 3px 0 0 3px; }
+.window.chartwin .cw-tfs button:last-child { border-radius: 0 3px 3px 0; }
+.window.chartwin .cw-tfs button.on { background: #0d6efd; color: #fff;
+  border-color: #0d6efd; }
+.window.chartwin .cw-key .k-candle { display: inline-block; width: 5px;
+  height: 10px; vertical-align: middle; margin-right: 1px; }
+.window.chartwin .cw-key .k-candle.up { background: #198754; }
+.window.chartwin .cw-key .k-candle.down { background: #dc3545;
+  margin-right: 3px; }
+.window.chartwin .cw-key .k-up { border-top: 1px dashed #dc3545; }
+.window.chartwin .cw-key .k-down { border-top: 1px dashed #198754; }
+.window.chartwin .cw-key .k-stop { border-top: 1px dotted #6c757d; }
+.window.chartwin .cw-badges { margin-left: auto; display: flex; gap: 4px; }
+.window.chartwin .cw-badge { font-weight: 600; font-size: 11px;
+  padding: 1px 6px; border-radius: 3px; color: #212529; }
+.window.chartwin .cw-min { background: #6edff6; }
+.window.chartwin .cw-max { background: #ffda6a; }
+.window.chartwin .cw-plot { flex: 1; position: relative; min-height: 110px;
+  overflow: hidden; }
+.window.chartwin .cw-plot svg { position: absolute; inset: 0; }
+.window.chartwin .cw-empty { position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center; color: #6c757d;
+  font-size: 12px; }
+.window.chartwin .cw-note { font-size: 11px; }
+/* The ladder's Chart button: lit while its chart is open. Styled like
+ * the Algo switch beside it, and never allowed to push the window's own
+ * buttons onto a second line. */
+.window.ladder .chart-btn { font: 700 10px var(--font); padding: 0 6px;
+  margin-left: 4px; border: 1px solid rgba(0, 0, 0, .25); border-radius: 2px;
+  background: var(--chrome); cursor: pointer; white-space: nowrap;
+  flex-shrink: 0; }
+.window.ladder .chart-btn.on { background: #0d6efd; color: #fff;
+  border-color: #0d6efd; }
+
+/* The Algo window's legs: each one's account number and broker, small,
+ * under the title. */
+.window.algowin .aw-legs { font-size: 11px; color: #6c757d;
+  padding: 3px 8px; border-bottom: 1px solid rgba(128,128,128,.25);
+  line-height: 1.35; }
+.window.algowin .aw-legs .aw-leg { white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.window.algowin .aw-legs b { color: #212529; margin-right: 2px; }
+
+/* The chart's hover: a crosshair through the candle on both charts, the
+ * level under the pointer on its axis, and a readout of the candle. */
+.window.chartwin .cw-body { position: relative; }
+.window.chartwin .cw-plot { cursor: crosshair; }
+.window.chartwin .cw-xline { position: absolute; width: 0;
+  border-left: 1px dashed rgba(33,37,41,.55); pointer-events: none; }
+.window.chartwin .cw-yline { position: absolute; height: 0;
+  border-top: 1px dashed rgba(33,37,41,.45); pointer-events: none; }
+.window.chartwin .cw-ylabel { position: absolute; left: 2px; padding: 0 3px;
+  font: 600 10px var(--font); background: #212529; color: #fff;
+  border-radius: 2px; pointer-events: none; }
+.window.chartwin .cw-tip { position: absolute; z-index: 5;
+  pointer-events: none; background: rgba(255,255,255,.97);
+  border: 1px solid rgba(0,0,0,.25); border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.2); padding: 5px 8px;
+  font-size: 11px; min-width: 190px; }
+.window.chartwin .cw-tip .head { font-weight: 700; margin-bottom: 3px; }
+.window.chartwin .cw-tip .sep { font-weight: 700; margin: 4px 0 1px;
+  color: #6c757d; border-top: 1px solid rgba(128,128,128,.25);
+  padding-top: 3px; }
+.window.chartwin .cw-tip table { border-collapse: collapse; width: 100%; }
+.window.chartwin .cw-tip th { text-align: left; font-weight: 400;
+  color: #6c757d; padding: 0 8px 0 0; white-space: nowrap; }
+.window.chartwin .cw-tip td { text-align: right; font-family: var(--mono, monospace);
+  padding: 0 0 0 6px; white-space: nowrap; }
+.window.chartwin .cw-tip td.z { color: #0d6efd; min-width: 52px; }
+.window.chartwin .cw-tip tr.up td:first-of-type { color: #198754; font-weight: 700; }
+.window.chartwin .cw-tip tr.down td:first-of-type { color: #dc3545; font-weight: 700; }
+.window.chartwin .cw-tip tr.mean th, .window.chartwin .cw-tip tr.mean td {
+  color: #fd7e14; font-weight: 700; }
+.window.chartwin .cw-tip tr.entry-up th { color: #dc3545; }
+.window.chartwin .cw-tip tr.entry-down th { color: #198754; }
+.window.chartwin .cw-tip .beyond { margin-top: 3px; font-weight: 700;
+  color: #212529; background: #ffda6a; padding: 1px 4px; border-radius: 2px; }
+.window.chartwin .cw-tip .touched { margin-top: 3px; color: #6c757d; }
+.window.chartwin .cw-tip tr.sep th { font-weight: 700; color: #6c757d;
+  border-top: 1px solid rgba(128,128,128,.25); padding-top: 3px; }
+.window.chartwin .cw-tip tr.cols th, .window.chartwin .cw-tip tr.cols td {
+  font: 600 10px var(--font); color: #6c757d; text-transform: uppercase;
+  letter-spacing: .03em; }
+
+/* -- one position per side: the fills behind it, and the limit ---------- */
+.aw-limit {
+  background: #fdecea; border: 1px solid #d93025; color: #8a1c12;
+  padding: 4px 6px; margin: 4px 0; font-size: 11px; border-radius: 3px;
+}
+.aw-cover {
+  background: #fff4d6; border: 1px solid #e0b040; color: #6b4a00;
+  padding: 4px 6px; margin: 4px 0; font-size: 11px; border-radius: 3px;
+}
+.aw-fills { margin: 4px 0; font-size: 11px; }
+.aw-fills summary { cursor: pointer; font-weight: 600; }
+.aw-fill-rows {
+  display: grid; grid-template-columns: auto auto auto auto;
+  gap: 2px 12px; font-family: var(--mono, ui-monospace, monospace);
+  margin-top: 3px;
+}
+.aw-fill-rows .up { color: var(--traded, #1e8e3e); }
+.aw-fill-rows .down { color: #c0392b; }
+
+/* -- market sessions: the top-bar strip and its timeline ---------------- */
+#mkt-strip {
+  display: inline-flex; align-items: center; gap: 4px; margin-left: 12px;
+  overflow: hidden; min-width: 0; font-size: 10.5px;
+}
+.mkt-head {
+  font-weight: 700; margin-right: 4px; padding: 0 6px; border-radius: 8px;
+  line-height: 15px; background: #fff4d6; color: #6b4a00;
+}
+.mkt-head.hot { background: #d93025; color: #fff; }
+.mkt-chip {
+  padding: 0 6px; border-radius: 8px; line-height: 15px;
+  border: 1px solid transparent; white-space: nowrap;
+}
+.mkt-chip.off { background: rgba(127, 127, 127, .12); color: var(--frame-text); }
+.mkt-chip.soon { background: #fff4d6; color: #6b4a00; border-color: #e0b040; }
+.mkt-chip.open { background: #e6f4ea; color: #1e6b34; border-color: #8cc79b; }
+.mkt-chip.hot { background: #fdecea; color: #8a1c12; border-color: #d93025;
+                font-weight: 600; }
+.mkt-more {
+  background: none; border: 0; color: var(--frame-text); cursor: pointer;
+  font-size: 10.5px; padding: 0 4px; text-decoration: underline;
+}
+#mkt-panel {
+  position: fixed; top: 22px; right: 12px; width: 720px; max-width: 96vw;
+  z-index: 3000; background: #fff; border: 1px solid #888;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .3); font-size: 11px;
+}
+.mkt-title {
+  background: var(--frame-dark); color: var(--frame-text);
+  padding: 3px 8px; font-weight: 600;
+}
+.mkt-close { float: right; background: none; border: 0; color: inherit;
+             cursor: pointer; font-size: 14px; line-height: 1; }
+.mkt-body { padding: 6px 10px 8px; }
+.mkt-clock { color: #444; margin-bottom: 4px; }
+.mkt-ticks { position: relative; height: 13px; margin-left: 150px; }
+.mkt-ticks span { position: absolute; transform: translateX(-50%);
+                  font-size: 10px; color: #666; }
+.mkt-rows { position: relative; }
+.mkt-row { display: flex; align-items: center; margin: 3px 0; }
+.mkt-name { width: 150px; flex: 0 0 150px; }
+.mkt-track { position: relative; flex: 1; height: 20px; background: #f2f4f7;
+             border-radius: 3px; }
+.mkt-bar { position: absolute; top: 3px; bottom: 3px; background: #5a9bd8;
+           border-radius: 3px; }
+.mkt-now { position: absolute; top: 0; bottom: 0; border-left: 2px solid #d93025; }
+.mkt-now span { position: absolute; bottom: -12px; left: -12px; font-size: 9px;
+                color: #d93025; font-weight: 700; }
+.mkt-note { color: #555; margin-top: 14px; }
+
+/* -- the Slippage page ---------------------------------------------------- */
+.slip-cards { display: flex; gap: 8px; margin: 6px 0 10px; flex-wrap: wrap; }
+.slip-card {
+  flex: 1 1 160px; border: 1px solid #ccc; border-radius: 4px;
+  padding: 6px 10px; background: #fafafa;
+}
+.slip-card .k { color: #555; font-size: 11px; }
+.slip-card .v { font: 600 18px/1.3 var(--mono, Consolas, monospace); }
+.slip-card .v.down { color: #c0392b; }
+.slip-card .v.up { color: #1e8e3e; }
+.slip-card .s { color: #666; font-size: 11px; }
+.slip-h { margin: 10px 0 4px; font-size: 12px; }
+.slip-splits { display: flex; gap: 20px; flex-wrap: wrap; }
+.slip-split { flex: 0 1 440px; }
+.slip-bar {
+  display: flex; height: 18px; border: 1px solid #ccc; border-radius: 3px;
+  overflow: hidden; margin-top: 2px;
+}
+.slip-bar div { font-size: 10px; color: #fff; text-align: center;
+                line-height: 18px; white-space: nowrap; overflow: hidden; }
+.slip-bar .moved { background: #e08a20; }
+.slip-bar .broker { background: #c0392b; }
+.slip-bar .none { background: #8cc79b; }
+.moved-t { color: #b86e10; }
+.broker-t { color: #c0392b; }
+.slip-detail { margin-top: 10px; }
+.slip-detail summary { cursor: pointer; font-weight: 600; }
+
+/* -- Analysis: the capital managed, and the printable report ------------- */
+.monitor .an-bar input.an-capital { font: 11px var(--font); width: 90px;
+  margin-left: 2px; }
+.monitor .an-report { margin-left: 10px; padding: 1px 10px; border: 1px solid #808080;
+  background: #fff; color: #16324f; font-weight: 600; text-decoration: none; }
+.monitor .an-report:hover { background: #16324f; color: #fff; }
+
+/* THE ANALYSIS TABLES FIT THE WINDOW. Every Monitor cell is one line by
+ * default, so a 22-column trade journal ran ~1,800px wide and its last
+ * columns sat off to the right. Here headings and words wrap - a pair's
+ * name, an exit reason, "Net % on margin" - and numbers stay on one
+ * line, where a broken one would be misread. */
+.monitor .an-table { width: 100%; min-width: 0; }
+.monitor .an-table th { white-space: normal; vertical-align: bottom;
+  line-height: 1.15; }
+.monitor .an-table td.l { white-space: normal; overflow-wrap: normal;
+  word-break: normal; min-width: 52px; }
+.monitor .an-table th, .monitor .an-table td { padding-left: 4px;
+  padding-right: 4px; }
+/* ...and on a narrow window a cell may break at a SPACE: a date above
+ * its time, "9.40 →" above "9.27", a side above its price. A number has
+ * no space in it, so no number is ever split. */
+.monitor .an-table td { white-space: normal; }
+/* A narrow Monitor window: the journal's numbers a point smaller, so all
+ * its columns still fit; a wide one is untouched. */
+.monitor .analysis { container-type: inline-size; }
+@container (max-width: 1250px) {
+  .monitor .an-table td { font-size: 10px; padding: 1px 3px; }
+  .monitor .an-table th { font-size: 9.5px; padding: 2px 3px; }
+}
+
+/* An Algo window given a size - by Tidy, or by its corner - takes it:
+ * the 420px cap is for the window as it first opens. */
+.window.algowin.sized { max-width: none; }
+
+/* Likewise the fair window: given a size by Tidy (tiled down the right)
+ * or by its corner, it fills it - the 260px cap is for first opening. */
+.window.fairwin.sized { max-width: none; }
+
+/* Slippage on every fill: the one-line headline above the table. */
+.slip-fills-head { margin: 2px 0 4px; font-size: 12px; }
+.slip-fills-head .down { color: #c0392b; }
+.slip-fills-head .up { color: #2e9e4f; }
+
+/* MAXIMIZED: the Trading Monitor or a Chart filling the desk, between
+ * the top bar and the taskbar. Over the window's own size and place
+ * (kept, and back on restore). */
+.window.maximized {
+  position: fixed !important;
+  left: 4px !important; right: 4px !important;
+  top: var(--max-top, 40px) !important;
+  bottom: var(--max-bottom, 28px) !important;
+  width: auto !important; height: auto !important;
+  max-width: none !important; max-height: none !important;
+  /* Over every window (they stop at MAX_WINDOW_Z, 900) and UNDER the
+   * toasts (2040), a confirmation (2050) and the menus (2060): a
+   * maximized Monitor must never hide the question an order asks. */
+  z-index: 1000 !important;
+  display: flex; flex-direction: column;
+}
+.window.monitor.maximized > .pane { max-height: none; flex: 1 1 auto; }
+.window.chartwin.maximized .cw-body { flex: 1 1 auto; min-height: 0; }
+.winbtn.max { margin-right: 2px; }
+
+/* The Sizing tab: the sizing sheet, live. */
+.monitor .sz { padding: 4px 2px; }
+.monitor .sz-bar { display: flex; flex-wrap: wrap; align-items: center;
+  gap: 4px 6px; margin-bottom: 4px; }
+.monitor .sz-label { font-weight: 600; font-size: 11px; }
+.monitor .sz-win { font: 600 11px inherit; padding: 1px 8px;
+  border: 1px solid #b0b8c4; background: #fff; border-radius: 3px;
+  cursor: pointer; }
+.monitor .sz-win.on { background: #0d6efd; color: #fff; border-color: #0d6efd; }
+.monitor .sz-sum { font-size: 11px; margin: 2px 0 6px; }
+.monitor .sz-sum .up { color: #2e9e4f; } .monitor .sz-sum .down { color: #c0392b; }
+.monitor .sz-missing { color: #8a5a00; }
+.monitor .sz-wrap { overflow-x: auto; }
+.monitor table.sz-table { width: 100%; border-collapse: collapse; }
+.monitor table.sz-table th, .monitor table.sz-table td {
+  border: 1px solid #d5dae1; padding: 2px 5px; text-align: center;
+  white-space: nowrap; font-size: 11px; }
+.monitor table.sz-table th { white-space: normal; }
+.monitor table.sz-table th small { font-weight: 400; color: #6b7280; }
+.monitor table.sz-table td.up { color: #2e9e4f; }
+.monitor table.sz-table td.down { color: #c0392b; }
+.monitor table.sz-table td small { color: #6b7280; }
+.monitor .sz-notes { font-size: 10.5px; margin-top: 6px; color: #444; }
+.monitor .sz-fields { gap: 4px 14px; }
+.monitor .sz-field { display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; }
+.monitor .sz-field input { width: 58px; font: 11px inherit; }
+.monitor .sz-field select { font: 11px inherit; }
+.monitor .sz-reset, .monitor .sz-print { font: 11px inherit;
+  padding: 1px 8px; cursor: pointer; }
+
+/* The Analysis journal's Trade no, and the round-trip cost tally. */
+.monitor td.an-no { font-weight: 600; color: #16324f; }
+.an-cost-tally { margin: 6px 0 14px; font-size: 12px; }

@@ -173,14 +173,26 @@ class ZExcursions:
         self.min_z = data.get('min_z')
         self.since = data.get('since') or now
         self.events = list(data.get('events') or [])
-        self._prev = None
-        self._arm = {'2u': True, '3u': True, '2d': True, '3d': True}
-        self._open_up = self._open_down = False
+        #: WHERE IT HAD GOT TO, restored - not reset.
+        #:
+        #: These four used to live only in memory. Every restart
+        #: therefore re-armed all four bands, and a spread parked
+        #: beyond +2 sigma logged a fresh touch on the first poll
+        #: after it: six restarts, six touches, one stretch. The
+        #: counts were saved and the reason they were safe to add to
+        #: was not.
+        self._prev = data.get('prev')
+        self._arm = dict({'2u': True, '3u': True, '2d': True, '3d': True},
+                         **(data.get('arm') or {}))
+        self._open_up = bool(data.get('open_up'))
+        self._open_down = bool(data.get('open_down'))
 
     def to_dict(self):
         return {'counts': dict(self.counts), 'max_z': self.max_z,
                 'min_z': self.min_z, 'since': self.since,
-                'events': self.events[-self.MAX_EVENTS:]}
+                'events': self.events[-self.MAX_EVENTS:],
+                'prev': self._prev, 'arm': dict(self._arm),
+                'open_up': self._open_up, 'open_down': self._open_down}
 
     def _event(self, kind, z, at):
         self.counts[kind] += 1
@@ -274,42 +286,244 @@ def _gross(row):
     return (exit_ - entry) * sign * units
 
 
-def summary(positions):
+def returns(row, pnl):
+    """Net P&L as a share of the margin BOTH legs tied up at entry -
+    the base the TP % and SL % are set on - and of the notional (both
+    legs' face value). Each None when its base was not measured."""
+    margin = row.get('entry_margin')
+    quantity = row.get('quantity')
+    margin = (float(margin) * float(quantity or 1.0)) if margin else None
+    notional = 0.0
+    for leg in ('a', 'b'):
+        fill = row.get('leg_' + leg) or {}
+        try:
+            notional += (float(fill['volume']) * float(fill['contract_size'])
+                         * float(fill['price']))
+        except (KeyError, TypeError, ValueError):
+            notional = None
+            break
+    return {'margin': None if margin is None else round(margin, 2),
+            'margin_estimated': row.get('entry_margin_source') == 'leverage',
+            'pct_margin': (None if pnl is None or not margin
+                           else round(pnl / margin * 100.0, 4)),
+            'notional': None if not notional else round(notional, 2),
+            'pct_notional': (None if pnl is None or not notional
+                             else round(pnl / notional * 100.0, 6))}
+
+
+def on_capital(pnl, margin, notional, capital):
+    """One trade against the CAPITAL the trader manages: its net as a
+    share of it (return on capital), the margin it tied up as a share of
+    it (capital used), and its two legs' face value over it (exposure,
+    x). Each None while the capital is not set or its base was not
+    measured."""
+    capital = float(capital or 0.0)
+    if capital <= 0:
+        return {'pct_capital': None, 'pct_capital_used': None,
+                'exposure': None}
+    return {'pct_capital': (None if pnl is None
+                            else round(pnl / capital * 100.0, 4)),
+            'pct_capital_used': (None if not margin
+                                 else round(margin / capital * 100.0, 2)),
+            'exposure': (None if not notional
+                         else round(notional / capital, 3))}
+
+
+def summary(positions, capital=0.0):
     """Trades opened in the window, the closed ones' net and win rate."""
     rows = list(positions or ())
     closed = [r for r in rows if r.get('closed_at') is not None
               and _pnl(r) is not None]
     wins = [r for r in closed if _pnl(r) > 0]
-    return {'count': len(rows), 'closed': len(closed),
+    # RETURN ON MARGIN over the trades whose margin WAS measured: their
+    # net over the margin they used. A trade with no margin is left out
+    # of both sides, never counted as using none.
+    based = [(r, returns(r, _pnl(r))['margin']) for r in closed]
+    based = [(r, m) for r, m in based if m]
+    used = sum(m for _r, m in based)
+    # ON CAPITAL: the window's net over the capital managed, and how
+    # much of it the trades tied up - on average and at most, each trade
+    # by its own margin.
+    capital = float(capital or 0.0)
+    shares = ([m / capital * 100.0 for _r, m in based] if capital > 0
+              else [])
+    net = sum(_pnl(r) for r in closed) if closed else None
+    return {'capital': capital or None,
+            'return_on_capital': (round(net / capital * 100.0, 4)
+                                  if capital > 0 and net is not None
+                                  else None),
+            'capital_used_avg': (round(sum(shares) / len(shares), 2)
+                                 if shares else None),
+            'capital_used_max': round(max(shares), 2) if shares else None,
+            'count': len(rows), 'closed': len(closed),
             'open': sum(1 for r in rows if r.get('closed_at') is None),
             'net_pnl': (round(sum(_pnl(r) for r in closed), 2)
                         if closed else None),
             'wins': len(wins), 'losses': len(closed) - len(wins),
-            'win_rate': _rate(len(wins), len(closed))}
+            'win_rate': _rate(len(wins), len(closed)),
+            'return_on_margin': (round(sum(_pnl(r) for r, _m in based)
+                                       / used * 100.0, 4) if used else None),
+            'margin_trades': len(based)}
 
 
-def drawdown(positions):
+def drawdown(positions, capital=0.0):
     """The equity curve over closed trades, oldest first: its peak, its
-    worst fall from a peak, and how far below the peak it is now."""
+    worst fall from a peak, and how far below the peak it is now.
+
+    And the DEEPEST OPEN DRAWDOWN: the same curve, but each trade taken
+    at its worst point while it was still open (its MAE, `trough_pnl`)
+    rather than where it closed - the low the account actually went
+    through. A trade that dipped to -$233 and closed at -$91 was a $233
+    fall, not a $91 one. Each trade is counted from the closed P&L
+    before it; trades open at the same time are counted one at a time,
+    so it is the deepest any ONE trade took the account. Against
+    `capital` (the capital managed) as a %, where it is set."""
     closed = sorted((r for r in positions or ()
                      if r.get('closed_at') is not None
                      and _pnl(r) is not None),
                     key=lambda r: r['closed_at'])
     if not closed:
         return {'trades': 0, 'max': None, 'max_pct': None, 'current': None,
-                'peak_equity': None, 'worst_trade': None, 'best_trade': None}
+                'peak_equity': None, 'worst_trade': None, 'best_trade': None,
+                'max_pct_capital': None, 'open_max': None,
+                'open_max_pct_capital': None, 'open_max_trade': None}
     peak = running = worst = 0.0
+    deepest, deepest_row = None, None
     for row in closed:
+        trough = row.get('trough_pnl')
+        if trough is not None and float(trough) < 0:
+            fall = peak - (running + float(trough))
+            if deepest is None or fall > deepest:
+                deepest, deepest_row = fall, row
         running += _pnl(row)
         peak = max(peak, running)
         worst = max(worst, peak - running)
     current = max(0.0, peak - running)
+    capital = float(capital or 0.0)
+
+    def on_capital(money):
+        return (round(100.0 * money / capital, 2)
+                if capital > 0 and money is not None else None)
+    deepest = None if deepest is None else round(max(deepest, worst), 2)
     return {'trades': len(closed), 'max': round(worst, 2),
+            'max_pct_capital': on_capital(worst),
+            'open_max': deepest,
+            'open_max_pct_capital': on_capital(deepest),
+            'open_max_trade': None if deepest_row is None else {
+                'position_id': deepest_row.get('position_id'),
+                'pair_key': deepest_row.get('pair_key'),
+                'side': deepest_row.get('side'),
+                'closed_at': deepest_row.get('closed_at'),
+                'trough_pnl': round(float(deepest_row['trough_pnl']), 2),
+                'pnl': round(_pnl(deepest_row), 2)},
             'max_pct': (round(100.0 * worst / peak, 1) if peak else None),
             'current': round(current, 2), 'peak_equity': round(peak, 2),
             'equity': round(running, 2),
             'worst_trade': round(min(_pnl(r) for r in closed), 2),
             'best_trade': round(max(_pnl(r) for r in closed), 2)}
+
+
+def _num(value, places=4):
+    """A spread price as the screen prints it, or None.
+
+    Trailing zeros are trimmed back to two decimals: an oil spread is
+    quoted in cents and `71.4000` reads as four digits of precision
+    this system does not have, while an FX spread genuinely needs them.
+    """
+    if value is None:
+        return None
+    try:
+        text = f'{float(value):,.{places}f}'
+    except (TypeError, ValueError):
+        return None
+    if '.' not in text:
+        return text
+    whole, _, decimals = text.partition('.')
+    decimals = decimals.rstrip('0')
+    while len(decimals) < 2:
+        decimals += '0'
+    return f'{whole}.{decimals}'
+
+
+def _lots(leg):
+    """One leg's volume, or None. `leg` is the stored JSON dict."""
+    if not isinstance(leg, dict):
+        return None
+    volume = leg.get('volume')
+    return None if volume is None else float(volume)
+
+
+#: The exit reasons the Algo itself signals, and which level each one
+#: was measured against. Anything else - a cutoff, a kill, a close by
+#: hand, a force-clear - is not a level being touched and is left in
+#: its own words.
+_LEVEL_OF_EXIT = (('stop loss', 'sl'), ('profit target', 'tp'))
+
+
+def exit_columns(row):
+    """WHY this trade ended, as COLUMNS rather than a sentence.
+
+    'Algo: stop loss' on its own does not say what the stop was, how it
+    was arrived at, or how far past it the close went - which is the
+    difference between a stop that was hit and a stop that was set in
+    the wrong place. These were written as one prose line under each
+    row first; a journal is a table, and numbers that matter belong in
+    columns where they line up down the page and can be compared at a
+    glance.
+
+    The levels are the ones the position was last judged against. A
+    trade closed before they were kept has none and says so, rather
+    than guessing a level from today's settings.
+    """
+    levels = row.get('exit_levels') or {}
+    reason = (row.get('close_reason') or '').lower()
+    side = row.get('side')
+    sign = 1.0 if side == 'BUY' else -1.0
+    which = None
+    for words, name in _LEVEL_OF_EXIT:
+        if words in reason:
+            which = name
+    out = {'break_even': levels.get('break_even'),
+           'tp': levels.get('tp'), 'sl': levels.get('sl'),
+           # Which level this exit was measured against, so the screen
+           # can mark that one cell rather than all three.
+           'on_level': which,
+           'sized_by': _how_the_level_was_set(which, levels)
+           if which else None,
+           'level_money': (levels.get('sl_money') if which == 'sl' else
+                           levels.get('tp_money') if which == 'tp' else None),
+           'gap': None, 'gap_word': None, 'note': None}
+    level = levels.get(which) if which else None
+    exit_spread = row.get('exit_spread')
+    if which and level is None:
+        out['note'] = ('the level it was measured against was not '
+                       'recorded \u2014 kept from this version on')
+    elif which and exit_spread is not None:
+        past = sign * (float(exit_spread) - float(level))
+        past = past if which == 'tp' else -past
+        out['gap'] = round(abs(past), 6)
+        out['gap_word'] = 'past' if past >= 0 else 'short of'
+    return out
+
+
+def _how_the_level_was_set(which, levels):
+    """The SETTING behind a stop or a target, in its own numbers."""
+    mode = levels.get('stop_mode' if which == 'sl' else 'target_mode')
+    if mode == 'ATR':
+        mult = levels.get('atr_stop_mult' if which == 'sl'
+                          else 'atr_target_mult')
+        atr = levels.get('entry_atr')
+        if mult is not None and atr is not None:
+            return f'{mult:g} \u00d7 ATR {_num(atr)}'
+        return 'ATR at entry, not measured'
+    pct = levels.get('stop_loss_pct' if which == 'sl' else 'tp_pct')
+    margin = levels.get('entry_margin')
+    if pct is None:
+        return None
+    said = f'{float(pct):g}% of margin'
+    if margin is not None:
+        said += f' ({margin:,.2f}/spread)'
+    return said
 
 
 def excursion_row(row):
@@ -325,6 +539,14 @@ def excursion_row(row):
             'source': row.get('source') or 'MANUAL',
             'closed_at': row.get('closed_at'),
             'exit_reason': row.get('close_reason'),
+            # Entry, exit and the size are NOT repeated here: the
+            # trade journal below carries them for the same trades, and
+            # one page saying the same thing twice is one page nobody
+            # reads twice. This table is about the EXTREMES.
+            'entry_spread': row.get('entry_spread'),
+            'exit_spread': row.get('exit_spread'),
+            'lots_a': _lots(row.get('leg_a')),
+            'lots_b': _lots(row.get('leg_b')),
             'mae': None if mae is None else round(mae, 2),
             'mfe': None if mfe is None else round(mfe, 2),
             'pnl': None if pnl is None else round(pnl, 2),
@@ -333,7 +555,10 @@ def excursion_row(row):
                                 if mfe and pnl is not None and pnl > 0
                                 else None),
             'peak_min': row.get('peak_min'),
-            'trough_min': row.get('trough_min')}
+            'trough_min': row.get('trough_min'),
+            # The margin BOTH legs tied up at entry: the worst and best
+            # points read on it, as the TP % and SL % are set on it.
+            'margin': returns(row, pnl)['margin']}
 
 
 def excursion_rows(positions):
@@ -345,6 +570,71 @@ def excursion_rows(positions):
             and (r.get('peak_pnl') is not None
                  or r.get('trough_pnl') is not None)]
     return sorted(rows, key=lambda r: -(r['closed_at'] or 0))
+
+
+#: The stops the winners' worst points are tried against, in % of the
+#: margin both legs tied up (the base the desk's SL % is set on).
+STOP_STUDY_PCTS = (0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0)
+
+
+def stop_study(positions, capital=0.0, levels=STOP_STUDY_PCTS):
+    """WHERE A STOP WOULD HAVE COST LEAST, from the trades themselves.
+
+    Every closed trade with its worst point (MAE) and its margin: how far
+    it went against, as a % of its margin and in spread points. Then,
+    for each stop level, what it would have done to THESE trades: a
+    trade that went that far against would have been stopped there -
+    net -(level x its margin) - instead of closing where it did. That
+    cuts the winners that dipped that far and caps the losers.
+
+    The stop is assumed filled AT its level and nothing after it is
+    changed: a real stop in a spike fills worse, so the savings are a
+    best case and the cost of cutting winners is exact.
+    """
+    capital = float(capital or 0.0)
+    trades = []
+    for row in positions or ():
+        pnl = _pnl(row)
+        trough = row.get('trough_pnl')
+        margin = returns(row, pnl)['margin'] if pnl is not None else None
+        if row.get('closed_at') is None or pnl is None or trough is None \
+                or not margin:
+            continue
+        mae = max(0.0, -float(trough))
+        units = row.get('spread_units')
+        trades.append({'pnl': pnl, 'margin': float(margin), 'mae': mae,
+                       'mae_pct': 100.0 * mae / float(margin),
+                       'mae_points': (mae / float(units) if units else None)})
+    winners = [t for t in trades if t['pnl'] > 0]
+    losers = [t for t in trades if t['pnl'] <= 0]
+
+    def spread_of(values):
+        values = sorted(values)
+        if not values:
+            return None
+        return {'median': round(percentile(values, 50), 2),
+                'p75': round(percentile(values, 75), 2),
+                'p90': round(percentile(values, 90), 2),
+                'max': round(values[-1], 2)}
+    rows = []
+    for level in levels:
+        hit = [t for t in trades if t['mae_pct'] >= level]
+        change = sum(-level / 100.0 * t['margin'] - t['pnl'] for t in hit)
+        rows.append({
+            'pct_margin': level,
+            'winners_cut': sum(1 for t in hit if t['pnl'] > 0),
+            'losers_stopped': sum(1 for t in hit if t['pnl'] <= 0),
+            'net_change': round(change, 2),
+            'net_change_pct_capital': (round(100.0 * change / capital, 2)
+                                       if capital > 0 else None)})
+    return {'trades': len(trades), 'winners': len(winners),
+            'losers': len(losers),
+            'winners_mae_pct': spread_of([t['mae_pct'] for t in winners]),
+            'winners_mae_points': spread_of(
+                [t['mae_points'] for t in winners
+                 if t['mae_points'] is not None]),
+            'losers_mae_pct': spread_of([t['mae_pct'] for t in losers]),
+            'levels': rows}
 
 
 def percentile(values, pct):
@@ -382,7 +672,7 @@ def calibration(positions):
                                        else round(hold, 1))}
 
 
-def journal(positions, entry_z=None, exit_z=None):
+def journal(positions, entry_z=None, exit_z=None, capital=0.0):
     """Every closed round trip, newest first, with a running total in
     the order they closed. `entry_z` / `exit_z` map position id to the
     Algo's z at that end (manual trades have none)."""
@@ -391,21 +681,27 @@ def journal(positions, entry_z=None, exit_z=None):
     closed = sorted((r for r in positions or ()
                      if r.get('closed_at') is not None),
                     key=lambda r: r['closed_at'])
-    running = 0.0
+    # None, not 0.0, until something has actually been priced - the
+    # same rule the rest of this file follows. A first trade whose P&L
+    # could not be read used to print a running total of $0.00, which
+    # reads as 'it broke even' rather than as 'nobody measured it'.
+    running = None
     out = []
     for row in closed:
         pnl = _pnl(row)
         if pnl is not None:
-            running += pnl
+            running = pnl + (running or 0.0)
         legs = {}
         for leg in ('a', 'b'):
             fill = row.get('leg_' + leg) or {}
             legs[leg] = {'side': fill.get('side'),
                          'volume': fill.get('volume'),
                          'entry': fill.get('price'),
+                         'exit': fill.get('exit_price'),
                          'symbol': fill.get('symbol')}
         opened = row.get('opened_at')
         gross = _gross(row)
+        based = returns(row, pnl)
         out.append({
             'position_id': row.get('position_id'),
             'pair_key': row.get('pair_key'), 'side': row.get('side'),
@@ -420,17 +716,142 @@ def journal(positions, entry_z=None, exit_z=None):
             'exit_z': exit_z.get(row.get('position_id')),
             'leg_a': legs['a'], 'leg_b': legs['b'],
             'exit_reason': row.get('close_reason'),
+            # ...and the NUMBERS behind that reason, as their own
+            # columns: the three levels, which one it came off on, the
+            # setting that put it there, and how far past it the close
+            # went. 'Algo: stop loss' alone cannot tell a stop that was
+            # hit from a stop that was in the wrong place.
+            'exit': exit_columns(row),
             'pnl': None if pnl is None else round(pnl, 2),
+            **based,
+            **on_capital(pnl, based['margin'], based['notional'], capital),
             # The spread's move times k, before commission; the fees
             # are what lies between that and the net. Either is None
             # when a side of it was not measured.
             'gross_pnl': None if gross is None else round(gross, 2),
             'fees': (None if gross is None or pnl is None
                      else round(gross - pnl, 2)),
-            'cum_pnl': round(running, 2)})
+            'cum_pnl': None if running is None else round(running, 2)})
     out.reverse()
     return out
 
+
+def trade_numbers(positions):
+    """TRADE NO: every closed trade on the desk's record, numbered in the
+    order it closed - #1 the first ever. Taken over the WHOLE record, so a
+    trade keeps its number whatever window or ladder the tab is showing.
+    {position id: number}."""
+    closed = sorted((r for r in positions or ()
+                     if r.get('closed_at') is not None),
+                    key=lambda r: (r['closed_at'], str(r.get('position_id'))))
+    return {r.get('position_id'): i for i, r in enumerate(closed, 1)}
+
+
+def number_journal(journal, numbers):
+    """Each journal row's Trade no, from `trade_numbers`."""
+    for row in journal or ():
+        row['trade_no'] = numbers.get(row.get('position_id'))
+    return journal
+
+
+def number_trades(body, numbers):
+    """The same Trade no on every table of trades: the journal and the
+    worst / best points."""
+    for key in ('journal', 'excursion'):
+        number_journal(body.get(key), numbers)
+    return body
+
+
+def _cost(values):
+    """MT5 books a charge as a NEGATIVE amount on the deal; a cost here
+    is positive. None when no deal carried the field at all."""
+    seen = [float(v) for v in values if v is not None]
+    # `+ 0.0`: a charge of nothing is 0.00, never '-0.00'.
+    return None if not seen else -sum(seen) + 0.0
+
+
+def attach_costs(journal, positions, fills):
+    """WHAT EACH ROUND TRIP COST, beside its P&L - for MT5, where there
+    is no maker / taker: the BID-ASK the trade paid, and the commission,
+    swap and any fee MT5 itself booked on the trade's deals.
+
+    - Bid-ask: the round turn of both legs' bid-ask frozen when the
+      position was first priced (`entry_width`), times its k
+      (`spread_units`, the whole size). It is ALREADY INSIDE the gross
+      P&L - the fills were at the bid and the offer - so it is shown as
+      what the market took, never subtracted again. None for a trade
+      priced before it was recorded.
+    - Commission, swap, fee: summed over the deals whose position ticket
+      is one of the trade's legs' tickets, each deal counted once. A
+      trade whose deals are not in the journal keeps the desk's own
+      commission estimate (gross less net), said as one ('estimate'),
+      and its swap is unmeasured - never 0.
+
+    Then the totals over the window. Returns the tally."""
+    by_ticket = {}
+    for f in fills or ():
+        ticket = f.get('position_ticket')
+        if ticket not in (None, ''):
+            by_ticket.setdefault(str(ticket), []).append(f)
+    of = {p.get('position_id'): p for p in positions or ()}
+    tally = {'bid_ask': 0.0, 'bid_ask_trades': 0, 'commission': 0.0,
+             'swap': 0.0, 'fee': 0.0, 'measured': 0, 'estimated': 0,
+             'trades': 0, 'deals': 0}
+    for row in journal or ():
+        position = of.get(row.get('position_id')) or {}
+        width = position.get('entry_width')
+        units = position.get('spread_units')
+        row['bid_ask_points'] = None if width is None else float(width)
+        row['bid_ask'] = (None if width is None or not units
+                          else round(float(width) * float(units), 2))
+        seen, deals = set(), []
+        for leg in ('a', 'b'):
+            for t in ((position.get('leg_' + leg) or {})
+                      .get('position_tickets') or ()):
+                for f in by_ticket.get(str(t), ()):
+                    key = (f.get('account'), f.get('deal_id'))
+                    if key not in seen:
+                        seen.add(key)
+                        deals.append(f)
+        row['deals'] = len(deals)
+        if deals:
+            commission = _cost(f.get('commission') for f in deals)
+            row['commission'] = round(commission or 0.0, 2)
+            swap = _cost(f.get('swap') for f in deals)
+            row['swap'] = None if swap is None else round(swap, 2)
+            fee = _cost(f.get('fee') for f in deals)
+            row['fee'] = None if fee is None else round(fee, 2)
+            row['costs_source'] = 'MT5'
+        else:
+            row['commission'] = row.get('fees')
+            row['swap'] = row['fee'] = None
+            row['costs_source'] = (None if row['commission'] is None
+                                   else 'estimate')
+        charges = [row['commission'], row['swap'], row['fee']]
+        row['charges'] = (None if row['commission'] is None else
+                          round(sum(c for c in charges if c is not None), 2))
+        row['round_trip'] = (None if row['bid_ask'] is None
+                             or row['charges'] is None
+                             else round(row['bid_ask'] + row['charges'], 2))
+        if row['bid_ask'] is not None:
+            tally['bid_ask'] += row['bid_ask']
+            tally['bid_ask_trades'] += 1
+        if row['costs_source'] is not None:
+            tally['trades'] += 1
+            tally['commission'] += row['commission']
+            if row['costs_source'] == 'MT5':
+                tally['measured'] += 1
+                tally['deals'] += len(deals)
+                tally['swap'] += row['swap'] or 0.0
+                tally['fee'] += row['fee'] or 0.0
+            else:
+                tally['estimated'] += 1
+    for key in ('bid_ask', 'commission', 'swap', 'fee'):
+        tally[key] = round(tally[key], 2)
+    tally['charges'] = round(tally['commission'] + tally['swap'] +
+                             tally['fee'], 2)
+    tally['round_trip'] = round(tally['bid_ask'] + tally['charges'], 2)
+    return tally
 
 def algo_z(events):
     """(entry_z, exit_z) by position id, from the Algo's own audit trail.
@@ -460,15 +881,136 @@ def algo_z(events):
     return entry, exit_
 
 
-def report(positions, events=(), shadows=(), excursions=None, now=0.0):
-    """Everything the tab shows, from what is recorded."""
+def report(positions, events=(), shadows=(), excursions=None, now=0.0,
+           capital=0.0):
+    """Everything the tab shows, from what is recorded. `capital`: what
+    the trader manages (CAPITAL_MANAGED), 0 when not set."""
     positions = list(positions or ())
     entry_z, exit_z = algo_z(events)
-    return {'summary': summary(positions),
-            'drawdown': drawdown(positions),
+    return {'summary': summary(positions, capital),
+            'drawdown': drawdown(positions, capital),
+            'stop_study': stop_study(positions, capital),
             'excursion': excursion_rows(positions),
             'calibration': calibration(positions),
             'shadow': shadow_summary(shadows),
             'z_excursions': {key: excursions_view(data, now)
                              for key, data in (excursions or {}).items()},
-            'journal': journal(positions, entry_z, exit_z)}
+            'journal': journal(positions, entry_z, exit_z, capital)}
+
+
+#: The windows the volume is counted over: the broker's own TODAY, and
+#: the last 7 and 30 days rolling.
+NOTIONAL_PERIODS = (('today', 'Today'), ('7d', 'Last 7 days'),
+                    ('30d', 'Last 30 days'))
+
+
+def contract_sizes(pairs=None, positions=()):
+    """{(account, symbol): contract size} - what one LOT is, per leg.
+
+    The ladders' own sizes first (MT5's, or the trader's override, as
+    the engine publishes them); then the size frozen on each recorded
+    position's legs, so a ladder deleted since still prices its fills.
+    """
+    sizes = {}
+    for row in positions or ():
+        for leg in (row.get('leg_a'), row.get('leg_b')):
+            leg = leg or {}
+            size = leg.get('contract_size')
+            if size and leg.get('account') and leg.get('symbol'):
+                sizes[(leg['account'], leg['symbol'])] = float(size)
+    for pair in (pairs or {}).values():
+        for side in ('a', 'b'):
+            size = pair.get(f'contract_size_{side}')
+            account, symbol = pair.get(f'account_{side}'), \
+                pair.get(f'symbol_{side}')
+            if size and account and symbol:
+                sizes[(account, symbol)] = float(size)
+    return sizes
+
+
+def notional_traded(fills, sizes, now, date=None, date_ms=None):
+    """Notional volume traded - lots x contract size x price, per deal -
+    today, over the last 7 days and over the last 30, and over a picked
+    range of the broker's days (`date` its label): per ladder, per
+    account, and in all, from the BROKER's own deals.
+
+    Each deal is placed in time on the broker's stamp less that
+    broker's offset from UTC; "today" and a picked date are the broker's
+    own days, as its terminal shows them. A deal whose contract size is
+    not known is COUNTED, not priced: unmeasured is not zero, and the
+    screen says how many there were rather than leaving them out of a
+    total.
+
+    `date_ms` is the picked range, (start, end) with the end exclusive,
+    on the broker's clock as its stamps are written (the caller reads it
+    off the two picked days).
+    """
+    offset = None
+    for fill in fills:
+        if fill.get('server_offset_s') is not None:
+            offset = float(fill['server_offset_s'])
+            break
+    offset = offset or 0.0
+    broker_now = now + offset
+    day_start = broker_now - broker_now % 86400.0 - offset
+    since = {'today': day_start, '7d': now - 7 * 86400.0,
+             '30d': now - 30 * 86400.0}
+    periods = list(NOTIONAL_PERIODS)
+    if date:
+        periods.append(('date', date))
+
+    def in_period(period, at, stamp):
+        if period == 'date':
+            return date_ms is not None and \
+                date_ms[0] <= stamp < date_ms[1]
+        return at >= since[period]
+
+    def cell():
+        return {'notional': 0.0, 'lots': 0.0, 'fills': 0, 'unpriced': 0,
+                'a': 0.0, 'b': 0.0}
+
+    def cells():
+        return {k: cell() for k, _ in periods}
+
+    by_pair, by_account, total = {}, {}, cells()
+    for fill in fills:
+        stamp = fill.get('broker_time_ms')
+        if stamp is None:
+            continue
+        at = stamp / 1000.0 - float(fill.get('server_offset_s') or 0)
+        volume = abs(float(fill.get('volume') or 0.0))
+        price = fill.get('price')
+        size = sizes.get((fill.get('account'), fill.get('symbol')))
+        notional = (volume * size * abs(float(price))
+                    if size and price is not None else None)
+        pair = by_pair.setdefault(fill.get('pair_key') or '(no ladder)',
+                                  cells())
+        account = by_account.setdefault(fill.get('account') or '?', cells())
+        leg = (fill.get('leg') or '').lower()
+        for period, _label in periods:
+            if not in_period(period, at, stamp):
+                continue
+            for target in (pair[period], account[period], total[period]):
+                target['fills'] += 1
+                target['lots'] += volume
+                if notional is None:
+                    target['unpriced'] += 1
+                    continue
+                target['notional'] += notional
+                if leg in ('a', 'b'):
+                    target[leg] += notional
+    groups = list(by_pair.values()) + list(by_account.values()) + [total]
+    for group in groups:
+        for c in group.values():
+            for name in ('notional', 'lots', 'a', 'b'):
+                c[name] = round(c[name], 2)
+
+    def listed(rows, key):
+        return [dict(c, **{key: name}) for name, c in sorted(rows.items())
+                if any(c[p]['fills'] for p, _ in periods)]
+
+    return {'periods': [{'key': k, 'label': label} for k, label in periods],
+            'date': date,
+            'rows': listed(by_pair, 'pair_key'),
+            'accounts': listed(by_account, 'account'),
+            'total': total}

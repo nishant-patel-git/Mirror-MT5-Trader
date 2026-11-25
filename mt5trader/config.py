@@ -312,6 +312,10 @@ DEFAULT_SETTINGS = {
     #: break-even alone. Nothing is ever SENT to the broker from it: it
     #: is a price on the screen, and no leg carries a broker-side stop.
     'TP_TARGET_PCT_OF_MARGIN': 2.0,
+    #: The capital the desk manages, in the accounts' currency. Every
+    #: "on capital" figure on the Analysis tab and its printed report
+    #: reads against it; 0 is not set, and those figures are a dash.
+    'CAPITAL_MANAGED': 0.0,
     #: How often the margin for one spread is re-priced from the
     #: terminals. It moves with the price, but slowly.
     'MARGIN_TTL_SEC': 60.0,
@@ -385,10 +389,31 @@ class AccountConfig:
     @classmethod
     def from_dict(cls, name, raw):
         raw = raw or {}
-        return cls(name, terminal_path=raw.get('terminal_path'),
+        # Cleaned on the way in: a path saved with the quotes Windows'
+        # "Copy as path" adds is still a path, and every part of the
+        # engine reads it from here.
+        return cls(name, terminal_path=(
+                       clean_terminal_path(raw.get('terminal_path')) or None),
                    login=raw.get('login'),
                    password_env=raw.get('password_env'),
                    server=raw.get('server'), endpoint=raw.get('endpoint'))
+
+
+#: The most positions a ladder holds at once unless it says otherwise.
+DEFAULT_MAX_POSITIONS = 2
+
+
+def _clean_max_positions(value):
+    """Blank is the default of 2; 0 is off; anything else a whole
+    number of positions. A value that is not a number is the default -
+    never no limit by accident."""
+    if value in (None, ''):
+        return DEFAULT_MAX_POSITIONS
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_POSITIONS
+    return max(number, 0)
 
 
 class PairConfig:
@@ -405,7 +430,7 @@ class PairConfig:
                  hedge_ratio=1.0, hedge_ratio_for=None, pair_type='SPOT_FUTURE',
                  increment=None, clip_lots_a=1.0, clip_lots_b=1.0,
                  contract_size_a=None, contract_size_b=None,
-                 max_quote_age_sec=None,
+                 max_quote_age_sec=None, max_positions=None,
                  default_quantity=1.0, order_type=OrderType.LIMIT.value,
                  exit_type=OrderType.MARKET.value,
                  time_in_force=TimeInForce.DAY.value,
@@ -469,6 +494,10 @@ class PairConfig:
         #: slow pair refuses every order all day on a market that is
         #: merely quiet.
         self.max_quote_age_sec = _blank_to_none(max_quote_age_sec)
+        #: The most positions this ladder may hold at once, counting a
+        #: working order that would OPEN one. Blank is the default of
+        #: 2; 0 turns the limit off. Closes are never counted or held.
+        self.max_positions = _clean_max_positions(max_positions)
         self.default_quantity = float(default_quantity or 1.0)
         # Blank is the DEFAULT, never an exception: see `_choice`.
         self.order_type = _choice(OrderType, order_type,
@@ -702,7 +731,7 @@ class PairConfig:
                    # never typed: it is the hedge, and it is derived.
                    'clip_lots_a', 'clip_lots_b',
                    'contract_size_a', 'contract_size_b',
-                   'max_quote_age_sec',
+                   'max_quote_age_sec', 'max_positions',
                    'algo_window', 'show_fair_window', 'pair_type',
                    'algo_params',
                    'session_open', 'session_close',
@@ -754,6 +783,8 @@ class PairConfig:
                 value = int(value or 30)
             elif field == 'max_quote_age_sec':
                 value = _blank_to_none(value)
+            elif field == 'max_positions':
+                value = _clean_max_positions(value)
             elif field in ('contract_size_a', 'contract_size_b'):
                 # Blank is MT5's own, which is the right answer almost
                 # always. Never 1: a contract size of 1 would price
@@ -779,6 +810,7 @@ class PairConfig:
             'contract_size_a': self.contract_size_a,
             'contract_size_b': self.contract_size_b,
             'max_quote_age_sec': self.max_quote_age_sec,
+            'max_positions': self.max_positions,
             'default_quantity': self.default_quantity,
             'order_type': self.order_type.value,
             'exit_type': self.exit_type.value,
@@ -1015,6 +1047,110 @@ def login_clash(raw, name, login):
     return None
 
 
+#: The file an account's MetaTrader 5 is launched from.
+TERMINAL_EXE = 'terminal64.exe'
+
+
+def clean_terminal_path(value):
+    """A terminal path as it was typed or pasted, made into a path.
+
+    Windows' "Copy as path" wraps what it copies in double quotes, and
+    a path pasted from it was saved with them: the file was exactly
+    where the path said, and the desk still would not start, because
+    Windows was asked for a file whose name begins with a quote. So the
+    whitespace and any matching quotes around the path come off, here,
+    where every reader of the path goes through.
+    """
+    text = str(value or '').strip()
+    while len(text) >= 2 and text[0] == text[-1] and text[0] in '"\'':
+        text = text[1:-1].strip()
+    return text
+
+
+def terminal_file(value):
+    """The terminal64.exe a typed path means.
+
+    A FOLDER that holds terminal64.exe means that file: "the MetaTrader
+    folder" is what a person picks, and asking them to know which file
+    inside it to name is asking a trader to do a technician's job.
+    """
+    path = clean_terminal_path(value)
+    if path and os.path.isdir(path):
+        inside = os.path.join(path, TERMINAL_EXE)
+        if os.path.isfile(inside):
+            return inside
+    return path
+
+
+def terminal_missing(value):
+    """Why this account's MetaTrader 5 cannot be launched, in words that
+    say what to do - or None when it can.
+
+    Blank is NOT missing: it means attach to whichever terminal is
+    already open, which is a choice.
+    """
+    path = clean_terminal_path(value)
+    if not path:
+        return None
+    if os.path.isfile(path):
+        return None
+    if os.path.isdir(path):
+        return (f"{path} is a folder with no {TERMINAL_EXE} in it. Pick "
+                f"this account's MetaTrader 5 from the list of the ones "
+                f"installed on this PC.")
+    return (f"There is no MetaTrader 5 at {path}. Pick this account's "
+            f"MetaTrader 5 from the list of the ones installed on this PC, "
+            f"or correct the path.")
+
+
+def terminal_roots():
+    """Where a MetaTrader 5 is looked for on THIS PC: the Program Files
+    folders, and the top of the drive - where a second, portable copy
+    usually sits (C:\\MT5-A). None of it off Windows."""
+    if os.name != 'nt':
+        return []
+    roots = []
+    for key in ('ProgramFiles', 'ProgramW6432', 'ProgramFiles(x86)'):
+        folder = os.environ.get(key)
+        if folder and folder not in roots:
+            roots.append(folder)
+    drive = os.environ.get('SystemDrive', 'C:') + os.sep
+    if drive not in roots:
+        roots.append(drive)
+    return roots
+
+
+def find_terminals(raw=None, roots=None):
+    """Every MetaTrader 5 installed on this PC, for a person to PICK
+    rather than type: each folder one level under each root that holds
+    terminal64.exe, with the account already using it, if any.
+
+    One level and no deeper, on purpose: it is read every time the page
+    opens, and a walk of a whole drive is not.
+    """
+    roots = terminal_roots() if roots is None else roots
+    used = {}
+    for name, acct in ((raw or {}).get('accounts') or {}).items():
+        path = clean_terminal_path((acct or {}).get('terminal_path'))
+        if path:
+            used[os.path.normcase(os.path.normpath(path))] = name
+    found, seen = [], set()
+    for root in roots:
+        try:
+            children = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for child in children:
+            path = os.path.join(root, child, TERMINAL_EXE)
+            key = os.path.normcase(os.path.normpath(path))
+            if key in seen or not os.path.isfile(path):
+                continue
+            seen.add(key)
+            found.append({'path': path, 'folder': child,
+                          'used_by': used.get(key)})
+    return found
+
+
 def terminal_clash(raw, name, path):
     """One account needs one PORT, one LOGIN and one TERMINAL.
 
@@ -1023,13 +1159,15 @@ def terminal_clash(raw, name, path):
     trade whatever it happens to be signed into, and the pair hedges
     against itself.
     """
-    path = (path or '').strip()
+    path = clean_terminal_path(path)
     if not path:
         return None                # blank = attach to whatever is open
     for other, acct in (raw.get('accounts') or {}).items():
         if other == name:
             continue
-        if ((acct or {}).get('terminal_path') or '').strip().lower() \
+        # Cleaned on both sides: one copy quoted and one not is still
+        # ONE installation.
+        if clean_terminal_path((acct or {}).get('terminal_path')).lower() \
                 == path.lower():
             return (f"Account '{other}' already uses this MT5 installation. "
                     f"One terminal serves ONE login, so both legs would end "
@@ -1037,6 +1175,33 @@ def terminal_clash(raw, name, path):
                     f"MetaTrader 5 in its own folder (or use a portable "
                     f"copy) and point this account at that one.")
     return None
+
+
+def engine_hold_reasons(raw):
+    """Why the launcher will not run the ENGINE on this config, one line
+    per problem in words, or [].
+
+    ONE list, read by two processes: the launcher, which holds the
+    engine on it (`start.check_config`), and the web screen, which says
+    WHY on the status line - so a person looking at a screen that is
+    not trading is told what to fix and where, instead of "ENGINE DOWN".
+    """
+    problems = []
+    for name, account in (raw.get('accounts') or {}).items():
+        account = account or {}
+        endpoint = (account.get('endpoint') or '').strip()
+        for problem in (endpoint_clash(raw, name, endpoint),
+                        login_clash(raw, name, account.get('login')),
+                        terminal_clash(raw, name,
+                                       account.get('terminal_path')),
+                        # A MetaTrader 5 that is not where the account
+                        # says. Held with the screen UP - the Exchanges
+                        # page is where it is picked - not refused
+                        # before the screen exists.
+                        terminal_missing(account.get('terminal_path'))):
+            if problem:
+                problems.append(f"account '{name}': {problem}")
+    return problems
 
 
 def next_free_port(raw, host='127.0.0.1', first=9101):

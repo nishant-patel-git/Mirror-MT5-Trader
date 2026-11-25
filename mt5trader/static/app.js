@@ -43,6 +43,25 @@
     // is filtered to. The backtest's answer is kept here too, because
     // the pane is redrawn on every snapshot.
     analysis: null, analysisAt: 0, analysisDays: 7, analysisPair: '',
+    // NET P&L on the Analysis tab and its report: 'show', 'mask' (the
+    // column is there, the dollars are dots) or 'hide' (left out). The
+    // percentages stay. Per browser.
+    analysisPnl: (function () {
+      try {
+        return window.localStorage.getItem('mt5trader.analysisPnl') || 'show';
+      } catch (err) { return 'show'; }
+    }()),
+    // The SIGMA ZONE track's own range. A day by default: the rows are
+    // a tick-by-tick record, and a day of them is the usual read.
+    zoneDays: 1, zoneDate: '', deriving: false, deriveNote: null,
+    showUnconfirmed: false,
+    //: The notional table's own picked range of the broker's days,
+    //: both inclusive; either alone is that one day.
+    volumeFrom: '', volumeTo: '',
+    //: The pair charts: the last series read, when, and how much of
+    //: the session each one draws.
+    charts: {}, chartFetch: {}, chartTf: {}, chartHist: {},
+    chartHistFetch: {}, chartHistNote: {},
     analysisBt: null, analysisBtDays: 5,
     // What the Reconciler tab's adopt form has selected. IN STATE, not
     // in the DOM: that pane is re-rendered from innerHTML on every
@@ -143,10 +162,29 @@
       minimumFractionDigits: 2, maximumFractionDigits: 2});
   }
 
+  function toastStamp(at) {
+    /* WHEN, at the head of every box: a wall of alerts is a history,
+     * and a history with no times cannot be read in order. This PC's
+     * clock, date and time to the second. `at` is
+     * the engine's epoch seconds - the moment it happened, not the
+     * moment the page drew it. */
+    var when = typeof at === 'number' ? new Date(at * 1000) : new Date();
+    var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+    var time = pad(when.getHours()) + ':' + pad(when.getMinutes()) + ':' +
+      pad(when.getSeconds());
+    time = when.getFullYear() + '-' + pad(when.getMonth() + 1) + '-' +
+      pad(when.getDate()) + ' ' + time;
+    var stamp = document.createElement('span');
+    stamp.className = 'toast-time';
+    stamp.textContent = time;
+    return stamp;
+  }
+
   function toast(message, kind) {
     var box = document.createElement('div');
     box.className = 'toast' + (kind === 'ok' ? ' ok' : '');
     box.innerHTML = '<span class="dismiss">&times;</span>';
+    box.appendChild(toastStamp());
     box.appendChild(document.createTextNode(message));
     // Errors used to stay until dismissed, on purpose — so that a
     // refusal could not scroll past unread. But a refusal that REPEATS
@@ -213,7 +251,10 @@
     signal_entry: [{hz: 523, ms: 110, gain: 0.08}, {hz: 659, ms: 110, gain: 0.08},
                    {hz: 784, ms: 180, gain: 0.08}],
     signal_exit: [{hz: 784, ms: 110, gain: 0.08}, {hz: 659, ms: 110, gain: 0.08},
-                  {hz: 523, ms: 180, gain: 0.08}]
+                  {hz: 523, ms: 180, gain: 0.08}],
+    // A market about to open: a bell, two even strokes - nothing like
+    // a fill or a signal, so it is never mistaken for one.
+    session: [{hz: 988, ms: 220, gain: 0.07}, {hz: 988, ms: 220, gain: 0.07}]
   };
   var audio = null;
 
@@ -280,13 +321,14 @@
     }
   }
 
-  function stickyToast(message) {
+  function stickyToast(message, at) {
     /* A SIGNALS alert: it stays until the trader dismisses it. The
      * trade it asks for is theirs to make, so it must not scroll away
      * unread the way an ordinary outcome does. */
     var box = document.createElement('div');
     box.className = 'toast signal';
     box.innerHTML = '<span class="dismiss">&times;</span>';
+    box.appendChild(toastStamp(at));
     box.appendChild(document.createTextNode(message));
     box.addEventListener('click', function () { box.remove(); });
     el('toasts').appendChild(box);
@@ -310,7 +352,7 @@
           typeof snapshot.at === 'number' && snapshot.at - alert.at > 30) {
         return;                       // on load, and not fresh: seen
       }
-      stickyToast((row.name || key) + ': ' + alert.text);
+      stickyToast((row.name || key) + ': ' + alert.text, alert.at);
       sound(alert.kind === 'ENTRY' ? 'signal_entry' : 'signal_exit');
       // The ladder's frame flashes - only if its window is open.
       var node = document.querySelector(
@@ -408,6 +450,8 @@
     return node.classList.contains('market-grid') ? panelId('grid')
       : node.classList.contains('monitor') ? panelId('monitor')
         : node.classList.contains('settings') ? panelId('settings')
+          : node.classList.contains('chartwin')
+            ? panelId('chart', node.dataset.pair)
           : node.classList.contains('fairwin')
             ? panelId('fair', node.dataset.pair)
             : node.classList.contains('algowin')
@@ -577,9 +621,18 @@
     // the desk has been scrolled sideways.
     var origin = desktopOrigin();
     if (!desktop.width) { return; }
-    var wanted = size(node,
-                      Math.min(1180, Math.max(desktop.width - 80, 320)),
-                      Math.min(560, Math.max(desktop.height - 80, 200)));
+    // THE SIZE IS THE ROOM THERE IS, not a flat 1180 x 560.
+    //
+    // A tool window opened at 560px on a 900px screen left a third of
+    // the display as bare desktop below it while the Analysis tab -
+    // which is several screens long - scrolled inside a short box.
+    // The width was capped at 1180 on the reasoning that a wider
+    // table is read by scrolling anyway; the journals put the levels
+    // in columns and are 17 wide, so on a 1800px desk that cap threw
+    // away 500px of screen the trader had. Both ceilings are now the
+    // desk's own size, less a margin.
+    var wanted = size(node, Math.max(desktop.width - 80, 320),
+                      Math.max(desktop.height - 80, 200));
     // Stepped down and across so a second and third one do not land
     // exactly on top of the first.
     // Beside the tiled ladders where there is room for it, so opening
@@ -600,8 +653,13 @@
                        Math.max(desktop.height - wanted.h - 8, 0));
     var at = place(node, left, top);
     node.style.zIndex = nextZ();
+    // `auto`: this size was CHOSEN BY US, not by the trader. A size
+    // the trader dragged is theirs and is restored exactly; one we
+    // picked is recomputed on every open, so a saved default from a
+    // smaller screen - or from before this default grew - does not
+    // leave a strip of bare desktop under the window for good.
     layout[id] = {left: at.left, top: at.top, z: topZ,
-                  w: wanted.w, h: wanted.h};
+                  w: wanted.w, h: wanted.h, auto: true};
     writeLayout();
   }
 
@@ -629,6 +687,26 @@
     writeLayout();
   }
 
+  function chartFloatByDefault(node, id) {
+    /* A chart is wide and short: two plots one above the other, beside
+     * the ladders where there is room, stepped so a second one does
+     * not land on the first. Dragged and resized like anything else. */
+    var desktop = desktopBox();
+    if (!desktop.width) { return; }
+    var wanted = size(node, Math.min(660, desktop.width - 16),
+                      Math.min(520, desktop.height - 16));
+    var open = document.querySelectorAll('.window.chartwin').length;
+    var left = Math.max(el('desktop').scrollLeft + desktop.width -
+                        wanted.w - 12 - (open - 1) * 24, 8);
+    var top = Math.min(30 + (open - 1) * 24,
+                       Math.max(desktop.height - wanted.h - 8, 0));
+    var at = place(node, left, top);
+    node.style.zIndex = nextZ();
+    layout[id] = {left: at.left, top: at.top, z: topZ,
+                  w: wanted.w, h: wanted.h, auto: false};
+    writeLayout();
+  }
+
   function applyLayout(node) {
     /* Put a window back where it was left. Called for every window on
      * every render, because panels are created lazily — the monitor
@@ -648,9 +726,26 @@
                node.classList.contains('algowin')) {
         fairFloatByDefault(node, id);
       }
+      else if (node.classList.contains('chartwin')) {
+        chartFloatByDefault(node, id);
+      }
       return;
     }
-    if (saved.w && saved.h) { size(node, saved.w, saved.h); }
+    // `!== false`, not `=== true`: a layout saved before this flag
+    // existed has neither, and it is far more likely to be the old
+    // 560px default than a size somebody chose. Those windows take
+    // the room there is once, and a drag after that is remembered.
+    if (saved.auto !== false && FLOATING_BY_DEFAULT.indexOf(id) >= 0) {
+      // Ours, not theirs: take the room there is now.
+      var desktop = desktopBox();
+      if (desktop.width) {
+        var fresh = size(node, Math.max(desktop.width - 80, 320),
+                         Math.max(desktop.height - 80, 200));
+        layout[id] = Object.assign({}, saved, {w: fresh.w, h: fresh.h});
+        writeLayout();
+      }
+    }
+    else if (saved.w && saved.h) { size(node, saved.w, saved.h); }
     else if (saved.w) {
       // Width remembered, height left to the content — what the fair
       // window is given until the trader drags it themselves.
@@ -668,7 +763,12 @@
     // Clamped on the way in as well as on the way out: a layout saved
     // on a big monitor must not hide a window on a laptop.
     if (at.left !== saved.left || at.top !== saved.top) {
-      layout[id] = {left: at.left, top: at.top, z: saved.z || 10};
+      // Moved back onto the screen, its SIZE kept: dropping it here
+      // shrank a tiled window to its default the first time it was
+      // pulled in from a bigger monitor's edge.
+      layout[id] = Object.assign({}, saved,
+                                 {left: at.left, top: at.top,
+                                  z: saved.z || 10});
       writeLayout();
     }
   }
@@ -681,6 +781,142 @@
     node.style.zIndex = nextZ();
     layout[id].z = topZ;
     writeLayout();
+  }
+
+  // -- Tidy: the desk tiled -------------------------------------------------
+  //
+  // One click lays every open window out edge to edge, filling the desk:
+  //
+  //   | ladder | ladder | Algo | Algo |  chart   |
+  //   |        |        |-------------|----------|
+  //   |        |        |   Monitor   |  chart   |
+  //
+  // Ladders full height on the left; the Algo windows beside them with
+  // the Trading Monitor under them across the same width; charts, the
+  // fair-value window and any other tool stacked down the right, sharing
+  // the height. Every window gets its place and size in the layout, so
+  // the arrangement is saved like one made by hand. LAYOUT ONLY: nothing
+  // here reads or sends an order.
+
+  //: The gap between tiled windows.
+  var TILE_GAP = 2;
+  //: The width a ladder and an Algo window are given.
+  var TILE_LADDER_W = 380;
+  var TILE_ALGO_W = 380;
+  //: The Monitor's width when there is no Algo window over it.
+  var TILE_MONITOR_W = 760;
+  //: The least the right-hand column is given; past the screen's edge
+  //: the desk scrolls to it.
+  var TILE_RIGHT_MIN_W = 480;
+  //: The share of the height the Algo windows take over the Monitor.
+  var TILE_ALGO_SHARE = 0.62;
+  //: The most Tidy narrows the ladders and the middle column to fit
+  //: the charts on the screen: never below 85% of their width.
+  var TILE_MIN_SCALE = 0.85;
+  //: The least the middle column is given while the Monitor is in it:
+  //: its tables need the room, and the Algo windows widen to match.
+  var TILE_MIDDLE_MIN_W = 560;
+  //: How the right-hand column's height is shared: a chart is two plots
+  //: and takes twice the fair window's share.
+  var TILE_WEIGHT = {chart: 2, fair: 1, grid: 1.5, settings: 1.5};
+
+  function tileWindows() {
+    var desktop = el('desktop');
+    var W = desktop.clientWidth - 4, H = desktop.clientHeight - 4;
+    if (W <= 0 || H <= 0) { return tidyWindows(); }
+    var gap = TILE_GAP;
+    var groups = {ladder: [], algo: [], monitor: [], right: []};
+    Array.prototype.forEach.call(
+      document.querySelectorAll('#desktop > .window'), function (node) {
+        var kind = panelIdOf(node).split(':')[0];
+        if (kind === 'ladder') { groups.ladder.push(node); }
+        else if (kind === 'algo') { groups.algo.push(node); }
+        else if (kind === 'monitor') { groups.monitor.push(node); }
+        else { groups.right.push(node); }
+      });
+    // In the taskbar's order, so Tidy is the same every time.
+    function byTab(a, b) {
+      return state.open.indexOf(panelIdOf(a)) -
+        state.open.indexOf(panelIdOf(b));
+    }
+    Object.keys(groups).forEach(function (k) { groups[k].sort(byTab); });
+    state.maximized = {};
+    var placed = [];
+    function put(node, left, top, w, h) {
+      placed.push({node: node, left: Math.round(left), top: Math.round(top),
+                   w: Math.max(240, Math.round(w)),
+                   h: Math.max(120, Math.round(h))});
+    }
+    // EVERYTHING ON ONE SCREEN where it can be: with two ladders, two
+    // Algo windows and the charts, the right-hand column would start
+    // past the edge - so the ladders and the middle column give up to
+    // 15% of their width first.
+    var algos = groups.algo.length;
+    var middleW = algos ? algos * TILE_ALGO_W + (algos - 1) * gap
+      : (groups.monitor.length ? TILE_MONITOR_W : 0);
+    if (groups.monitor.length) {
+      middleW = Math.max(middleW, TILE_MIDDLE_MIN_W);
+    }
+    var ladderW = TILE_LADDER_W;
+    var leftW = groups.ladder.length * (ladderW + gap) +
+      (middleW ? middleW + gap : 0);
+    var wantRight = groups.right.length ? TILE_RIGHT_MIN_W : 0;
+    if (leftW + wantRight > W && leftW > 0) {
+      var scale = Math.max(TILE_MIN_SCALE, (W - wantRight) / leftW);
+      ladderW = Math.floor(ladderW * scale);
+      middleW = Math.floor(middleW * scale);
+    }
+    var x = 0;
+    groups.ladder.forEach(function (node) {
+      put(node, x, 0, ladderW, H);
+      x += ladderW + gap;
+    });
+    var algoW = algos ? (middleW - (algos - 1) * gap) / algos : 0;
+    var algoH = groups.monitor.length && algos
+      ? Math.round(H * TILE_ALGO_SHARE) : H;
+    groups.algo.forEach(function (node, i) {
+      put(node, x + i * (algoW + gap), 0, algoW, algoH);
+    });
+    groups.monitor.forEach(function (node) {
+      var top = algos ? algoH + gap : 0;
+      put(node, x, top, middleW, H - top);
+    });
+    if (middleW) { x += middleW + gap; }
+    var n = groups.right.length;
+    if (n) {
+      var rightW = Math.max(W - x, TILE_RIGHT_MIN_W);
+      var weights = groups.right.map(function (node) {
+        return TILE_WEIGHT[panelIdOf(node).split(':')[0]] || 1;
+      });
+      var total = weights.reduce(function (a, b) { return a + b; }, 0);
+      var room = H - (n - 1) * gap, top = 0;
+      groups.right.forEach(function (node, i) {
+        var h = room * weights[i] / total;
+        put(node, x, top, rightW, h);
+        top += h + gap;
+      });
+    }
+    layout = {};
+    placed.forEach(function (p) {
+      var id = panelIdOf(p.node);
+      delete p.node.dataset.tidied;
+      p.node.classList.remove('maximized');
+      layout[id] = {left: p.left, top: p.top, w: p.w, h: p.h,
+                    z: 10, auto: false};
+    });
+    writeLayout();
+    desktop.scrollLeft = 0;
+    desktop.scrollTop = 0;
+    placed.forEach(function (p) {
+      size(p.node, p.w, p.h);
+      place(p.node, p.left, p.top);
+      p.node.style.zIndex = 10;
+      // A chart draws at its box's size: redraw at the new one.
+      if (p.node.classList.contains('chartwin')) {
+        p.node.dataset.drawn = '';
+      }
+    });
+    render();
   }
 
   function tidyWindows() {
@@ -706,6 +942,8 @@
     if (!bar) { return; }
     // The buttons and selects that live IN the title bar keep working.
     if (e.target.closest('button, select, input, a')) { return; }
+    // A maximized window stays put: restore it to move it.
+    if (node.classList.contains('maximized')) { return; }
 
     var box = node.getBoundingClientRect();
     var desktop = desktopOrigin();
@@ -774,7 +1012,10 @@
     function move(event) {
       var to = size(node, box.width + (event.clientX - startX),
                     box.height + (event.clientY - startY));
-      layout[id] = Object.assign({}, layout[id], {w: to.w, h: to.h});
+      // Dragged by hand: the size is the trader's from here on, and
+      // is restored exactly rather than recomputed.
+      layout[id] = Object.assign({}, layout[id],
+                                 {w: to.w, h: to.h, auto: false});
     }
 
     function drop() {
@@ -871,9 +1112,638 @@
     renderFair(node, row, renderAlgo(node, row));
   }
 
+  // -- the pair chart -------------------------------------------------
+  //
+  // One ladder's spread as 15m, 1h or 4h candles with its standard-
+  // deviation bands, and the Algo's z against them. The history is
+  // MT5's own bars, fetched by the engine; the newest candle moves with
+  // the live 10-second candles the engine writes every two seconds.
+  // The bands are the Algo's own arithmetic - an EMA middle, the
+  // population sigma of the last `length` closes - so on the Algo's own
+  // timeframe they ARE its bands. Drawn in SVG: nothing is loaded from
+  // outside.
+
+  //: Candles drawn. The bands are worked out over the history before
+  //: them too, so the first one drawn already has its band.
+  var CHART_SHOWN = 100;
+  //: How old a history may be before the engine is asked again. The
+  //: engine reuses its own for five minutes as well.
+  var CHART_HISTORY_MS = 300000;
+
+  function chartOpen(key) {
+    return state.open.indexOf(panelId('chart', key)) >= 0;
+  }
+
+  function toggleChart(key) {
+    var id = panelId('chart', key);
+    if (chartOpen(key)) { closePanel(id); } else { openPanel(id); }
+  }
+
+  function chartTf(key) { return state.chartTf[key] || 15; }
+
+  function chartNode(key) {
+    var existing = document.querySelector(
+      '.chartwin[data-pair="' + cssEscape(key) + '"]');
+    if (existing) { return existing; }
+    var node = el('chart-template').content.firstElementChild.cloneNode(true);
+    node.dataset.pair = key;
+    node.querySelector('.close').addEventListener('click', function () {
+      closePanel(panelId('chart', key));
+    });
+    // The hover: a crosshair on both charts and a readout of the candle.
+    [['.cw-z', 'z'], ['.cw-spread', 's']].forEach(function (pair) {
+      var box = node.querySelector(pair[0]);
+      box.addEventListener('mousemove', function (e) {
+        chartHover(node, key, pair[1], e);
+      });
+      box.addEventListener('mouseleave', function () { chartUnhover(node); });
+    });
+    node.querySelectorAll('.cw-tfs button').forEach(function (button) {
+      button.addEventListener('click', function () {
+        state.chartTf[key] = parseInt(button.dataset.tf, 10) || 15;
+        node.dataset.drawn = '';
+        fetchHistory(key, true);
+        drawChart(node, key);
+      });
+    });
+    el('desktop').appendChild(node);
+    return node;
+  }
+
+  function chartRedraw(key) {
+    var node = document.querySelector(
+      '.chartwin[data-pair="' + cssEscape(key) + '"]');
+    if (node) { drawChart(node, key); }
+  }
+
+  function fetchLive(key) {
+    // The live 10-second candles: the right-hand end of every timeframe.
+    var held = state.chartFetch[key] || {};
+    var at = Date.now();
+    if (held.busy || (held.at && at - held.at < 2000)) { return; }
+    state.chartFetch[key] = {busy: true, at: at};
+    fetch('/api/chart/' + encodeURIComponent(key) + '?minutes=120')
+      .then(function (r) { return r.json(); })
+      .then(function (body) {
+        state.charts[key] = body;
+        state.chartFetch[key] = {busy: false, at: Date.now()};
+        chartRedraw(key);
+      })
+      .catch(function () {
+        state.chartFetch[key] = {busy: false, at: Date.now()};
+      });
+  }
+
+  function fetchHistory(key, now) {
+    /* The candles from MT5. Read what the engine last wrote; if there is
+     * none, or it is five minutes old, ask the engine for it - through
+     * the same command log a backtest goes through - and read it again
+     * once it answers. */
+    var tf = chartTf(key);
+    var id = key + '#' + tf;
+    var held = state.chartHistFetch[id] || {};
+    var at = Date.now();
+    if (held.busy) { return; }
+    if (!now && held.at && at - held.at < 15000) { return; }
+    state.chartHistFetch[id] = {busy: true, at: at};
+    function finish(body) {
+      if (body) { state.chartHist[id] = body; }
+      state.chartHistFetch[id] = {busy: false, at: Date.now(),
+                                  asked: held.asked};
+      chartRedraw(key);
+    }
+    function read() {
+      return fetch('/api/chart_history/' + encodeURIComponent(key) +
+                   '?tf=' + tf).then(function (r) { return r.json(); });
+    }
+    read().then(function (body) {
+      var fresh = body && body.ok && body.at &&
+        Date.now() - body.at * 1000 < CHART_HISTORY_MS;
+      if (fresh) { return finish(body); }
+      if (body && body.ok) { state.chartHist[id] = body; }
+      // Asked already, a moment ago: wait for that answer.
+      if (held.asked && at - held.asked < 20000) { return finish(null); }
+      held.asked = at;
+      return fetch('/api/command', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({kind: 'chart_history',
+                              payload: {pair: key, timeframe_min: tf}})
+      }).then(function (r) { return r.json(); }).then(function (sent) {
+        if (!sent.ok) {
+          state.chartHistNote[id] = sent.error || 'the engine refused';
+          return finish(null);
+        }
+        var tries = 0;
+        (function poll() {
+          fetch('/api/result/' + sent.id).then(function (r) {
+            return r.json();
+          }).then(function (result) {
+            if (result && result.pending && ++tries < 120) {
+              return window.setTimeout(poll, 250);
+            }
+            var data = (result && result.data) || {};
+            if (!result || result.ok === false || data.ok === false) {
+              state.chartHistNote[id] = (result && result.error) ||
+                data.reason || 'no answer from the engine';
+              return finish(null);
+            }
+            delete state.chartHistNote[id];
+            read().then(finish).catch(function () { finish(null); });
+          });
+        })();
+      });
+    }).catch(function () { finish(null); });
+  }
+
+  function renderChartWindow(key, row) {
+    var node = chartNode(key);
+    var title = node.querySelector('.cw-pair');
+    title.textContent = (row.name || key) + ' · Chart';
+    title.title = key + ' — leg A ' + (row.symbol_a || '?') +
+      ', leg B ' + (row.symbol_b || '?');
+    var tf = chartTf(key);
+    node.querySelectorAll('.cw-tfs button').forEach(function (button) {
+      button.classList.toggle('on', parseInt(button.dataset.tf, 10) === tf);
+    });
+    fetchLive(key);
+    fetchHistory(key, false);
+    drawChart(node, key);
+  }
+
+  function chartClock(t, withDay) {
+    var d = new Date(t * 1000);
+    function two(n) { return (n < 10 ? '0' : '') + n; }
+    var clock = two(d.getHours()) + ':' + two(d.getMinutes());
+    return withDay ? d.getDate() + ' ' +
+      ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep',
+       'Oct', 'Nov', 'Dec'][d.getMonth()] + ' ' + clock : clock;
+  }
+
+  //: Candle colours: up green, down red, the house style of every
+  //: chart a trader already reads; the entry lines keep Arrow-statarb's.
+  var CHART = {up: '#198754', down: '#dc3545', stop: '#6c757d',
+               mean: '#fd7e14', sd: 'rgba(13,110,253,.55)',
+               grid: 'rgba(128,128,128,.25)', text: '#6c757d'};
+
+  function mergeLive(history, live, seconds, anchor, since) {
+    /* MT5's candles with the live 10-second ones folded into them: a
+     * live price makes a candle's high, low and close; a bucket the
+     * history has not reached yet starts a new candle. */
+    var byT = {};
+    var out = history.map(function (c) {
+      var copy = {t: c.t, o: c.o, h: c.h, l: c.l, c: c.c};
+      byT[c.t] = copy;
+      return copy;
+    });
+    (live || []).forEach(function (lc) {
+      if (lc.o === null || lc.o === undefined) { return; }
+      var b = Math.floor((lc.t + anchor) / seconds) * seconds - anchor;
+      var candle = byT[b];
+      if (!candle) {
+        if (out.length && b < out[out.length - 1].t) { return; }
+        candle = byT[b] = {t: b, o: lc.o, h: lc.h, l: lc.l, c: lc.c};
+        out.push(candle);
+        return;
+      }
+      candle.h = Math.max(candle.h, lc.h);
+      candle.l = Math.min(candle.l, lc.l);
+      // The close only from a live candle at or after the history's own
+      // reading: an older one would move the close backwards.
+      if (lc.t + 10 >= since) { candle.c = lc.c; }
+    });
+    return out;
+  }
+
+  function withBands(candles, length) {
+    /* The Algo's band on every candle: Pine's EMA middle (seeded with
+     * the simple average of the first `length` closes) and the
+     * POPULATION sigma of the last `length` closes. None until there
+     * are `length` closes behind it - unmeasured is not zero. */
+    var alpha = 2 / (length + 1), mean = null, sum = 0;
+    candles.forEach(function (c, i) {
+      if (i < length) { sum += c.c; }
+      if (i === length - 1) { mean = sum / length; }
+      else if (i >= length) { mean = alpha * c.c + (1 - alpha) * mean; }
+      if (i < length - 1) { c.m = null; c.sd = null; return; }
+      var last = candles.slice(i - length + 1, i + 1);
+      var avg = last.reduce(function (a, w) { return a + w.c; }, 0) /
+        length;
+      var sd = Math.sqrt(last.reduce(function (a, w) {
+        return a + (w.c - avg) * (w.c - avg);
+      }, 0) / length);
+      c.m = mean;
+      c.sd = sd > 1e-12 ? sd : null;
+    });
+    return candles;
+  }
+
+  function svgCandles(box, candles, opts) {
+    /* One candlestick plot at the box's own pixel size, so the labels
+     * are crisp. Candles sit on the CLOCK: a stretch the broker sent
+     * nothing for is left as a gap, not closed up. `candles` may hold
+     * nulls - a slot with nothing to draw (a z before the band has its
+     * length) - and `opts.times` gives every slot its time, so the z
+     * and the spread line up candle for candle.
+     *
+     * `opts.lines` [{y, colour, dash, cls}] go straight across;
+     * `opts.curves` [{value(c), colour, dash, cls}] follow the candles,
+     * like a band. Returns the SVG and the geometry the hover reads. */
+    var w = Math.max(box.clientWidth, 200);
+    var h = Math.max(box.clientHeight, 120);
+    var left = 52, right = 8, top = 8, bottom = 18;
+    var lines = opts.lines || [], curves = opts.curves || [];
+    var n = candles.length;
+    var ys = [];
+    candles.forEach(function (c) { if (c) { ys.push(c.h, c.l); } });
+    lines.forEach(function (line) { ys.push(line.y); });
+    curves.forEach(function (curve) {
+      candles.forEach(function (c) {
+        var v = c ? curve.value(c) : null;
+        if (v !== null && v !== undefined && isFinite(v)) { ys.push(v); }
+      });
+    });
+    var lo = Math.min.apply(null, ys), hi = Math.max.apply(null, ys);
+    if (!isFinite(lo) || !isFinite(hi)) { lo = -1; hi = 1; }
+    if (hi - lo < 1e-9) { hi += 1; lo -= 1; }
+    var pad = (hi - lo) * 0.06;
+    lo -= pad; hi += pad;
+    var times = opts.times || [];
+    var seconds = opts.seconds || 60;
+    var t0 = times.length ? times[0] : 0;
+    var t1 = times.length ? times[times.length - 1] + seconds : 1;
+    var plotW = w - left - right;
+    var slot = seconds / (t1 - t0) * plotW;
+    function X(i) {
+      return left + (times[i] + seconds / 2 - t0) / (t1 - t0) * plotW;
+    }
+    function Y(v) { return top + (hi - v) / (hi - lo) * (h - top - bottom); }
+    var body = Math.max(1, Math.min(12, slot * 0.7));
+    var svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' +
+      w + ' ' + h + '" xmlns="http://www.w3.org/2000/svg">';
+    // Ticks the caller names (z: whole sigmas), or five even ones.
+    var ticks = (opts.ticks || [0, 1, 2, 3, 4].map(function (k) {
+      return lo + (hi - lo) * k / 4;
+    })).filter(function (v) { return v >= lo && v <= hi; });
+    ticks.forEach(function (v) {
+      svg += '<line x1="' + left + '" x2="' + (w - right) + '" y1="' +
+        Y(v).toFixed(1) + '" y2="' + Y(v).toFixed(1) + '" stroke="' +
+        CHART.grid + '" stroke-width="1"/>' +
+        '<text x="' + (left - 4) + '" y="' + (Y(v) + 3).toFixed(1) +
+        '" text-anchor="end" font-size="10" fill="' + CHART.text + '">' +
+        v.toFixed(opts.digits) + '</text>';
+    });
+    lines.forEach(function (line) {
+      svg += '<line class="' + (line.cls || '') + '" x1="' + left +
+        '" x2="' + (w - right) + '" y1="' + Y(line.y).toFixed(1) +
+        '" y2="' + Y(line.y).toFixed(1) + '" stroke="' + line.colour +
+        '" stroke-width="1" stroke-dasharray="' + line.dash + '"/>';
+    });
+    curves.forEach(function (curve) {
+      var path = '', pen = 'M';
+      candles.forEach(function (c, i) {
+        var v = c ? curve.value(c) : null;
+        if (v === null || v === undefined || !isFinite(v)) {
+          pen = 'M';
+          return;
+        }
+        path += pen + X(i).toFixed(1) + ' ' + Y(v).toFixed(1) + ' ';
+        pen = 'L';
+      });
+      if (path) {
+        svg += '<path class="' + (curve.cls || '') + '" d="' + path +
+          '" fill="none" stroke="' + curve.colour + '" stroke-width="' +
+          (curve.width || 1) + '" stroke-dasharray="' + (curve.dash || '0') +
+          '"/>';
+      }
+    });
+    candles.forEach(function (c, i) {
+      if (!c) { return; }
+      var up = c.c >= c.o;
+      var colour = up ? CHART.up : CHART.down;
+      var x = X(i);
+      var yTop = Y(Math.max(c.o, c.c)), yBot = Y(Math.min(c.o, c.c));
+      svg += '<g class="cw-candle ' + (up ? 'up' : 'down') +
+        (c.beyond ? ' beyond' : '') + '">' +
+        '<line x1="' + x.toFixed(1) + '" x2="' + x.toFixed(1) + '" y1="' +
+        Y(c.h).toFixed(1) + '" y2="' + Y(c.l).toFixed(1) + '" stroke="' +
+        colour + '" stroke-width="1"/>' +
+        '<rect x="' + (x - body / 2).toFixed(1) + '" y="' + yTop.toFixed(1) +
+        '" width="' + body.toFixed(1) + '" height="' +
+        Math.max(1, yBot - yTop).toFixed(1) + '" fill="' + colour +
+        '" stroke="' + (c.beyond ? '#000' : colour) + '"/></g>';
+    });
+    // The time along the bottom: five labels evenly across the clock,
+    // the day added where the chart spans more than one.
+    if (times.length) {
+      var withDay = t1 - t0 > 20 * 3600;
+      [0, 0.25, 0.5, 0.75, 1].forEach(function (f, k) {
+        var anchor = k === 0 ? 'start' : k === 4 ? 'end' : 'middle';
+        svg += '<text x="' + (left + f * plotW).toFixed(1) + '" y="' +
+          (h - 4) + '" font-size="10" text-anchor="' + anchor + '" fill="' +
+          CHART.text + '">' + chartClock(t0 + f * (t1 - t0), withDay) +
+          '</text>';
+      });
+    }
+    return {svg: svg + '</svg>',
+            geom: {left: left, right: right, top: top, bottom: bottom,
+                   w: w, h: h, lo: lo, hi: hi, n: n, slot: slot,
+                   t0: t0, t1: t1, seconds: seconds, times: times,
+                   x: X}};
+  }
+
+  // -- the hover -------------------------------------------------------
+  //
+  // A crosshair across BOTH charts on the same candle, and a readout of
+  // everything about it: its open, high, low and close, the band's
+  // middle and every band line in price, sigma, and the z of each. The
+  // price under the pointer is read off the axis it is over.
+
+  function chartHover(node, key, plot, event) {
+    var drawn = node._drawn;
+    if (!drawn) { return; }
+    var geom = drawn.geom[plot === 'z' ? 'z' : 's'];
+    if (!geom) { return; }
+    var box = node.querySelector(plot === 'z' ? '.cw-z' : '.cw-spread');
+    var rect = box.getBoundingClientRect();
+    var x = event.clientX - rect.left, y = event.clientY - rect.top;
+    if (x < geom.left || x > geom.w - geom.right) {
+      return chartUnhover(node);
+    }
+    // The candle under the pointer, by time: in a gap there is none.
+    var at = geom.t0 + (x - geom.left) / (geom.w - geom.left -
+      geom.right) * (geom.t1 - geom.t0);
+    var i = -1;
+    for (var k = 0; k < geom.times.length; k++) {
+      if (geom.times[k] <= at && at < geom.times[k] + geom.seconds) {
+        i = k;
+        break;
+      }
+    }
+    if (i < 0) { return chartUnhover(node); }
+    var c = drawn.shown[i], z = drawn.zc[i];
+    if (!c) { return chartUnhover(node); }
+    // The vertical line, on both plots, through the candle.
+    ['.cw-z', '.cw-spread'].forEach(function (selector) {
+      var other = node.querySelector(selector);
+      var g = drawn.geom[selector === '.cw-z' ? 'z' : 's'];
+      var line = crossNode(other, 'cw-xline');
+      if (!g) { line.hidden = true; return; }
+      line.hidden = false;
+      line.style.left = g.x(i) + 'px';
+      line.style.top = g.top + 'px';
+      line.style.height = (g.h - g.top - g.bottom) + 'px';
+    });
+    // The level under the pointer, on the plot it is over.
+    var value = geom.hi - (y - geom.top) / (geom.h - geom.top -
+      geom.bottom) * (geom.hi - geom.lo);
+    node.querySelectorAll('.cw-yline, .cw-ylabel').forEach(function (el_) {
+      el_.hidden = true;
+    });
+    if (y >= geom.top && y <= geom.h - geom.bottom) {
+      var yline = crossNode(box, 'cw-yline');
+      yline.hidden = false;
+      yline.style.top = y + 'px';
+      yline.style.left = geom.left + 'px';
+      yline.style.width = (geom.w - geom.left - geom.right) + 'px';
+      var ylabel = crossNode(box, 'cw-ylabel');
+      ylabel.hidden = false;
+      ylabel.style.top = (y - 8) + 'px';
+      ylabel.textContent = plot === 'z'
+        ? (value > 0 ? '+' : '') + value.toFixed(2) + 'σ'
+        : value.toFixed(4);
+    }
+    var tip = crossNode(node.querySelector('.cw-body'), 'cw-tip');
+    tip.hidden = false;
+    tip.innerHTML = chartTipHtml(drawn, c, z);
+    // Beside the pointer, flipped to the other side near the edge.
+    var bodyRect = node.querySelector('.cw-body').getBoundingClientRect();
+    var tx = event.clientX - bodyRect.left + 14;
+    var ty = event.clientY - bodyRect.top + 14;
+    if (tx + tip.offsetWidth > bodyRect.width - 4) {
+      tx = event.clientX - bodyRect.left - tip.offsetWidth - 14;
+    }
+    if (ty + tip.offsetHeight > bodyRect.height - 4) {
+      ty = Math.max(4, event.clientY - bodyRect.top - tip.offsetHeight - 14);
+    }
+    tip.style.left = Math.max(4, tx) + 'px';
+    tip.style.top = ty + 'px';
+    node._hover = {plot: plot, clientX: event.clientX,
+                   clientY: event.clientY};
+  }
+
+  function chartUnhover(node) {
+    node.querySelectorAll('.cw-xline, .cw-yline, .cw-ylabel, .cw-tip')
+      .forEach(function (el_) { el_.hidden = true; });
+    node._hover = null;
+  }
+
+  function crossNode(parent, cls) {
+    var found = parent.querySelector(':scope > .' + cls);
+    if (found) { return found; }
+    var made = document.createElement('div');
+    made.className = cls;
+    made.hidden = true;
+    parent.appendChild(made);
+    return made;
+  }
+
+  function chartTipHtml(drawn, c, z) {
+    /* Everything about one candle, in price and in sigma. */
+    var entry = drawn.entry;
+    function p(v) { return v === null || v === undefined ? DASH : fmt(v, 4); }
+    function band(k) { return c.m === null || !c.sd ? null : c.m + k * c.sd; }
+    var when = new Date(c.t * 1000);
+    var head = when.toLocaleString([], {weekday: 'short', day: 'numeric',
+                                        month: 'short', hour: '2-digit',
+                                        minute: '2-digit'}) +
+      ' · ' + drawn.label;
+    // Each price with its SCORE: how many of the band's sigmas it
+    // stands from the mean - the z, as a plain number.
+    function score(v) {
+      return v === null || v === undefined || !isFinite(v) ? ''
+        : (v > 0 ? '+' : '') + v.toFixed(2);
+    }
+    var rows = [
+      ['', 'Price', 'Score', 'cols'],
+      ['Open', p(c.o), z ? score(z.o) : ''],
+      ['High', p(c.h), z ? score(z.h) : ''],
+      ['Low', p(c.l), z ? score(z.l) : ''],
+      ['Close', p(c.c), z ? score(z.c) : '', c.c >= c.o ? 'up' : 'down'],
+      ['Range', p(c.h - c.l), c.sd ? ((c.h - c.l) / c.sd).toFixed(2) : '']
+    ];
+    var bands = [];
+    if (entry !== null && entry !== undefined) {
+      bands.push(['+ entry', p(band(entry)), score(entry), 'entry-up']);
+    }
+    // Only what the trader acts on: the entry either side, and the mean.
+    bands.push(['Mean', p(c.m), score(0) || '0.00', 'mean']);
+    if (entry !== null && entry !== undefined) {
+      bands.push(['\u2212 entry', p(band(-entry)), score(-entry),
+                  'entry-down']);
+    }
+    function table(list) {
+      return '<table>' + list.map(function (r) {
+        return '<tr class="' + (r[3] || '') + '"><th>' + r[0] +
+          '</th><td>' + r[1] + '</td><td class="z">' + (r[2] || '') +
+          '</td></tr>';
+      }).join('') + '</table>';
+    }
+    var verdict = '';
+    if (z && entry !== null && entry !== undefined) {
+      verdict = Math.abs(z.c) >= entry
+        ? '<div class="beyond">closed beyond the entry band</div>'
+        : Math.abs(z.h) >= entry || Math.abs(z.l) >= entry
+          ? '<div class="touched">touched the entry band, closed inside</div>'
+          : '';
+    }
+    if (!z) {
+      verdict = '<div class="hint">no band yet — fewer than ' +
+        drawn.length + ' candles behind it</div>';
+    }
+    // ONE table, so the band prices line up under the candle's.
+    var html = table(rows.concat([['', '', '', 'sep']]).concat(bands));
+    html = html.replace('<tr class="sep"><th></th><td></td>' +
+                        '<td class="z"></td></tr>',
+                        '<tr class="sep"><th colspan="3">Bands</th></tr>');
+    return '<div class="head">' + escapeHtml(head) + '</div>' + html +
+      verdict;
+  }
+
+  function drawChart(node, key) {
+    var tf = chartTf(key);
+    var id = key + '#' + tf;
+    var hist = state.chartHist[id];
+    var live = state.charts[key] || {};
+    var zBox = node.querySelector('.cw-z');
+    var sBox = node.querySelector('.cw-spread');
+    // Only when the data or the room it is drawn in has changed.
+    var stamp = [tf, hist ? hist.at : '', live.at || '',
+                 (live.candles || []).length, zBox.clientWidth,
+                 zBox.clientHeight, sBox.clientWidth,
+                 sBox.clientHeight].join('|');
+    if (node.dataset.drawn === stamp) { return; }
+    node.dataset.drawn = stamp;
+    var note = node.querySelector('.cw-note');
+    var nowBox = node.querySelector('.cw-now');
+    var label = tf === 15 ? '15-minute candles' : tf === 60
+      ? '1-hour candles' : '4-hour candles';
+    node.querySelector('.cw-size').textContent = label;
+    var seconds = tf * 60;
+    if (!hist || !hist.ok || !(hist.candles || []).length) {
+      var why = state.chartHistNote[id];
+      var waiting = '<div class="cw-empty">' + escapeHtml(why
+        ? 'no candles: ' + why : 'reading MT5’s bars…') + '</div>';
+      zBox.innerHTML = waiting;
+      sBox.innerHTML = waiting;
+      nowBox.textContent = '';
+      note.textContent = '';
+      node._drawn = null;
+      node.querySelector('.cw-min').textContent = 'Min: —';
+      node.querySelector('.cw-max').textContent = 'Max: —';
+      return;
+    }
+    var length = hist.length || 20;
+    var entry = hist.entry_z, stop = hist.stop_z;
+    var all = withBands(mergeLive(hist.candles, live.candles, seconds,
+                                  hist.anchor || 0, hist.at || 0), length);
+    var shown = all.slice(-CHART_SHOWN);
+    // z of each candle against ITS OWN band: where it stood when it
+    // was drawn, not against today's. Null where there is no band yet,
+    // so the two charts keep the same slots.
+    var zc = shown.map(function (c) {
+      if (c.sd === null || c.m === null) { return null; }
+      var z = {t: c.t, o: (c.o - c.m) / c.sd, h: (c.h - c.m) / c.sd,
+               l: (c.l - c.m) / c.sd, c: (c.c - c.m) / c.sd};
+      z.beyond = entry !== null && entry !== undefined &&
+        Math.abs(z.c) >= entry;
+      c.beyond = z.beyond;
+      return z;
+    });
+    var times = shown.map(function (c) { return c.t; });
+    var zLines = [{y: 0, colour: CHART.grid, dash: '0'}];
+    if (entry !== null && entry !== undefined) {
+      zLines.push({y: entry, colour: '#dc3545', dash: '5 5',
+                   cls: 'cw-entry-up'});
+      zLines.push({y: -entry, colour: '#198754', dash: '5 5',
+                   cls: 'cw-entry-down'});
+    }
+    if (stop !== null && stop !== undefined) {
+      zLines.push({y: stop, colour: CHART.stop, dash: '1 3',
+                   cls: 'cw-stop'});
+      zLines.push({y: -stop, colour: CHART.stop, dash: '1 3',
+                   cls: 'cw-stop'});
+    }
+    node.querySelector('.cw-key-stop').hidden =
+      stop === null || stop === undefined;
+    var geom = {z: null, s: null};
+    if (zc.some(function (z) { return z; })) {
+      var zPlot = svgCandles(zBox, zc, {lines: zLines, digits: 0,
+                                        ticks: [-4, -3, -2, -1, 0, 1, 2, 3,
+                                                4], times: times,
+                                        seconds: seconds});
+      zBox.innerHTML = zPlot.svg;
+      geom.z = zPlot.geom;
+    } else {
+      zBox.innerHTML = '<div class="cw-empty">no band yet — fewer ' +
+        'than ' + length + ' candles</div>';
+    }
+    function band(k) {
+      return function (c) {
+        return c.m === null || c.sd === null ? null : c.m + k * c.sd;
+      };
+    }
+    var curves = [{value: band(0), colour: CHART.mean, cls: 'cw-mean',
+                   width: 1.5}];
+    if (entry !== null && entry !== undefined) {
+      curves.push({value: band(entry), colour: '#dc3545', dash: '5 5',
+                   cls: 'cw-band-entry'});
+      curves.push({value: band(-entry), colour: '#198754', dash: '5 5',
+                   cls: 'cw-band-entry'});
+    }
+    var sPlot = svgCandles(sBox, shown, {curves: curves, digits: 4,
+                                         times: times, seconds: seconds});
+    sBox.innerHTML = sPlot.svg;
+    geom.s = sPlot.geom;
+    node._drawn = {shown: shown, zc: zc, geom: geom, entry: entry,
+                   length: length, label: label};
+    // A redraw under a resting pointer keeps its readout, on the
+    // candle now there.
+    if (node._hover) {
+      chartHover(node, key, node._hover.plot,
+                 {clientX: node._hover.clientX,
+                  clientY: node._hover.clientY});
+    }
+    var lows = shown.map(function (c) { return c.l; });
+    var highs = shown.map(function (c) { return c.h; });
+    node.querySelector('.cw-min').textContent = 'Min: ' +
+      fmt(Math.min.apply(null, lows), 4);
+    node.querySelector('.cw-max').textContent = 'Max: ' +
+      fmt(Math.max.apply(null, highs), 4);
+    var last = shown[shown.length - 1];
+    var lastZ = zc[zc.length - 1] ? zc[zc.length - 1].c : null;
+    nowBox.textContent = 'now: z ' + (lastZ === null ? '—'
+      : (lastZ > 0 ? '+' : '') + lastZ.toFixed(2)) +
+      ' · spread ' + fmt(last.c, 4) +
+      (last.sd ? ' · 1σ ' + fmt(last.sd, 4) : '');
+    var own = hist.algo_timeframe_min === tf;
+    note.textContent = 'Hover a candle for its prices, the mean and the entry bands. ' +
+      'Bands: EMA(' + length + ') middle, the entry ±' + fmt(entry, 2) + 'σ dashed — the ' +
+      'Algo’s own arithmetic' +
+      (own ? ', on its own ' + tf + '-minute candles: these are its bands.'
+        : '; the Algo itself reads ' + hist.algo_timeframe_min +
+          '-minute candles.') +
+      ' Outlined: closed beyond the entry band. Candles from MT5’s ' +
+      'bars, the newest moving live.';
+  }
+
   function wireLadder(node, key) {
     node.querySelector('.close').addEventListener('click', function () {
       closePanel(panelId('ladder', key));
+    });
+    // The chart: one click opens it, the next closes it.
+    node.querySelector('.chart-btn').addEventListener('click', function (e) {
+      e.stopPropagation();
+      toggleChart(key);
     });
     wireAlgoSwitch(node, key);
     node.querySelector('.order-type').addEventListener('change', function (e) {
@@ -1306,6 +2176,7 @@
     ['.ls-comm-b', 'commission_per_lot_b', 'number', 'COMMISSION_PER_LOT_B'],
     // Blank is a REAL state: it means the desk-wide threshold.
     ['.ls-stale', 'max_quote_age_sec', 'blank-number'],
+    ['.ls-maxpos', 'max_positions', 'blank-number'],
     ['.ls-slip', 'slippage_allowance', 'number', 'SLIPPAGE_ALLOWANCE'],
     ['.ls-nights', 'break_even_nights', 'number', 'BREAK_EVEN_NIGHTS'],
     ['.ls-tp', 'tp_target_pct_of_margin', 'number', 'TP_TARGET_PCT_OF_MARGIN'],
@@ -2318,7 +3189,14 @@
   }
 
   function positionWords(position, digits) {
-    /* "BUY @ 59.11": the side and the spread it was ENTERED at. */
+    /* "BUY @ 59.11": the side and the spread it was ENTERED at. Fills
+     * read as one position say their size and that it is an average:
+     * "SELL 2 @ 9.76 avg". */
+    if (position.combined) {
+      return (position.side || '?') + ' ' + fmt(position.quantity, 2)
+        .replace(/\.?0+$/, '') + ' @ ' +
+        fmt(position.entry_spread, digits) + ' avg';
+    }
     return (position.side || '?') + ' @ ' + fmt(position.entry_spread, digits);
   }
 
@@ -2521,6 +3399,92 @@
       (title ? ' title="' + escapeHtml(title) + '"' : '') + '>' + text + '</span>';
   }
 
+  function algoLegsHtml(row) {
+    /* "A USOIL_F7 · #19514405 · CFI Financial Group", and B's. The
+     * login and broker are the terminal's own, read live; a leg that
+     * could not be read says so rather than showing nothing. */
+    var accounts = (state.snapshot && state.snapshot.accounts) || {};
+    function leg(letter, account, symbol) {
+      var info = accounts[account];
+      var who = info
+        ? '#' + escapeHtml(info.login || DASH) + ' \u00b7 ' +
+          escapeHtml(info.company || info.server || DASH)
+        : '<span class="down">not read</span>';
+      return '<div class="aw-leg" title="Leg ' + letter + ': account \u2018' +
+        escapeHtml(account || '?') + '\u2019' +
+        (info && info.server ? ', server ' + escapeHtml(info.server) : '') +
+        '"><b>' + letter + '</b> ' + escapeHtml(symbol || '?') + ' \u00b7 ' +
+        who + '</div>';
+    }
+    return leg('A', row.account_a, row.symbol_a) +
+      leg('B', row.account_b, row.symbol_b);
+  }
+
+  function marginShare(position) {
+    /* " (-8.05% margin)": the P&L over what BOTH legs tied up. */
+    var back = positionReturns(position, position.net_pnl);
+    if (back.pct_margin === null) { return ''; }
+    return ' <small>(' + pctSigned(back.pct_margin, 2) + ' margin' +
+      (back.estimated ? ', est.' : '') + ')</small>';
+  }
+
+  function limitLine(row) {
+    /* The position limit, said where the position is read: how many
+     * are on, how many working orders would open another, and the most
+     * this ladder may hold. Only shown once it matters. */
+    var limit = row.max_positions;
+    if (!limit) { return ''; }
+    var held = (row.positions || []).length;
+    var openers = (row.orders || []).filter(function (o) {
+      return !o.position_id &&
+        (o.state === 'WORKING' || o.state === 'FILLING');
+    }).length;
+    if (held + openers < limit) { return ''; }
+    var what = openers && held
+      ? held + ' on + ' + openers + ' working add' + (openers > 1 ? 's' : '') +
+        ' = ' + (held + openers) + ' of ' + limit + '.'
+      : openers ? openers + ' working order' + (openers > 1 ? 's' : '') +
+        ' that would open = ' + openers + ' of ' + limit + '.'
+        : held + ' of ' + limit + ' positions on \u2014 the limit.';
+    return '<div class="aw-limit">' + '<b>' + what + '</b> A new order that ' +
+      'would OPEN is refused. Closes always work.</div>';
+  }
+
+  function fillsHtml(key, first, digits) {
+    /* The fills behind a combined position: folded, one click away. */
+    if (!first.combined) { return ''; }
+    state.fillsOpen = state.fillsOpen || {};
+    var fills = first.fills || [];
+    var now = Date.now() / 1000;
+    var rows = fills.map(function (f, i) {
+      var age = f.opened_at ? Math.max(0, Math.floor((now - f.opened_at) / 60))
+        + 'm ago' : DASH;
+      var pnl = f.net_pnl;
+      return '<span>#' + (i + 1) + ' ' + escapeHtml(first.side || '') + ' ' +
+        fmt(f.quantity, 2).replace(/\.?0+$/, '') + '</span><span>@ ' +
+        fmt(f.entry_spread, digits) + '</span><span>' + age + '</span>' +
+        '<span class="' + (pnl === null || pnl === undefined ? ''
+          : pnl >= 0 ? 'up' : 'down') + '">' + moneyOr(pnl) + '</span>';
+    }).join('');
+    return '<details class="aw-fills" data-key="' + escapeHtml(key) + '"' +
+      (state.fillsOpen[key] ? ' open' : '') + '><summary>Fills (' +
+      fills.length + ') \u2014 combined above</summary>' +
+      '<div class="aw-fill-rows">' + rows + '</div></details>';
+  }
+
+  function coverageHtml(first) {
+    /* A working close that covers only part of the whole position. */
+    if (!first.combined) { return ''; }
+    var covered = first.close_covered || 0;
+    var total = first.quantity || 0;
+    if (!(covered > 1e-9) || covered >= total - 1e-9) { return ''; }
+    var rest = total - covered;
+    return '<div class="aw-cover"><b>Working close covers ' +
+      fmt(covered, 2).replace(/\.?0+$/, '') + ' of ' +
+      fmt(total, 2).replace(/\.?0+$/, '') + '.</b> The other ' +
+      fmt(rest, 2).replace(/\.?0+$/, '') + ' has no close order.</div>';
+  }
+
   function renderAlgoWindow(key, row) {
     /* SIGNAL & POSITION, STATISTICS, FILTERS — the stat-arb dashboard's
      * three panels, for one ladder, from the engine's Algo block. */
@@ -2539,6 +3503,9 @@
       : 'Signals: the Algo signals, you trade — nothing is sent';
     var market = row.market || {};
     var entryZ = params.entry_z;
+
+    // Each leg's account number and broker, small, across the top.
+    node.querySelector('.aw-legs').innerHTML = algoLegsHtml(row);
 
     // -- SIGNAL & POSITION ------------------------------------------------
     var direction = params.direction || 'BOTH';
@@ -2602,8 +3569,7 @@
     var held = block.positions || [];
     var first = held[0] || null;
     var position = first
-      ? (first.source && first.source !== 'ALGO' ? 'YOUR ' : '') +
-        (first.side === 'BUY' ? 'LONG' : 'SHORT') + ' ' +
+      ? (first.side === 'BUY' ? 'LONG' : 'SHORT') + ' ' +
         fmt(first.quantity, 2) : 'FLAT';
     var html = '<div class="aw-head">Signal &amp; Position</div>' +
       '<div class="aw-tiles">' + tile('SELL') + tile('BUY') +
@@ -2612,7 +3578,7 @@
       '<div class="aw-line" title="' + escapeHtml(block.blocked || '') + '">' +
       escapeHtml(algoLine(block, digits)) +
       (block.health && block.state !== 'BLOCKED' ? ' — ' + escapeHtml(block.health)
-        : '') + '</div>';
+        : '') + '</div>' + limitLine(row);
     if (first) {
       var delta = (first.closing_spread === null ||
                    first.closing_spread === undefined ||
@@ -2625,28 +3591,38 @@
         var now = first['leg_' + leg + '_now'];
         var change = (entry === null || entry === undefined ||
                       now === null || now === undefined) ? null : now - entry;
+        var lots = first['leg_' + leg + '_volume'];
         return kv('Leg ' + leg.toUpperCase() + ' (' +
-                  (first['leg_' + leg + '_side'] || '?') + ')',
-                  fmt(entry, 2) + ' \u2192 ' + fmt(now, 2) +
+                  (first['leg_' + leg + '_side'] || '?') +
+                  (first.combined && lots ? ' ' + fmt(lots, 2)
+                    .replace(/\.?0+$/, '') : '') + ')',
+                  fmt(entry, 2) + (first.combined ? ' avg' : '') +
+                  ' \u2192 ' + fmt(now, 2) +
                   (change === null ? '' : ' <small>(' +
                     (change > 0 ? '+' : '') + fmt(change, 2) + ')</small>'),
                   '', 'the leg\u2019s fill \u2192 the price it would close at now',
                   true);
       }
       html += '<div class="aw-grid">' +
-        kv('Entry spread', fmt(first.entry_spread, digits)) +
+        (first.combined
+          ? kv('Avg entry', fmt(first.entry_spread, digits) + ' <small>(' +
+               (first.fills || []).length + ' fills)</small>', '',
+               'the fills read as ONE position: their average, weighted '
+               + 'by size; each fill is listed under Fills')
+          : kv('Entry spread', fmt(first.entry_spread, digits))) +
         kv('\u0394 spread', delta === null ? DASH
           : (delta > 0 ? '+' : '') + fmt(delta, digits), good,
           'closing price now \u2212 entry: a LONG makes money when this is '
           + 'positive, a SHORT when it is negative') +
         kv('Entry z', signed(first.entry_z)) +
-        kv('Net P&amp;L', moneyOr(first.net_pnl),
+        kv('Net P&amp;L', moneyOr(first.net_pnl) + marginShare(first),
            first.net_pnl === null || first.net_pnl === undefined ? ''
              : (first.net_pnl >= 0 ? 'up' : 'down')) +
         legRow('a') + legRow('b') +
         kv('Age', first.age_sec === null || first.age_sec === undefined ? DASH
           : Math.floor(first.age_sec / 60) + 'm ' +
-            Math.floor(first.age_sec % 60) + 's') +
+            Math.floor(first.age_sec % 60) + 's' +
+            (first.combined ? ' <small>(oldest)</small>' : '')) +
         kv('Size', fmt(first.quantity, 2) + ' spread(s)') +
         '</div>' +
         kv('Levels', 'BE ' + fmt(first.break_even, digits) + ' · TP ' +
@@ -2663,6 +3639,7 @@
            '', 'compare with the CLOSING price: the Sell spread for a LONG, '
            + 'the Buy spread for a SHORT. In brackets: the net P&L of the '
            + 'whole position closing there, after every cost') +
+        fillsHtml(key, first, digits) + coverageHtml(first) +
         (params.progress_bar === false ? '' : progressHtml(first, digits));
     }
     node.querySelector('.aw-signal').innerHTML = html;
@@ -3292,7 +4269,8 @@
     // they fall on, so the ladder shows where the trade comes off.
     var levelMarks = [];
     ((row.algo_block || {}).positions || []).forEach(function (held) {
-      [['ENTRY', held.entry_spread, 'entry'], ['BE', held.break_even, 'be'],
+      [[held.combined ? 'AVG' : 'ENTRY', held.entry_spread, 'entry'],
+       ['BE', held.break_even, 'be'],
        ['TP', held.tp, 'tp'], ['SL', held.sl, 'sl']].forEach(function (m) {
         if (m[1] !== null && m[1] !== undefined && isFinite(m[1])) {
           levelMarks.push({tag: m[0], at: m[1], cls: m[2]});
@@ -3666,7 +4644,8 @@
         '<button data-tab="slippage">Slippage</button>' +
         '<button data-tab="accounts">Accounts</button>' +
         '<button data-tab="reconcile">Reconciler</button>' +
-        '<button data-tab="analysis">Analysis</button></div>' +
+        '<button data-tab="analysis">Analysis</button>' +
+        '<button data-tab="sizing">Sizing</button></div>' +
         // `monitor-note`, not `note`: the panes have notes of their own,
         // and a bare `.note` selector reaches into them and overwrites
         // the first one it finds.
@@ -3698,8 +4677,59 @@
           state.analysisPair = e.target.value;
           loadAnalysis(true);
         }
+        if (e.target.classList.contains('an-pnl')) {
+          state.analysisPnl = e.target.value;
+          try {
+            window.localStorage.setItem('mt5trader.analysisPnl',
+                                        state.analysisPnl);
+          } catch (err) { /* a preference, not the money */ }
+          render();
+        }
+        if (e.target.classList.contains('an-capital')) {
+          saveCapital(e.target.value);
+        }
+        if (e.target.classList.contains('an-zone-days')) {
+          state.zoneDays = Number(e.target.value);
+          state.zoneDate = '';          // a range and a day are exclusive
+          loadAnalysis(true);
+        }
+        if (e.target.classList.contains('an-zone-date')) {
+          state.zoneDate = e.target.value || '';
+          loadAnalysis(true);
+        }
+        if (e.target.classList.contains('an-volume-from')) {
+          state.volumeFrom = e.target.value || '';
+          loadAnalysis(true);
+        }
+        if (e.target.classList.contains('an-volume-to')) {
+          state.volumeTo = e.target.value || '';
+          loadAnalysis(true);
+        }
         if (e.target.classList.contains('an-bt-days')) {
           state.analysisBtDays = Number(e.target.value);
+        }
+        if (e.target.classList.contains('sz-input')) {
+          var next = sizingSettings();
+          var key = e.target.dataset.key;
+          // Let go of the field once its change is taken: the pane is
+          // not redrawn while an input holds the focus, so the sheet
+          // would otherwise wait for a click elsewhere to show it.
+          e.target.blur();
+          if (key === 'pair') {
+            state.sizingPair = e.target.value;
+            render();
+            return;
+          }
+          if (e.target.dataset.kind === 'text') {
+            next[key] = e.target.value;
+          } else {
+            var v = parseFloat(e.target.value);
+            if (!isFinite(v) || v < 0) { return; }
+            if ((key === 'win' || key === 'freePct') && v > 100) { v = 100; }
+            next[key] = v;
+          }
+          state.sizing = next;
+          render();
         }
         // Changing the PAIR clears the two tickets: they belong to that
         // pair's accounts, and carrying them over would leave a choice
@@ -3766,9 +4796,17 @@
       loadAnalysis();
       pane.innerHTML = analysisPane();
     }
+    else if (state.monitorTab === 'sizing') {
+      pane.innerHTML = sizingPane();
+    }
     else { pane.innerHTML = reconcileTable(); }
     node.querySelector('.monitor-note').textContent =
-      state.monitorTab === 'analysis'
+      state.monitorTab === 'sizing'
+      ? 'A planning table, worked out here from the chosen ladder\u2019s ' +
+        'live figures: the margin MT5 asks for one spread, what a point ' +
+        'is worth and the commission per lot. Target is the profit after ' +
+        'every cost; stop is the whole loss. Nothing here sends an order.'
+      : state.monitorTab === 'analysis'
       ? 'Built from what is recorded: closed positions, the Algo\u2019s ' +
         'own audit trail and the trackers. Nothing here sends an order. ' +
         'A figure nobody measured is a dash, never 0 \u2014 trades closed ' +
@@ -3783,7 +4821,37 @@
       'opens, equal to one round turn of both legs’ bid-ask. That is ' +
       'what closing it immediately would cost.';
     node.classList.toggle('inactive', state.active !== panelId('monitor'));
+    fitMonitorPane(node);
     return node;
+  }
+
+  //: How close the foot of the monitor may come to the foot of the
+  //: desktop, and the least room its pane is ever given.
+  var MONITOR_PANE_GAP = 6;
+  var MONITOR_PANE_MIN = 160;
+
+  function fitMonitorPane(node) {
+    /* THE WINDOW TAKES THE ROOM THAT IS THERE.
+     *
+     * The pane was capped at a flat 60vh, so the Analysis tab - which
+     * is far longer than one screen - left the bottom third of the
+     * display as bare desktop while its own content scrolled inside a
+     * short box. The room that is actually available is from the
+     * pane's own top to the foot of the desktop, less the note that
+     * sits under it, and that is what it takes: a window dragged
+     * halfway down gets what is left below it rather than running off
+     * the bottom.
+     */
+    var pane = node.querySelector('.pane');
+    var desktop = el('desktop');
+    if (!pane || !desktop) { return; }
+    var note = node.querySelector('.monitor-note');
+    var foot = desktop.getBoundingClientRect().bottom;
+    var top = pane.getBoundingClientRect().top;
+    var reserved = (note ? note.getBoundingClientRect().height : 0) +
+      MONITOR_PANE_GAP;
+    pane.style.maxHeight =
+      Math.max(foot - top - reserved, MONITOR_PANE_MIN) + 'px';
   }
 
   function eachPosition(callback) {
@@ -3794,9 +4862,47 @@
     });
   }
 
+  function pctSigned(value, digits) {
+    return (value > 0 ? '+' : '') + Number(value).toFixed(digits) + '%';
+  }
+
+  function pctCell(value, digits, estimated) {
+    if (value === null || value === undefined) {
+      return '<td>' + DASH + '</td>';
+    }
+    return '<td class="' + (value > 0 ? 'up' : value < 0 ? 'down' : '') +
+      '">' + pctSigned(value, digits) +
+      (estimated ? ' <small class="hint">est.</small>' : '') + '</td>';
+  }
+
+  function positionReturns(position, pnl) {
+    /* The margin BOTH legs tied up at entry (per spread x size) and the
+     * notional of both legs, with the P&L as a share of each. The same
+     * arithmetic as Telegram's and the Analysis tab's. Unmeasured: null. */
+    var margin = position.entry_margin
+      ? Number(position.entry_margin) * Number(position.quantity || 1) : null;
+    var notional = 0;
+    ['leg_a', 'leg_b'].forEach(function (name) {
+      var leg = position[name] || {};
+      if (notional === null || !leg.volume || !leg.contract_size ||
+          !leg.price) { notional = null; return; }
+      notional += leg.volume * leg.contract_size * leg.price;
+    });
+    var have = pnl !== null && pnl !== undefined;
+    return {margin: margin, notional: notional,
+            estimated: position.entry_margin_source === 'leverage',
+            pct_margin: have && margin ? pnl / margin * 100 : null,
+            pct_notional: have && notional ? pnl / notional * 100 : null};
+  }
+
   function positionsTable() {
     var html = '<table><thead><tr><th>Pair</th><th>Side</th><th>Net</th>' +
-      '<th>Avg entry</th><th>Mark</th><th>Open P&amp;L</th><th>Mode</th>' +
+      '<th>Avg entry</th><th>Mark</th><th>Open P&amp;L</th>' +
+      '<th title="open P&amp;L (net of costs) \u00f7 the margin BOTH legs ' +
+      'tied up at entry, priced by each broker\u2019s own terminal - the ' +
+      'same base as the TP % and SL %">% on margin</th><th>Margin</th>' +
+      '<th title="open P&amp;L \u00f7 both legs\u2019 face value at entry">' +
+      '% of notional</th><th>Mode</th>' +
       '<th>Slip</th><th>Click→on</th><th>Naked</th><th>Legs</th>' +
       '<th></th></tr></thead><tbody>';
     var any = false;
@@ -3810,6 +4916,11 @@
       html += '<td>' + fmt(position.closing_spread, 4) + '</td>';
       html += '<td class="' + (position.net_pnl > 0 ? 'up' : 'down') + '">' +
         money(position.net_pnl) + '</td>';
+      var back = positionReturns(position, position.net_pnl);
+      html += pctCell(back.pct_margin, 2, back.estimated) +
+        '<td>' + (back.margin === null ? DASH : money(back.margin) +
+          (back.estimated ? ' <small class="hint">est.</small>' : '')) +
+        '</td>' + pctCell(back.pct_notional, 3, false);
       html += '<td>' + position.order_type + '</td>';
       html += '<td>' + fmt(position.entry_slippage, 4) + '</td>';
       html += '<td>' + (position.click_to_on_ms === null ||
@@ -3832,11 +4943,11 @@
         legText(position.leg_b) + '</td>';
       html += '<td><button class="btn close-position">Flatten</button></td>';
       html += '</tr>';
-      html += '<tr class="detail"><td colspan="11">' +
+      html += '<tr class="detail"><td colspan="14">' +
         legDetail(position.leg_a, 'A') + ' &nbsp; ' +
         legDetail(position.leg_b, 'B') + '</td></tr>';
     });
-    if (!any) { html += '<tr><td colspan="11">nothing open</td></tr>'; }
+    if (!any) { html += '<tr><td colspan="14">nothing open</td></tr>'; }
     html += '</tbody></table>';
     html += accountReconciliation();
     return html;
@@ -4228,40 +5339,49 @@
       '<th>Cost</th><th>Split</th></tr></thead>';
   }
 
-  function slippageTable() {
-    var report = state.slippage;
-    var html = '<div class="journal-controls">' +
-      '<label class="check"><input type="checkbox" class="all-sessions"' +
-      (state.slippageAll ? ' checked' : '') + '> every session</label>' +
-      '<a class="btn" href="/api/slippage.csv' +
-      (state.slippageAll ? '?session=all' : '') + '" download>Export CSV</a>' +
-      '<span class="hint">Measured against the price that was clicked, ' +
-      'on the fills the broker actually gave us.</span></div>';
+  function slipCard(label, value, sub, cls) {
+    return '<div class="slip-card"><div class="k">' + label + '</div>' +
+      '<div class="v ' + (cls || '') + '">' + value + '</div>' +
+      '<div class="s">' + sub + '</div></div>';
+  }
 
-    if (report === null) { return html + '<p class="note">loading…</p>'; }
-    if (report.error) {
-      return html + '<p class="note mismatch">' + report.error + '</p>';
+  function slipCost(value) {
+    /* Money, coloured as a cost (red) or a gain (green); unmeasured "—". */
+    if (value === null || value === undefined) { return DASH; }
+    return money(value);
+  }
+
+  function costClass(value) {
+    return value === null || value === undefined ? ''
+      : value > 0 ? 'down' : value < 0 ? 'up' : '';
+  }
+
+  function slipBar(label, part) {
+    /* One end's slippage as its two parts: the market moving while the
+     * legs were sent, and the broker filling off the price sent. */
+    part = part || {};
+    if (!part.measured) {
+      return '<div class="slip-split"><b>' + label + '</b><div class="hint">' +
+        'not measured \u2014 a leg\u2019s send price was not kept</div></div>';
     }
-
-    var window_ = report.window || {};
-    html += '<table><tbody><tr><td>' + (window_.label || DASH) + '</td>' +
-      '<td>' + report.counts.positions + ' positions (' +
-      report.counts.open + ' still open)</td>';
-    var journal = report.journal;
-    html += '<td>' + (journal
-      ? journal.fills + ' of our fills at the broker over the same window'
-      : 'the journal could not be counted') + '</td></tr></tbody></table>';
-    if (window_.note) {
-      html += '<div class="' + (window_.clock === 'broker' ? 'hint' : 'note') +
-        '">' + window_.note + '</div>';
+    var moved = part.moved_money || 0, broker = part.broker_money || 0;
+    var total = Math.abs(moved) + Math.abs(broker);
+    var pm = total ? Math.abs(moved) / total * 100 : 50;
+    function seg(cls, width, text) {
+      return width > 0 ? '<div class="' + cls + '" style="width:' + width +
+        '%">' + text + '</div>' : '';
     }
+    return '<div class="slip-split"><b>' + label + '</b><div class="slip-bar">' +
+      (total ? seg('moved', pm, 'market moved while sending ' +
+                   fmt(part.moved_points_mean, 4) + ' \u00b7 ' + money(moved)) +
+        seg('broker', 100 - pm, 'broker fill ' +
+            fmt(part.broker_points_mean, 4) + ' \u00b7 ' + money(broker))
+        : '<div class="none" style="width:100%">no slippage</div>') +
+      '</div></div>';
+  }
 
-    if (!report.counts.positions) {
-      return html + '<p class="note">nothing was traded in this window. ' +
-        'That is not a slippage of zero — there is nothing to measure ' +
-        'yet.</p>';
-    }
-
+  function slipDetailTables(report) {
+    var html = '';
     html += '<table>' + slipHead('This session');
     html += '<tbody>';
     html += slipRow('Entries', report.overall.entry);
@@ -4285,52 +5405,547 @@
     });
     html += '</tbody></table>';
 
-    // WHICH LEG it comes from: each leg against the touch it was SENT
-    // at, in that leg's own price points (positive a cost).
-    html += '<table><thead><tr><th>By leg (own price points)</th>' +
-      '<th>Leg A</th><th>Leg A entry</th><th>Leg A exit</th>' +
-      '<th>Leg B</th><th>Leg B entry</th><th>Leg B exit</th>' +
-      '</tr></thead><tbody>';
-    Object.keys(report.by_pair).forEach(function (key) {
-      var group = report.by_pair[key];
-      var legs = group.legs || {};
-      var sample = (report.rows || []).filter(function (r) {
-        return r.pair_key === key;
-      })[0] || {};
-      function cell(name) {
-        var leg = legs[name] || {};
-        return leg.measured ? slipPoints(leg.points_mean)
-          : '<td><span class="hint">not kept</span></td>';
+    return html;
+  }
+
+  // -- the Sizing tab ------------------------------------------------------
+  //
+  // The sizing sheet, live: capital in hand down the side, what it
+  // means per trade, a month and in a run of losses. Worked out here
+  // from ONE ladder's own figures, as MT5 prices them now: the margin
+  // the terminals ask for one spread, what a point of spread is worth
+  // (k) and the commission per lot. A planning table only - nothing
+  // here sends an order. Ported from Stat_Arb_W3's, for MT5: no maker /
+  // taker fee tiers, no funding; the margin is the broker's, so there is
+  // no leverage to set.
+
+  var SZ_WINS = [55, 60, 62.5, 65, 70, 75, 80];
+  var SZ_LOSS_SHARES = [5, 10, 15, 20, 25, 30, 35];
+
+  function sizingSettings() {
+    /* Every assumption on the Sizing tab, the trader's to change. */
+    var d = {win: 65, perDay: 3, freePct: 40, target: 1.5,
+             targetBase: 'margin', stop: 1.5, stopBase: 'capital'};
+    return Object.assign(d, state.sizing || {});
+  }
+
+  function sizingMarket() {
+    /* The chosen ladder's figures for ONE spread, as MT5 has them now.
+     * Anything not known yet is null - a sheet is not drawn on a guess. */
+    var pairs = (state.snapshot || {}).pairs || {};
+    var keys = Object.keys(pairs);
+    var key = state.sizingPair && pairs[state.sizingPair]
+      ? state.sizingPair : keys[0];
+    var r = key ? pairs[key] : null;
+    if (!r) { return {key: null, keys: keys}; }
+    var m = r.market || {};
+    var exit = r.exit || {};
+    var notional = null;
+    if (r.contract_a && r.contract_b && m.leg_a_mid && m.leg_b_mid &&
+        r.clip_lots_a && r.clip_lots_b) {
+      notional = r.clip_lots_a * r.contract_a * m.leg_a_mid +
+        r.clip_lots_b * r.contract_b * m.leg_b_mid;
+    }
+    return {key: key, keys: keys, name: r.name || key,
+            margin: exit.margin_per_spread || null,
+            marginSource: exit.margin_source || null,
+            k: r.spread_units || null,
+            commission: r.commission_per_spread,
+            notional: notional,
+            lotsA: r.clip_lots_a, lotsB: r.clip_lots_b,
+            symbolA: r.symbol_a, symbolB: r.symbol_b,
+            spread: m.mid_spread};
+  }
+
+  function sizingRow(capital, cfg, mk) {
+    /* One capital level, worked through. The target is the profit AFTER
+     * every cost and the stop the whole loss, costs included, so the P&L
+     * is just wins x target - losses x stop. The commission sets how far
+     * the spread must move: target + commission to win, stop -
+     * commission before the stop. */
+    var margin = capital * (100 - cfg.freePct) / 100;
+    var spreads = mk.margin ? margin / mk.margin : 0;
+    var point = spreads * (mk.k || 0);
+    var perMonth = cfg.perDay * 30;
+    var fees = mk.commission === null || mk.commission === undefined
+      ? null : spreads * mk.commission;
+    var target = cfg.target / 100 *
+      (cfg.targetBase === 'capital' ? capital : margin);
+    var stop = cfg.stop / 100 * (cfg.stopBase === 'margin' ? margin : capital);
+    var w = cfg.win / 100;
+    var perTrade = w * target - (1 - w) * stop;
+    var breakEven = (target + stop) > 0 ? stop / (target + stop) * 100 : null;
+    var cost = fees || 0;
+    return {capital: capital, margin: margin, free: capital - margin,
+            spreads: spreads,
+            lotsA: spreads * (mk.lotsA || 0), lotsB: spreads * (mk.lotsB || 0),
+            position: mk.notional === null ? null : spreads * mk.notional,
+            point: point, fees: fees, target: target, stop: stop,
+            lossPerStop: stop, perTrade: perTrade,
+            month: perTrade * perMonth, breakEven: breakEven,
+            targetPts: point ? (target + cost) / point : null,
+            stopPts: point ? Math.max(stop - cost, 0) / point : null,
+            feePts: point && fees !== null ? fees / point : null};
+  }
+
+  function sizingSheetHtml() {
+    /* THE PRINTABLE SIZING SHEET: the table as the Sizing tab shows it
+     * now, with the settings it was worked out on, as a page of its own
+     * - A4 landscape, scaled to ONE page. */
+    var cfg = sizingSettings();
+    var mk = sizingMarket();
+    var holder = document.createElement('div');
+    holder.innerHTML = sizingPane();
+    var table = holder.querySelector('.sz-table');
+    var notes = holder.querySelector('.sz-notes');
+    var settings = [
+      ['Ladder', mk.name || DASH],
+      ['Win rate', cfg.win + '%'],
+      ['Free capital', cfg.freePct + '%'],
+      ['Target', cfg.target + '% of ' + cfg.targetBase],
+      ['Stop', cfg.stop + '% of ' + cfg.stopBase],
+      ['Trades a day', cfg.perDay + ' (' + cfg.perDay * 30 + ' a month)'],
+      ['Margin / spread', mk.margin ? money(mk.margin) +
+        (mk.marginSource === 'leverage' ? ' (estimated)' : ' (MT5)') : DASH],
+      ['Spread now', mk.spread === null || mk.spread === undefined ? DASH
+        : fmt(mk.spread, 4)]];
+    var now = new Date();
+    var mark = '<svg class="mark" viewBox="0 0 16 16"><rect x="4" y="7.2" ' +
+      'width="8" height="1.6" fill="#1a1a1a"/><circle cx="4.6" cy="8" ' +
+      'r="2.6" fill="#2f6fb0"/><circle cx="11.4" cy="8" r="2.6" ' +
+      'fill="#c0342f"/></svg>';
+    var css = '@page{size:A4 landscape;margin:6mm}' +
+      '*{box-sizing:border-box}body{margin:0;font:11px "Segoe UI",Arial,' +
+      'sans-serif;color:#1f2933;background:#e9ecf0;' +
+      '-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+      '.bar{position:sticky;top:0;background:#16324f;color:#dbe4ee;' +
+      'padding:8px 14px;display:flex;gap:12px;align-items:center}' +
+      '.bar button{font:600 12px inherit;padding:5px 14px;border:0;' +
+      'border-radius:4px;background:#fff;color:#16324f;cursor:pointer}' +
+      '.sheet{background:#fff;margin:12px auto;padding:10px 12px;' +
+      'width:max-content}' +
+      '.head{display:flex;justify-content:space-between;align-items:flex-end;' +
+      'border-bottom:3px solid #16324f;padding-bottom:6px;margin-bottom:6px;' +
+      'gap:24px}.brand{display:flex;gap:10px;align-items:center}' +
+      '.mark{width:40px;height:40px}.desk{font-weight:700;letter-spacing:' +
+      '.18em;font-size:10px;color:#6b7280}h1{margin:0;font-size:20px;' +
+      'color:#16324f}.set{display:grid;grid-template-columns:repeat(3,auto);' +
+      'gap:1px 16px;font-size:10px}.set span{color:#6b7280;margin-right:4px}' +
+      '.sum{font-size:10px;margin:4px 0 6px;color:#374151;width:0;' +
+      'min-width:100%}' +
+      'table{border-collapse:collapse;font-variant-numeric:tabular-nums;' +
+      'width:1px}' +
+      'th,td{border:1px solid #c9cfd8;padding:1px 4px;text-align:center;' +
+      'white-space:nowrap;font-size:10px}th{background:#16324f;color:#fff;' +
+      'font-weight:600;white-space:normal;line-height:1.15}td small,th small{font-size:8px;opacity:.75}' +
+      'tbody tr:nth-child(even) td{background:#f3f5f8}' +
+      '.up{color:#127a3a}.down{color:#b42318}' +
+      '.notes{font-size:9px;color:#6b7280;margin-top:5px;width:0;' +
+      'min-width:100%;white-space:normal}' +
+      '.head{width:0;min-width:100%}' +
+      '@media print{body{background:#fff}.bar{display:none}' +
+      '.sheet{margin:0;padding:0}}';
+    // ONE PAGE: the sheet is scaled to the printable area of A4
+    // landscape (6 mm margins: about 1077 x 748 px at 96 dpi).
+    var fit = 'function fit(){var s=document.querySelector(".sheet");' +
+      's.style.zoom=1;var k=Math.min(1,1060/s.offsetWidth,' +
+      '735/s.offsetHeight);s.style.zoom=k;}' +
+      'fit();window.addEventListener("load",fit);' +
+      'window.addEventListener("beforeprint",fit);' +
+      'if(document.fonts){document.fonts.ready.then(fit);}';
+    return '<!doctype html><html><head><meta charset="utf-8">' +
+      '<title>Nexus — Position Sizing Sheet</title><style>' + css +
+      '</style></head><body><div class="bar"><button onclick="' +
+      'window.print()">Print / Save as PDF</button><span>One A4 landscape ' +
+      'page. In the print dialog, turn on “Background graphics” ' +
+      'for the colours.</span></div><div class="sheet"><div class="head">' +
+      '<div class="brand">' + mark + '<div><div class="desk">NEXUS</div>' +
+      '<h1>Position Sizing Sheet</h1></div></div><div class="set">' +
+      settings.map(function (kv) {
+        return '<div><span>' + kv[0] + '</span>' + escapeHtml(kv[1]) +
+          '</div>';
+      }).join('') + '<div><span>Prepared</span>' +
+      escapeHtml(now.toLocaleString()) + '</div></div></div>' +
+      '<div class="sum">' + ((holder.querySelector('.sz-sum') || {})
+        .innerHTML || '') + '</div>' + (table ? table.outerHTML : '') +
+      '<div class="notes">' + (notes ? notes.innerHTML : '') + '</div>' +
+      '</div><script>' + fit + '<\/script></body></html>';
+  }
+
+  function printSizingSheet() {
+    var page = window.open('', '_blank');
+    if (!page) {
+      toast('The sheet could not open - allow pop-ups for this page');
+      return;
+    }
+    page.document.open();
+    page.document.write(sizingSheetHtml());
+    page.document.close();
+  }
+
+  function sizingPane() {
+    var cfg = sizingSettings();
+    var mk = sizingMarket();
+    var perMonth = cfg.perDay * 30;
+    function k(x) {
+      var a = Math.abs(x);
+      // A million and up in M: "$1.25M", not "$1,250k".
+      if (a >= 1e6) {
+        return '$' + String(parseFloat((a / 1e6).toFixed(2))) + 'M';
       }
-      html += '<tr><td>' + escapeHtml(group.name || key) + '</td>' +
-        '<td>' + escapeHtml(sample.symbol_a || 'A') + '</td>' +
-        cell('entry_leg_a') + cell('exit_leg_a') +
-        '<td>' + escapeHtml(sample.symbol_b || 'B') + '</td>' +
-        cell('entry_leg_b') + cell('exit_leg_b') + '</tr>';
+      return (a < 100e3 && Math.round(a) % 1000 ? '$' + (a / 1e3).toFixed(1)
+        : '$' + Math.round(a / 1e3).toLocaleString('en-US')) + 'k';
+    }
+    function usd(x) {
+      return '$' + Math.round(Math.abs(x)).toLocaleString('en-US');
+    }
+    function pct(x, d) {
+      return (x >= 0 ? '+' : '−') + Math.abs(x).toFixed(d === undefined
+        ? 1 : d) + '%';
+    }
+    function lots(x) {
+      return x >= 100 ? Math.round(x).toLocaleString('en-US')
+        : String(parseFloat(x.toFixed(2)));
+    }
+    var pairs = (state.snapshot || {}).pairs || {};
+    var picker = '<select class="sz-input sz-pair" data-key="pair" ' +
+      'data-kind="text">' + mk.keys.map(function (key) {
+        return '<option value="' + escapeHtml(key) + '"' +
+          (key === mk.key ? ' selected' : '') + '>' +
+          escapeHtml((pairs[key] || {}).name || key) + '</option>';
+      }).join('') + '</select>';
+    var wins = SZ_WINS.map(function (v) {
+      return '<button type="button" class="sz-win' +
+        (v === cfg.win ? ' on' : '') + '" data-win="' + v + '">' + v +
+        '%</button>';
+    }).join('');
+    function input(key, label, step, unit) {
+      return '<label class="sz-field"><span>' + label + '</span><input ' +
+        'class="sz-input" id="sz-' + key + '" type="number" min="0" step="' +
+        step + '" data-key="' + key + '" value="' + cfg[key] + '">' +
+        (unit || '') + '</label>';
+    }
+    function base(key) {
+      return '<select class="sz-input" id="sz-' + key + '" data-key="' + key +
+        '" data-kind="text"><option value="margin"' +
+        (cfg[key] === 'margin' ? ' selected' : '') + '>of margin</option>' +
+        '<option value="capital"' + (cfg[key] === 'capital' ? ' selected'
+          : '') + '>of capital</option></select>';
+    }
+    var html = '<div class="sz">' +
+      '<div class="sz-bar"><label class="sz-field"><span>Ladder</span>' +
+      picker + '</label><span class="sz-label">Win rate</span>' + wins +
+      input('win', 'or', 0.5, '%') + '</div>' +
+      '<div class="sz-bar sz-fields">' +
+      input('freePct', 'Free capital', 5, '%') +
+      '<label class="sz-field"><span>Profit (target)</span><input ' +
+        'class="sz-input" id="sz-target" type="number" min="0" step="0.1" ' +
+        'data-key="target" value="' + cfg.target + '">%' + base('targetBase') +
+        '</label>' +
+      '<label class="sz-field"><span>Loss (stop)</span><input ' +
+        'class="sz-input" id="sz-stop" type="number" min="0" step="0.1" ' +
+        'data-key="stop" value="' + cfg.stop + '">%' + base('stopBase') +
+        '</label>' +
+      input('perDay', 'Trades / day', 1) +
+      '<button type="button" class="sz-reset">Reset</button>' +
+      '<button type="button" class="sz-print" title="This sheet, with the ' +
+      'settings above, on one A4 landscape page - print it or save it as ' +
+      'a PDF">Print sheet</button></div>';
+    // UNMEASURED IS NOT ZERO: without MT5's margin or k for this ladder
+    // there is no sheet, and it says which number is missing.
+    var missing = !mk.key ? 'no ladder is set up yet'
+      : !mk.margin ? 'MT5 has not priced the margin for one spread of ' +
+        mk.name + ' yet - is the ladder live and both terminals connected?'
+      : !mk.k ? 'the contract size of ' + mk.name + '’s leg B is not ' +
+        'known yet' : null;
+    if (missing) {
+      return html + '<div class="sz-sum sz-missing">No sheet: ' +
+        escapeHtml(missing) + '.</div></div>';
+    }
+    // The summary, at $100k so every percentage reads against one
+    // example; each row has its own figures below.
+    var ex = sizingRow(100e3, cfg, mk);
+    html += '<div class="sz-sum">At $100k capital on <b>' +
+      escapeHtml(mk.name) + '</b>: ' + lots(ex.spreads) + ' spread(s) (' +
+      lots(ex.lotsA) + ' lots A, ' + lots(ex.lotsB) + ' lots B) · ' +
+      'target <b>+' + usd(ex.target) + '</b> net, stop <b>−' +
+      usd(ex.stop) + '</b> all in, commission <b>' + (ex.fees === null
+        ? DASH : usd(ex.fees)) + '</b> a round turn' + (ex.feePts === null
+        ? '' : ' (' + ex.feePts.toFixed(3) + ' pts)') +
+      ' → the spread moves <b>' + (ex.targetPts || 0).toFixed(3) +
+      ' pts</b> to the target, <b>' + (ex.stopPts || 0).toFixed(3) +
+      ' pts</b> to the stop · break-even win rate <b>' +
+      (ex.breakEven === null ? DASH : ex.breakEven.toFixed(1) + '%') +
+      '</b> · at ' + cfg.win + '%: <b class="' +
+      (ex.month >= 0 ? 'up' : 'down') + '">' + pct(ex.month / 1e3, 1)
+        .replace('%', '') + 'k a month (' + pct(ex.month / ex.capital * 100) +
+      ' of capital)</b> · ' + perMonth + ' trades a month · ' +
+      'margin ' + money(mk.margin) + ' a spread' +
+      (mk.marginSource === 'leverage' ? ' (estimated from leverage)'
+        : ' (MT5’s own)') + ', ' + money(mk.k) + ' a point</div>';
+    var losses = SZ_LOSS_SHARES.map(function (p) {
+      return Math.ceil(perMonth * p / 100);
+    });
+    html += '<div class="sz-wrap"><table class="sz-table"><thead>' +
+      '<tr><th rowspan="2">Sr</th><th colspan="6">Size</th>' +
+      '<th colspan="4">Per trade (after all costs)</th>' +
+      '<th colspan="2">Costs</th><th colspan="3">Month at ' + cfg.win +
+      '% wins</th><th colspan="7">Drawdown if this share of the ' +
+      perMonth + ' trades lose, back to back</th></tr><tr>' +
+      '<th>Capital in hand</th><th>Margin / trade</th><th>Free</th>' +
+      '<th>Lots A / B</th><th>Position (both legs)</th><th>$ / point</th>' +
+      '<th>Target</th><th>Stop</th><th>Target move (pts)</th>' +
+      '<th>Stop move (pts)</th>' +
+      '<th>Commission / trade</th><th>Break-even win</th>' +
+      '<th>Net P&amp;L</th><th>Return on capital</th>' +
+      '<th>Return on margin</th>' +
+      SZ_LOSS_SHARES.map(function (p, i) {
+        return '<th>' + p + '%<br><small>' + losses[i] + ' losses</small></th>';
+      }).join('') + '</tr></thead><tbody>';
+    // Capital in hand: $5k, $10k, then $25k steps to $200k, $100k steps
+    // to $500k and $250k steps to $10M.
+    var caps = [5e3, 10e3];
+    for (var c = 25e3; c <= 200e3; c += 25e3) { caps.push(c); }
+    for (c = 300e3; c <= 500e3; c += 100e3) { caps.push(c); }
+    for (c = 750e3; c <= 10e6; c += 250e3) { caps.push(c); }
+    caps.forEach(function (capital, i) {
+      var r = sizingRow(capital, cfg, mk);
+      var cls = r.month >= 0 ? 'up' : 'down';
+      var beCls = r.breakEven !== null && r.breakEven > cfg.win ? 'down' : '';
+      html += '<tr><td>' + (i + 1) + '</td><td>' + k(capital) + '</td><td>' +
+        k(r.margin) + '</td><td>' + k(r.free) + '</td><td>' +
+        lots(r.lotsA) + ' / ' + lots(r.lotsB) + '</td><td>' +
+        (r.position === null ? DASH : r.position >= 1e6
+          ? '$' + (r.position / 1e6).toFixed(2) + 'M' : k(r.position)) +
+        '</td><td>' + usd(r.point) +
+        '</td><td>+' + usd(r.target) + '</td><td>−' + usd(r.stop) +
+        '</td><td>' + (r.targetPts || 0).toFixed(3) + '</td><td class="' +
+        (r.fees !== null && r.fees >= r.stop ? 'down' : '') + '">' +
+        (r.stopPts || 0).toFixed(3) + '</td><td>' +
+        (r.fees === null ? DASH : usd(r.fees)) + '</td><td class="' + beCls +
+        '">' + (r.breakEven === null ? DASH : r.breakEven.toFixed(1) + '%') +
+        '</td><td class="' + cls + '">' + (r.month >= 0 ? '+' : '−') +
+        k(r.month) + '</td><td class="' + cls + '">' +
+        pct(r.month / capital * 100) + '</td><td class="' + cls + '">' +
+        pct(r.margin ? r.month / r.margin * 100 : 0) + '</td>' +
+        losses.map(function (n) {
+          return '<td>−' + k(n * r.lossPerStop) + ' <small>(' +
+            (n * r.lossPerStop / capital * 100).toFixed(1) + '%)</small></td>';
+        }).join('') + '</tr>';
+    });
+    html += '</tbody></table></div><div class="sz-notes">' +
+      '<b>Target</b> is the profit after every cost; <b>Stop</b> is the ' +
+      'whole loss, costs included. <b>Commission</b> is the per-lot ' +
+      'commission in the settings, both legs, both ends; it sets how far ' +
+      'the spread must move: target + commission to win, stop − ' +
+      'commission before the stop. <b>Break-even win</b> = stop ÷ ' +
+      '(target + stop). <b>Stop move in red:</b> the commission alone ' +
+      'uses up the stop. <b>Margin</b> is what the terminals ask for one ' +
+      'spread, both legs, scaled to the row; <b>$ / point</b> is the P&amp;L ' +
+      'for one point of spread. <b>Lots</b> are before the brokers’ ' +
+      'lot steps. <b>Not included:</b> slippage on stops, swap ' +
+      '(overnight financing).</div></div>';
+    return html;
+  }
+
+  function slipFillsHtml(f, byPair) {
+    /* EVERY FILL: each leg, each end, the price it was sent at against
+     * the price the broker filled it at. Said first and in one line -
+     * how many filled exactly where sent - because 'was there slippage
+     * on my fills?' is the question this tab is opened to answer. */
+    if (!f || !f.rows || !f.rows.length) { return ''; }
+    var s = f.summary || {};
+    function names(key) { return escapeHtml(((byPair[key] || {}).name) || key); }
+    var head = s.measured
+      ? '<b>' + s.exact + ' of ' + s.measured + '</b> leg fills filled ' +
+        'exactly at the price sent' +
+        (s.worse ? ' \u00b7 <span class="down"><b>' + s.worse +
+          '</b> worse, ' + money(-s.worse_money) + '</span>' : '') +
+        (s.better ? ' \u00b7 <span class="up"><b>' + s.better +
+          '</b> better, ' + money(-s.better_money) + '</span>' : '') +
+        (s.unmeasured ? ' \u00b7 ' + s.unmeasured + ' not measured' : '')
+      : 'no fill with its send price recorded yet';
+    var html = '<h4 class="slip-h">Slippage on every fill <small>\u2014 ' +
+      'each leg against the price it was sent at; positive is a cost. A ' +
+      'limit filled at its own price reads 0.' +
+      '</small></h4><div class="slip-fills-head">' + head + '</div>' +
+      '<table class="journal slip-fills"><thead><tr><th>Time</th>' +
+      '<th class="l">Ladder</th><th class="l">End</th><th class="l">Leg</th>' +
+      '<th class="l">Side</th><th>Lots</th><th>Sent at</th><th>Filled at</th>' +
+      '<th>Slip</th><th>bp</th><th>$</th></tr></thead><tbody>';
+    f.rows.forEach(function (r) {
+      var cls = r.slip === null || r.slip === undefined ? ''
+        : r.slip > 1e-9 ? 'down' : (r.slip < -1e-9 ? 'up' : '');
+      var when = r.at ? new Date(r.at * 1000) : null;
+      html += '<tr><td>' + (when ? when.toLocaleString(undefined, {
+          month: 'short', day: 'numeric', hour: '2-digit',
+          minute: '2-digit', second: '2-digit'}) : DASH) + '</td>' +
+        '<td class="l">' + names(r.pair_key) + '</td>' +
+        '<td class="l">' + (r.end === 'entry' ? 'Entry' : 'Exit') + '</td>' +
+        '<td class="l">' + r.leg + ' ' + escapeHtml(String(r.symbol || ''))
+          + '</td><td class="l">' + escapeHtml(r.side || DASH) + '</td>' +
+        '<td>' + fmt(r.volume, 2) + '</td>' +
+        '<td>' + fmt(r.sent, 4) + '</td><td>' + fmt(r.filled, 4) + '</td>' +
+        '<td class="' + cls + '">' + (r.slip === null || r.slip === undefined
+          ? DASH : fmt(r.slip, 4)) + '</td>' +
+        '<td class="' + cls + '">' + (r.slip_bps === null ||
+          r.slip_bps === undefined ? DASH : fmt(r.slip_bps, 2)) + '</td>' +
+        '<td class="' + cls + '">' + (r.slip_money === null ||
+          r.slip_money === undefined ? DASH : money(r.slip_money)) +
+        '</td></tr>';
+    });
+    return html + '</tbody></table>';
+  }
+
+  function slippageTable() {
+    var report = state.slippage;
+    var html = '<div class="journal-controls">' +
+      '<label class="check"><input type="checkbox" class="all-sessions"' +
+      (state.slippageAll ? ' checked' : '') + '> every session</label>' +
+      '<a class="btn" href="/api/slippage.csv' +
+      (state.slippageAll ? '?session=all' : '') + '" download>Export CSV</a>' +
+      '<span class="hint">Measured on the fills the broker actually gave ' +
+      'us. Positive is a cost at both ends.</span></div>';
+
+    if (report === null) { return html + '<p class="note">loading…</p>'; }
+    if (report.error) {
+      return html + '<p class="note mismatch">' + report.error + '</p>';
+    }
+
+    var window_ = report.window || {};
+    var journal = report.journal;
+    html += '<div class="hint">Session <b>' + (window_.label || DASH) +
+      '</b> \u00b7 ' + report.counts.positions + ' positions (' +
+      report.counts.open + ' still open) \u00b7 ' + (journal
+        ? journal.fills + ' of our fills at the broker over the same window'
+        : 'the journal could not be counted') + '</div>';
+    if (window_.note) {
+      html += '<div class="' + (window_.clock === 'broker' ? 'hint' : 'note') +
+        '">' + window_.note + '</div>';
+    }
+
+    if (!report.counts.positions) {
+      return html + '<p class="note">nothing was traded in this window. ' +
+        'That is not a slippage of zero \u2014 there is nothing to measure ' +
+        'yet.</p>';
+    }
+
+    var o = report.overall || {};
+    var entry = o.entry || {}, exit_ = o.exit || {}, rt = o.round_trip || {};
+    var pnl = report.pnl || {};
+    var legs = (report.by_account || []).length;
+    html += '<div class="slip-cards">' +
+      slipCard('Slippage cost', slipCost(rt.measured ? rt.money_total
+                                                     : entry.money_total),
+               (rt.measured ? rt.measured + ' round turn' +
+                 (rt.measured > 1 ? 's' : '') : 'entries only so far') +
+               ' \u00b7 ' + legs + ' leg' + (legs === 1 ? '' : 's') +
+               (journal ? ' \u00b7 ' + journal.fills + ' fills' : ''),
+               costClass(rt.measured ? rt.money_total : entry.money_total)) +
+      slipCard('Entries', slipCost(entry.money_total),
+               entry.measured ? 'avg ' + fmt(entry.points_mean, 4) +
+                 ' per spread \u00b7 ' + entry.paid + ' paid / ' +
+                 entry.earned + ' earned' : 'not measured',
+               costClass(entry.money_total)) +
+      slipCard('Exits', slipCost(exit_.money_total),
+               exit_.measured ? 'avg ' + fmt(exit_.points_mean, 4) +
+                 ' per spread \u00b7 ' + exit_.paid + ' paid / ' +
+                 exit_.earned + ' earned' : 'no closed trade yet',
+               costClass(exit_.money_total)) +
+      slipCard('Share of the P&amp;L', pnl.share === null ||
+                 pnl.share === undefined ? DASH
+                 : (pnl.share * 100).toFixed(1) + '%',
+               !pnl.trades ? 'no closed trade measured yet'
+                 : pnl.share === null || pnl.share === undefined
+                   ? 'the trades lost ' + money(-pnl.net) + ' net \u2014 ' +
+                     'slippage added ' + money(pnl.slippage)
+                   : money(pnl.slippage) + ' of ' + money(pnl.before) +
+                     ' before slippage \u00b7 net ' + money(pnl.net)) +
+      slipCard('Click \u2192 both legs on',
+               report.click_to_on_median_ms === null ||
+                 report.click_to_on_median_ms === undefined ? DASH
+                 : Math.round(report.click_to_on_median_ms) + ' ms',
+               'median this session') +
+      '</div>';
+
+    html += slipFillsHtml(report.fills, report.by_pair || {});
+
+    // WHERE IT CAME FROM: the part a faster send would save, and the
+    // part the broker's fills cost.
+    var split = report.split || {};
+    html += '<h4 class="slip-h">Where the slippage came from</h4>' +
+      '<div class="slip-splits">' + slipBar('Entries', split.entry) +
+      slipBar('Exits', split.exit) + '</div>' +
+      '<div class="hint"><b class="moved-t">Market moved while sending</b>: ' +
+      'the spread changed between the decision and the moment the legs ' +
+      'were sent (latency). <b class="broker-t">Broker fill</b>: a leg ' +
+      'filled worse than the price it was sent at.</div>';
+
+    // BY ACCOUNT: which broker the slippage comes from.
+    var info = report.account_info || {};
+    html += '<h4 class="slip-h">By account (broker)</h4><table>' +
+      '<thead><tr><th>Leg</th><th>Symbol</th><th>Account \u00b7 broker</th>' +
+      '<th>Fills</th><th>Entry avg</th><th>Exit avg</th><th>Worst</th>' +
+      '<th>Cost</th><th>Paid / earned</th></tr></thead><tbody>';
+    (report.by_account || []).forEach(function (a) {
+      var who = info[a.account] || {};
+      html += '<tr><td>' + escapeHtml(a.legs || '') + '</td><td>' +
+        escapeHtml(a.symbol || DASH) + '</td><td>' +
+        escapeHtml(a.account || DASH) +
+        (who.login ? ' \u00b7 #' + escapeHtml(String(who.login)) : '') +
+        (who.broker ? ' \u00b7 ' + escapeHtml(who.broker) : '') + '</td>' +
+        '<td>' + a.fills + '</td>' + slipPoints(a.entry_points_mean) +
+        slipPoints(a.exit_points_mean) + slipPoints(a.points_worst) +
+        slipMoney(a.money_total) + '<td>' + a.paid + ' / ' + a.earned +
+        '</td></tr>';
     });
     html += '</tbody></table>';
 
-    if ((report.worst || []).length) {
-      html += '<table><thead><tr><th>Worst entries</th><th>Side</th>' +
-        '<th>Qty</th><th>Type</th><th>Slip</th><th>Cost</th>' +
-        '<th>Leg A</th><th>Leg B</th>' +
-        '<th>Click→on</th><th>Opened</th></tr></thead><tbody>';
-      report.worst.forEach(function (row) {
-        html += '<tr><td>' + (row.pair_key || DASH) + '</td>';
-        html += '<td>' + (row.side || DASH) + '</td>';
-        html += '<td>' + qty(row.quantity) + '</td>';
-        html += '<td>' + (row.order_type || DASH) + '</td>';
-        html += slipPoints(row.entry_points);
-        html += slipMoney(row.entry_money);
-        html += slipPoints(row.entry_leg_a);
-        html += slipPoints(row.entry_leg_b);
-        html += '<td>' + (row.click_to_on_ms === null ||
-                          row.click_to_on_ms === undefined
-          ? DASH : Math.round(row.click_to_on_ms) + 'ms') + '</td>';
-        html += '<td>' + localTime(row.opened_at) + '</td></tr>';
-      });
-      html += '</tbody></table>';
-    }
+    // EVERY TRADE, newest first.
+    html += '<h4 class="slip-h">Trades</h4><table><thead><tr>' +
+      '<th>Opened</th><th>Ladder</th><th>Side</th><th>Qty</th><th>Type</th>' +
+      '<th>Entry slip</th><th>Exit slip</th><th>Round turn</th>' +
+      '<th>Moved / broker</th><th>Click\u2192on</th><th>Net P&amp;L</th>' +
+      '</tr></thead><tbody>';
+    (report.rows || []).slice(0, 50).forEach(function (r) {
+      var moved = r.entry_moved_money, broker = r.entry_broker_money;
+      if (!r.open && moved !== null && moved !== undefined &&
+          r.exit_moved_money !== null && r.exit_moved_money !== undefined) {
+        moved += r.exit_moved_money;
+        broker += r.exit_broker_money;
+      } else if (!r.open) {
+        moved = broker = null;
+      }
+      function both(points, cash) {
+        return points === null || points === undefined
+          ? '<td>' + DASH + '</td>'
+          : '<td class="' + costClass(points) + '">' + fmt(points, 4) +
+            ' \u00b7 ' + slipCost(cash) + '</td>';
+      }
+      html += '<tr><td>' + localTime(r.opened_at) + '</td><td>' +
+        escapeHtml((report.by_pair[r.pair_key] || {}).name || r.pair_key ||
+                   DASH) + '</td><td>' + (r.side || DASH) + '</td><td>' +
+        qty(r.quantity) + '</td><td>' + (r.order_type || DASH) + '</td>' +
+        both(r.entry_points, r.entry_money) +
+        (r.open ? '<td><span class="hint">open</span></td>'
+          : both(r.exit_points, r.exit_money)) +
+        (r.open ? '<td>' + DASH + '</td>' : slipMoney(r.round_trip_money)) +
+        '<td>' + (moved === null || moved === undefined ? DASH
+          : money(moved) + ' / ' + money(broker)) + '</td>' +
+        '<td>' + (r.click_to_on_ms === null || r.click_to_on_ms === undefined
+          ? DASH : Math.round(r.click_to_on_ms) + ' ms') + '</td>' +
+        (r.open ? '<td><span class="hint">open</span></td>'
+          : '<td class="' + costClass(-(r.realized_pnl || 0)) + '">' +
+            (r.realized_pnl === null || r.realized_pnl === undefined ? DASH
+              : money(r.realized_pnl)) + '</td>') + '</tr>';
+    });
+    html += '</tbody></table>';
+
+    // The full statistics, one click away.
+    html += '<details class="slip-detail"' +
+      (state.slipDetailOpen ? ' open' : '') + '><summary>Statistics: mean, ' +
+      'median, worst and best, by order type and by ladder</summary>' +
+      slipDetailTables(report) + '</details>';
     return html;
   }
 
@@ -4366,6 +5981,12 @@
     }
     state.analysisAt = now;
     fetch('/api/analysis?days=' + state.analysisDays +
+          '&zone_days=' + state.zoneDays +
+          (state.zoneDate ? '&date=' + encodeURIComponent(state.zoneDate) : '') +
+          (state.volumeFrom ? '&volume_from=' +
+           encodeURIComponent(state.volumeFrom) : '') +
+          (state.volumeTo ? '&volume_to=' +
+           encodeURIComponent(state.volumeTo) : '') +
           (state.analysisPair ? '&pair=' +
            encodeURIComponent(state.analysisPair) : ''))
       .then(function (r) { return r.json(); })
@@ -4424,6 +6045,36 @@
     }).catch(function (error) { done(escapeHtml(error.message), 'down'); });
   }
 
+  function anCapital() {
+    /* The capital managed, as the last analysis read it - or as just
+     * typed, until the next one reads it back. 0 / null: not set. */
+    if (state.capitalManaged !== undefined) { return state.capitalManaged; }
+    var s = (state.analysis || {}).summary || {};
+    // The account balance stands in when nothing is typed: it is the
+    // placeholder, not a saved setting.
+    if (s.capital_source === 'balance') { return null; }
+    return s.capital || null;
+  }
+
+  function anBalanceCapital() {
+    var s = (state.analysis || {}).summary || {};
+    return s.capital_source === 'balance' && state.capitalManaged === undefined
+      ? s.capital : null;
+  }
+
+  function saveCapital(value) {
+    var number = value === '' ? 0 : Number(value);
+    if (!isFinite(number) || number < 0) { return; }
+    state.capitalManaged = number || null;
+    fetch('/api/settings', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({fields: {CAPITAL_MANAGED: number}})
+    }).then(function (r) { return r.json(); }).then(function () {
+      delete state.capitalManaged;
+      loadAnalysis(true);
+    }).catch(function () { loadAnalysis(true); });
+  }
+
   function anTile(label, value, cls, title) {
     return '<div class="an-tile"' + (title ? ' title="' + escapeHtml(title) +
       '"' : '') + '><div class="an-val ' + (cls || '') + '">' + value +
@@ -4452,15 +6103,668 @@
     return h ? h + 'h ' + m + 'm' : (m ? m + 'm ' + (s % 60) + 's' : s + 's');
   }
 
+  // A spread PRICE, not money: the two numbers a trade is the
+  // difference of. Trailing zeros come off back to two decimals, the
+  // same as the engine prints them.
+  function anSpread(value) {
+    if (value === null || value === undefined) { return DASH; }
+    var text = Number(value).toFixed(4);
+    var bits = text.split('.');
+    var decimals = bits[1].replace(/0+$/, '');
+    while (decimals.length < 2) { decimals += '0'; }
+    return bits[0] + '.' + decimals;
+  }
+
+  // The SIZE that was on, per leg. Two legs, so two numbers: a hedge
+  // is not one lot figure and printing one of them hides a mismatch.
+  function anLots(row) {
+    var a = row.lots_a, b = row.lots_b;
+    if ((a === null || a === undefined) && (b === null || b === undefined)) {
+      return DASH;
+    }
+    var one = function (v) {
+      return v === null || v === undefined ? DASH : Number(v).toFixed(2);
+    };
+    return one(a) + ' / ' + one(b);
+  }
+
+  // One LEVEL cell. `on` marks the level this exit was measured
+  // against, so the eye finds the one that mattered without reading
+  // the Exit column first. `sized_by` is the setting that put it
+  // there, in a tooltip: it is prose, and prose does not belong in a
+  // column of prices.
+  function anLevel(value, on, note, sizedBy, money) {
+    if (value === null || value === undefined) {
+      // A level nobody recorded is NOT today's level, and it is not
+      // zero. The dash says so and the tooltip says why.
+      return '<td' + (note ? ' class="hint" title="' + escapeHtml(note) +
+        '"' : '') + '>' + DASH + '</td>';
+    }
+    var tip = [];
+    if (on && sizedBy) { tip.push(sizedBy); }
+    if (on && money !== null && money !== undefined) {
+      tip.push('worth ' + money.toFixed(2) + ' at that level');
+    }
+    return '<td' + (on ? ' class="on-level"' : '') +
+      (tip.length ? ' title="' + escapeHtml(tip.join(' · ')) + '"' : '') +
+      '>' + fmt(value, 4) + '</td>';
+  }
+
+  // How far past the level it was measured against the close went.
+  // 'short of' on a take-profit is the slippage the re-check exists
+  // for, and it is worth seeing as its own number.
+  function anGap(x) {
+    if (!x || x.gap === null || x.gap === undefined) { return DASH; }
+    return fmt(x.gap, 4) + ' <span class="hint">' +
+      escapeHtml(x.gap_word || '') + '</span>';
+  }
+
+  function anSide(side) {
+    return side === 'SELL' ? 'H to L'
+      : (side === 'BUY' ? 'L to H' : (side || DASH));
+  }
+
   function anClock(at) {
     if (!at) { return DASH; }
     var d = new Date(at * 1000);
     return d.toLocaleDateString(undefined, {month: 'short', day: 'numeric'}) +
       ' ' + d.toLocaleTimeString(undefined, {hour12: false});
   }
+  function zoneSince() {
+    return state.zoneDays > 0
+      ? (Date.now() / 1000) - state.zoneDays * 86400 : 0;
+  }
 
-  function anSide(side) {
-    return side === 'SELL' ? 'H to L' : (side === 'BUY' ? 'L to H' : (side || DASH));
+  //: The range dropdown. It heads the whole Z-score excursions view,
+  //: because it governs the counters' event list AND the σ zone table
+  //: under it — a range that moved one of two tables on one screen
+  //: would be worse than no range at all.
+  //: The Signals bar: WHICH LADDER and WHEN, together, because those
+  //: are the two questions asked of this page and asking them in two
+  //: different places on the screen is how you end up reading one
+  //: ladder's numbers under another ladder's name.
+  function zoneRangeBar(a) {
+    var pairs = (state.snapshot && state.snapshot.pairs) || {};
+    var dated = !!state.zoneDate;
+    var days = a.signal_days || [];
+    return '<div class="an-bar">' +
+      '<select class="an-pair">' +
+      '<option value="">every ladder</option>' +
+      Object.keys(pairs).map(function (key) {
+        return '<option value="' + escapeHtml(key) + '"' +
+          (state.analysisPair === key ? ' selected' : '') + '>' +
+          escapeHtml(pairs[key].name || key) + '</option>';
+      }).join('') + '</select>' +
+      ' over the <select class="an-zone-days"' +
+      (dated ? ' disabled' : '') + '>' +
+      [[1, 'last 1 day'], [7, 'last 7 days'], [30, 'last 30 days'],
+       [0, 'all records']].map(function (o) {
+        return '<option value="' + o[0] + '"' +
+          (state.zoneDays === o[0] ? ' selected' : '') + '>' + o[1] +
+          '</option>';
+      }).join('') + '</select>' +
+      ' or on <input type="date" class="an-zone-date" value="' +
+      escapeHtml(state.zoneDate) + '"' +
+      (days.length ? ' max="' + escapeHtml(days[0].day) + '"' : '') + '>' +
+      (dated ? ' <span class="hint">the broker\u2019s ' +
+        escapeHtml(state.zoneDate) + ', not the last 24 hours</span>' : '') +
+      '</div>';
+  }
+
+  var SIGNAL_OUTCOME = {
+    TP: ['took profit', 'up'], SL: ['stopped out', 'down'],
+    EXPIRED: ['neither', ''],
+    // Engaged, and let go before its confirmation was met. Nothing
+    // refused it; the spread simply did not stay.
+    NO_ENTRY: ['not confirmed', ''],
+    // A refusal, NOT a result: the Algo looked and declined.
+    BLOCKED: ['blocked', 'hint']
+  };
+
+  //: How a signal row reads in the Outcome column. EXIT is closed by one
+  //: of the Algo's OTHER exits - its z-stop, its time stop, back to the
+  //: mean in profit - and says which, coloured by what it made. A row
+  //: still armed and being held back says so, rather than 'armed'.
+  function signalOutcome(r) {
+    if (r.outcome === 'EXIT') {
+      return [escapeHtml(r.exit_reason || 'closed by the Algo'),
+              anSign(r.net_pnl)];
+    }
+    if (SIGNAL_OUTCOME[r.outcome]) { return SIGNAL_OUTCOME[r.outcome]; }
+    if (r.state === 'OPEN') { return ['running', '']; }
+    return [r.block_reason ? 'held back' : 'armed',
+            r.block_reason ? 'hint' : ''];
+  }
+
+  //: The three numbers the page exists to answer: how often these
+  //: settings would have signalled, how many of those would have paid,
+  //: and how many would have lost. One set of tiles — a fixed ±2σ/±3σ
+  //: study sat beside them for a while and was taken back out, because
+  //: two sets of counts made the one that mattered harder to read.
+  //: Ask the engine to DERIVE the last 30 days from MT5's bars.
+  //: Long-running, so it goes through the command log like the
+  //: backtest and is polled for its answer.
+  function deriveSignals() {
+    if (state.deriving) { return; }
+    state.deriving = true;
+    state.deriveNote = {html: 'reading MT5\u2019s bars\u2026', cls: 'hint'};
+    render();
+    function done(html, cls) {
+      state.deriving = false;
+      state.deriveNote = {html: html, cls: cls || ''};
+      loadAnalysis(true);
+      render();
+    }
+    fetch('/api/command', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({kind: 'backfill_signals',
+                            payload: {pair: state.analysisPair || null,
+                                      days: 30}})
+    }).then(function (r) { return r.json(); }).then(function (sent) {
+      if (!sent.ok) {
+        return done(escapeHtml(sent.error || 'refused'), 'down');
+      }
+      var tries = 0;
+      (function poll() {
+        fetch('/api/result/' + sent.id).then(function (r) { return r.json(); })
+          .then(function (result) {
+            if (result && result.pending) {
+              if (++tries > 240) {
+                return done('no answer from the engine yet \u2014 try again',
+                            'down');
+              }
+              return window.setTimeout(poll, 500);
+            }
+            var data = (result && result.data) || {};
+            if (!result || result.ok === false || data.ok === false) {
+              return done('could not derive: ' +
+                          escapeHtml(data.reason || result.error ||
+                                     'refused'), 'down');
+            }
+            var parts = Object.keys(data.pairs || {}).map(function (key) {
+              var one = data.pairs[key];
+              return escapeHtml(key) + ': ' + (one.ok ?
+                one.derived + ' derived' +
+                (one.replaced ? ', ' + one.replaced + ' replaced' : '') :
+                escapeHtml(one.reason || 'no history'));
+            });
+            done('derived ' + data.written + ' signal(s) over ' + data.days +
+                 ' days \u2014 ' + parts.join(' \u00b7 ') +
+                 heldBack(data.held),
+                 data.written ? 'up' : 'hint');
+          }).catch(function (error) {
+            done('could not derive: ' + escapeHtml(error.message), 'down');
+          });
+      }());
+    }).catch(function (error) {
+      done('could not derive: ' + escapeHtml(error.message), 'down');
+    });
+  }
+
+  // '0 derived' on its own reads as a broken replay. The reasons the
+  // replay REFUSED each entry are the answer when there are none, and
+  // the top three are as much as a one-line note can carry.
+  function heldBack(held) {
+    var reasons = Object.keys(held || {}).map(function (reason) {
+      return [reason, held[reason]];
+    }).sort(function (a, b) { return b[1] - a[1]; });
+    if (!reasons.length) { return ''; }
+    var total = reasons.reduce(function (sum, r) { return sum + r[1]; }, 0);
+    return ' \u2014 held back ' + total + ' time(s): ' +
+      reasons.slice(0, 3).map(function (r) {
+        // The engine counts these under a reason with its NUMBERS
+        // taken out, so that '0.03x the cost' and '0.04x the cost' are
+        // one reason and not two. It writes that as '#', which on the
+        // screen reads as a fault rather than as a placeholder - and
+        // the count ran straight on after it, so the line ended
+        // '...the #x required 1'.
+        return escapeHtml(String(r[0]).replace(/#/g, 'n')) +
+          ' (' + r[1] + ')';
+      }).join(', ');
+  }
+
+  function signalTiles(a) {
+    var t = a.signal_tally || {};
+    if (!t.armed) { return ''; }
+    // The THRESHOLD these were counted against, named on the tile
+    // rather than left to be guessed. Blank where two ladders on one
+    // page disagree about it: printing either would be wrong.
+    var band = t.threshold_z === null || t.threshold_z === undefined ? ''
+      : Number(t.threshold_z).toFixed(2) + 'σ';
+    return '<div class="an-tiles">' +
+      anTile('z triggered' + (band ? ' ±' + band : ''),
+             t.triggered === undefined ? t.armed : t.triggered, '',
+             'how many times the spread reached the ladder’s own ' +
+             'entry z' + (band ? ' of ' + band : '') + ' — a second ' +
+             'poke at the band while still armed is NOT a second ' +
+             'trigger, because there is nothing new to act on until it ' +
+             'has come back through the floor') +
+      anTile('↑ above', t.triggered_up, '',
+             'stretched HIGH — the Algo SELLS these') +
+      anTile('↓ below', t.triggered_down, '',
+             'stretched LOW — the Algo BUYS these') +
+      anTile('Furthest z', t.peak_z === null || t.peak_z === undefined
+             ? DASH : Number(t.peak_z).toFixed(2) + 'σ', '',
+             'the furthest a trigger got, either way: ' +
+             (t.trough_z === null || t.trough_z === undefined ? DASH
+              : Number(t.trough_z).toFixed(2) + 'σ') + ' low, ' +
+             (t.peak_z === null || t.peak_z === undefined ? DASH
+              : Number(t.peak_z).toFixed(2) + 'σ') + ' high') +
+      anTile('Blocked', t.blocked, t.blocked ? 'hint' : '',
+             'the Algo looked and declined: its edge, regime, trend or ' +
+             'half-life filter, or a stop that would sit inside the ' +
+             'bid-ask. A refusal is not a trade and is never counted as ' +
+             'a loss') +
+      anTile('Traded', t.entered, '', t.no_entry + ' armed and never came ' +
+             'back inside the window') +
+      anTile('Would have WON', t.tp, 'up', 'closed in profit') +
+      anTile('Would have LOST', t.sl, 'down', 'closed at a loss') +
+      anTile('Win rate', t.win_rate === null ? DASH : anPct(t.win_rate),
+             t.win_rate === null ? '' : (t.win_rate >= 50 ? 'up' : 'down'),
+             t.priced + ' of ' + t.settled + ' settled trades carried a ' +
+             'measurable P&L; signals still running are not counted as ' +
+             'losses') +
+      anTile('Net', money(t.net_pnl), anSign(t.net_pnl),
+             'over the trades that were actually taken') +
+      '</div>' +
+      '<div class="hint">' + t.live + ' recorded live off the book, ' +
+      t.replayed + ' replayed from MT5\u2019s bars. A replayed row ' +
+      'sees one look per candle: a stop touched and recovered inside ' +
+      'one is not seen, and the bid-ask is today\u2019s width held ' +
+      'constant.</div>';
+  }
+
+  function signalTable(a) {
+    var all = a.signals || [];
+    // A stretch the Algo armed on and let go of WITHOUT confirming is
+    // not a signal: it never said enter. Listed, a fast market buried
+    // the few real signals under a page of them - a spread that spikes
+    // past the entry z and is back inside the mean before the third
+    // fresh price arms and lets go many times a day. They carry no
+    // money, so hiding them moves no total; one click shows them.
+    var unconfirmed = all.filter(function (r) {
+      return r.outcome === 'NO_ENTRY';
+    }).length;
+    var rows = state.showUnconfirmed ? all : all.filter(function (r) {
+      return r.outcome !== 'NO_ENTRY';
+    });
+    // `name` in `analysisPane` is local to it; this is module level,
+    // so it resolves the ladder's name itself rather than reaching for
+    // a helper that is not in scope.
+    var names = a.names || {};
+    var label = function (key) {
+      return escapeHtml(names[key] || key || DASH);
+    };
+    var html = '<h4>Signal journal <small>— every stretch the ' +
+      'ladder’s settings signalled, recorded as it happened, with ' +
+      'its Algo on or off: how often it signalled, what it refused, ' +
+      'and what the trades would have made</small>' +
+      '<button class="btn an-derive"' +
+      (state.deriving ? ' disabled' : '') + '>' +
+      (state.deriving ? 'deriving…' : 'Derive 30 days') +
+      '</button></h4>';
+    if (state.deriveNote) {
+      // Its own class as well as the shared style: the backtest panel
+      // below also renders an `an-bt-out`, and a bare selector reaches
+      // whichever of the two comes first.
+      html += '<div class="an-bt-out an-derive-out ' +
+        (state.deriveNote.cls || '') + '">' + state.deriveNote.html +
+        '</div>';
+    }
+    html += zoneRangeBar(a);
+    html += signalTiles(a);
+    // THE SIGNAL JOURNAL. Deliberately the same shape as the trade
+    // journal above it, so the two can be read against each other: the
+    // same columns, in the same order, with the three levels as
+    // columns and a running total down the right. A signal that was
+    // refused carries no money and must not move that total.
+    var SIGNAL_COLS = 19;
+    // Which account, at which broker, each leg was on when the row was
+    // recorded. A replayed row has none: it never saw a terminal.
+    function legsOf(r) {
+      var parts = [['A', r.leg_a_account, r.leg_a_broker],
+                   ['B', r.leg_b_account, r.leg_b_broker]]
+        .filter(function (p) { return p[1] || p[2]; })
+        .map(function (p) {
+          return p[0] + ': ' + escapeHtml(p[1] || DASH) +
+            (p[2] ? ' \u00b7 ' + escapeHtml(p[2]) : '');
+        });
+      return parts.length ? '<div class="an-legs hint">' +
+        parts.join('<br>') + '</div>' : '';
+    }
+    // The edge filter's reading on the row: what the move back is worth
+    // against what it costs, and what the filter asks for. Said even
+    // with the filter off - it is the number that says whether
+    // switching it on would have changed this row.
+    function edgeOf(r) {
+      if (r.edge_ratio === null || r.edge_ratio === undefined) {
+        return '<td title="the edge could not be priced">' + DASH +
+          (r.edge_on === false ? ' <span class="hint">(off)</span>' : '') +
+          '</td>';
+      }
+      var short = r.edge_required !== null &&
+        r.edge_required !== undefined &&
+        r.edge_ratio < r.edge_required;
+      return '<td class="' + (short ? 'down' : 'up') + '" title="' +
+        'capture \u00f7 cost; the filter needs ' +
+        fmt(r.edge_required, 2) + '\u00d7' +
+        (r.edge_on === false ? ' \u2014 switched OFF on this ladder' : '') +
+        '">' + fmt(r.edge_ratio, 2) + '\u00d7 / ' +
+        fmt(r.edge_required, 2) + '\u00d7' +
+        (r.edge_on === false ? ' <span class="hint">(off)</span>' : '') +
+        '</td>';
+    }
+    html += '<table class="an-table"><thead><tr><th>Signalled</th>' +
+      '<th class="l">Pair</th><th class="l">Side</th>' +
+      '<th class="l">From</th><th>Size</th>' +
+      '<th title="The edge filter when the signal was recorded: what ' +
+      'the move back to the mean is worth against its costs, and what ' +
+      'the filter requires. (off) when the filter is switched off on ' +
+      'that ladder">Edge</th>' +
+      '<th>z in → out</th>' +
+      '<th title="The spread price the z in was read off - this ' +
+      'side\u2019s own executable price, bid for H to L, ask for L to H ' +
+      '- recorded whether or not the signal was entered. Not Spread in, ' +
+      'which is where an entry was taken">Spread at z</th>' +
+      '<th>Spread in → out</th>' +
+      '<th title="After every cost. The level the other two are ' +
+      'measured from">Break-even</th>' +
+      '<th title="The take-profit this signal would have been given">' +
+      'Target</th>' +
+      '<th title="The stop this signal would have been given">Stop</th>' +
+      '<th>Leg A in</th><th>Leg B in</th><th>Held</th>' +
+      '<th class="l">Outcome</th>' +
+      '<th class="l" title="The one thing about a signal that is not a ' +
+      'number: the filter that refused it, the window it never came ' +
+      'back inside, or whether the spread came back to its mean">Why' +
+      '</th><th>Net P&amp;L</th><th>Running</th>' +
+      '</tr></thead><tbody>';
+    if (!rows.length) {
+      html += '<tr><td colspan="' + SIGNAL_COLS + '" class="hint">no ' +
+        'signal in this range</td></tr>';
+    }
+    rows.forEach(function (r) {
+      var out = signalOutcome(r);
+      var onLevel = r.outcome === 'SL' ? 'sl'
+        : (r.outcome === 'TP' ? 'tp' : null);
+      html += '<tr><td>' + anClock(r.armed_at) + '</td>' +
+        '<td class="l">' + label(r.pair_key) + legsOf(r) + '</td>' +
+        '<td class="l">' + anSide(r.side) + '</td>' +
+        '<td class="l' + (r.source === 'REPLAY' ? ' hint' : '') +
+        '" title="' + (r.source === 'REPLAY' ?
+          'replayed afterwards from MT5’s bars — one look per ' +
+          'candle, so a stop touched and recovered inside one is not seen' :
+          'recorded live off the book, as it happened') + '">' +
+        (r.source === 'REPLAY' ? 'replayed' : 'live') + '</td>' +
+        '<td>' + (r.quantity === null || r.quantity === undefined ? DASH
+                  : qty(r.quantity)) + '</td>' +
+        edgeOf(r) +
+        '<td>' + fmt(r.armed_z, 2) + ' → ' + fmt(r.closed_z, 2) +
+        '</td>' +
+        '<td>' + (r.armed_spread === null || r.armed_spread === undefined
+                  ? DASH : fmt(r.armed_spread, 4)) + '</td>' +
+        '<td>' + fmt(r.entry, 4) + ' → ' + fmt(r.exit_spread, 4) +
+        '</td>' +
+        anLevel(r.break_even, false) +
+        anLevel(r.tp, onLevel === 'tp') +
+        anLevel(r.sl, onLevel === 'sl') +
+        '<td>' + (r.leg_a_entry === null || r.leg_a_entry === undefined
+                  ? DASH : (r.leg_a_side || '') + ' ' +
+                  fmt(r.leg_a_entry, 3)) + '</td>' +
+        '<td>' + (r.leg_b_entry === null || r.leg_b_entry === undefined
+                  ? DASH : (r.leg_b_side || '') + ' ' +
+                  fmt(r.leg_b_entry, 3)) + '</td>' +
+        '<td>' + (r.held_min === null || r.held_min === undefined ? DASH
+                  : anMin(r.held_min)) + '</td>' +
+        '<td class="l ' + out[1] + '">' + out[0] + '</td>' +
+        '<td class="l hint">' + escapeHtml(r.why || DASH) + '</td>' +
+        '<td class="' + anSign(r.net_pnl) + '">' + money(r.net_pnl) +
+        '</td>' +
+        '<td class="' + anSign(r.cum_pnl) + '">' + money(r.cum_pnl) +
+        '</td></tr>';
+    });
+    html += '</tbody></table>';
+    if (unconfirmed) {
+      html += '<div class="hint an-unconfirmed">' +
+        (state.showUnconfirmed
+          ? 'Showing ' + unconfirmed + ' stretch' +
+            (unconfirmed === 1 ? '' : 'es') + ' that never confirmed. ' +
+            '<button class="btn an-toggle-unconfirmed">Hide them</button>'
+          : unconfirmed + ' stretch' + (unconfirmed === 1 ? '' : 'es') +
+            ' armed and let go without confirming ' +
+            '\u2014 not signals, so not listed. ' +
+            '<button class="btn an-toggle-unconfirmed">Show them</button>') +
+        '</div>';
+    }
+    html += '<div class="note">Every row is decided by the <b>Algo\u2019s own ' +
+      'code</b> \u2014 its arming, its filters, its one trade at a time, ' +
+      'its cooldown, its day\u2019s limits and its exits \u2014 run ' +
+      'beside the desk with nothing to send. With the Algo LIVE it ' +
+      'decides as the desk does, at the price the Algo decided on (a ' +
+      'real fill can differ by its slippage); a manual position, which ' +
+      'holds the live Algo back, does not hold this back. Recorded off ' +
+      'the LIVE book as it happened: the ' +
+      'z, the executable prices and the two legs are what the market ' +
+      'was showing at that moment, on the settings in force then, with ' +
+      'the Algo on or off. What did not happen is the ORDER — ' +
+      'nothing here was sent, so Net P&amp;L is what the trade would ' +
+      'have made, not money taken. A row marked <i>replayed</i> is the ' +
+      'exception: it was reconstructed from MT5’s bars by ' +
+      '“Derive 30 days” and sees one look per candle. The ' +
+      'stop is checked before the target, so a poll where both look ' +
+      'reached is booked as the stop.</div>';
+    return html;
+  }
+  function compactNumber(value) {
+    /* 1,234,567 -> 1.23M: a notional is read by its size, and seven
+     * digits across a table is a column nobody reads. The exact figure
+     * is in the cell's title. */
+    if (value === null || value === undefined) { return DASH; }
+    var size = Math.abs(value);
+    var units = [[1e9, 'B'], [1e6, 'M'], [1e3, 'K']];
+    for (var i = 0; i < units.length; i++) {
+      if (size >= units[i][0]) {
+        return (value / units[i][0]).toFixed(2) + units[i][1];
+      }
+    }
+    return value.toFixed(0);
+  }
+
+  function notionalHtml(data, name) {
+    /* Notional volume traded, per ladder and in all, today and over the
+     * last 7 and 30 days, from the broker's own deals. */
+    var html = '<h4>Notional traded <small>\u2014 lots \u00d7 contract ' +
+      'size \u00d7 price, both legs, on the broker\u2019s own deals, in ' +
+      'the instruments\u2019 price currency</small></h4>' +
+      '<div class="an-bar">and from ' +
+      '<input type="date" class="an-volume-from" value="' +
+      escapeHtml(state.volumeFrom) + '"' +
+      ' max="' + new Date().toISOString().slice(0, 10) + '"> to ' +
+      '<input type="date" class="an-volume-to" value="' +
+      escapeHtml(state.volumeTo) + '"' +
+      ' max="' + new Date().toISOString().slice(0, 10) + '">' +
+      ' <span class="hint">' + (state.volumeFrom || state.volumeTo
+        ? 'the broker\u2019s days, both included \u2014 clear both to ' +
+          'hide the column'
+        : 'pick a range for a column of its own') + '</span></div>';
+    if (!data) {
+      return html + '<p class="hint">the deals could not be read</p>';
+    }
+    var periods = data.periods || [];
+    function cell(c) {
+      c = c || {};
+      if (!c.fills) { return '<td class="hint">' + DASH + '</td>'; }
+      var exact = Math.round(c.notional).toLocaleString();
+      var title = exact + ' notional \u00b7 leg A ' +
+        Math.round(c.a).toLocaleString() + ' \u00b7 leg B ' +
+        Math.round(c.b).toLocaleString() + ' \u00b7 ' + c.fills +
+        ' deal(s) \u00b7 ' + fmt(c.lots, 2) + ' lots' +
+        (c.unpriced ? ' \u00b7 ' + c.unpriced + ' deal(s) with no ' +
+          'contract size, counted but not priced' : '');
+      // None of it priced is unmeasured, not zero.
+      var shown = c.unpriced >= c.fills ? DASH : compactNumber(c.notional);
+      return '<td title="' + escapeHtml(title) + '"><b>' + shown + '</b>' +
+        (c.unpriced ? '<sup class="down" title="' + c.unpriced +
+          ' not priced">*</sup>' : '') +
+        '<div class="hint">' + c.fills + ' deal' +
+        (c.fills === 1 ? '' : 's') + ' \u00b7 ' + fmt(c.lots, 2) +
+        ' lots</div></td>';
+    }
+    html += '<table class="an-table an-notional"><thead><tr>' +
+      '<th class="l">Ladder</th>' + periods.map(function (p) {
+        return '<th>' + escapeHtml(p.label) + '</th>';
+      }).join('') + '</tr></thead><tbody>';
+    var rows = data.rows || [];
+    if (!rows.length) {
+      html += '<tr><td colspan="' + (periods.length + 1) + '" class="hint">' +
+        'nothing traded in the last 30 days</td></tr>';
+    }
+    rows.forEach(function (r) {
+      html += '<tr><td class="l">' + name(r.pair_key) + '</td>' +
+        periods.map(function (p) { return cell(r[p.key]); }).join('') +
+        '</tr>';
+    });
+    if (rows.length > 1) {
+      html += '<tr class="an-total"><td class="l"><b>All ladders</b></td>' +
+        periods.map(function (p) { return cell(data.total[p.key]); })
+          .join('') + '</tr>';
+    }
+    var unpriced = (data.total && data.total['30d'] &&
+                    data.total['30d'].unpriced) || 0;
+    html += '</tbody></table>';
+    // The same, per ACCOUNT: how much is going through each login at
+    // each broker.
+    var info = data.account_info || {};
+    var accounts = data.accounts || [];
+    if (accounts.length) {
+      html += '<table class="an-table an-notional an-notional-accounts">' +
+        '<thead><tr><th class="l">Account</th><th class="l">Broker</th>' +
+        periods.map(function (p) {
+          return '<th>' + escapeHtml(p.label) + '</th>';
+        }).join('') + '</tr></thead><tbody>';
+      accounts.forEach(function (r) {
+        var who = info[r.account] || {};
+        html += '<tr><td class="l">' + escapeHtml(r.account) +
+          (who.login ? '<div class="hint">#' + escapeHtml(who.login) +
+            '</div>' : '') + '</td><td class="l">' +
+          escapeHtml(who.broker || DASH) + '</td>' +
+          periods.map(function (p) { return cell(r[p.key]); }).join('') +
+          '</tr>';
+      });
+      html += '</tbody></table>';
+    }
+    if (unpriced) {
+      html += '<div class="note">* ' + unpriced + ' deal(s) are counted ' +
+        'but not priced: their contract size is not known (a ladder ' +
+        'deleted before any position on it was recorded).</div>';
+    }
+    return html;
+  }
+
+  function stopStudyHtml(st) {
+    /* WINNERS' WORST POINTS, and what a stop at each level would have
+     * done to these trades: the winners it would have cut, the losers it
+     * would have stopped, and the net in money and on capital. */
+    var html = '<h4>Winners\u2019 worst points &amp; where a stop costs ' +
+      'least <small>\u2014 from each trade\u2019s worst point while ' +
+      'open</small></h4>';
+    if (!st.trades) {
+      return html + '<p class="hint">No closed trade with its worst point ' +
+        'and margin yet.</p>';
+    }
+    var wp = st.winners_mae_pct || {}, wpts = st.winners_mae_points || {};
+    var lp = st.losers_mae_pct || {};
+    function pct(v) { return v === null || v === undefined ? DASH
+      : fmt(v, 2) + '%'; }
+    function pts(v) { return v === null || v === undefined ? ''
+      : ' <small>(' + fmt(v, 2) + ' pts)</small>'; }
+    html += '<div class="an-tiles">' +
+      anTile('Winners', st.winners || 0, 'up',
+             (st.losers || 0) + ' loser(s) beside them') +
+      anTile('Half the winners dipped', pct(wp.median) + pts(wpts.median), '',
+             'the median worst point of a WINNING trade, as a % of its ' +
+             'margin (and in spread points)') +
+      anTile('3 in 4 dipped less than', pct(wp.p75) + pts(wpts.p75)) +
+      anTile('9 in 10 dipped less than', pct(wp.p90) + pts(wpts.p90)) +
+      anTile('Deepest winner', pct(wp.max) + pts(wpts.max), 'down',
+             'the furthest a trade went against and still closed a winner') +
+      anTile('Losers, median worst', pct(lp.median), 'down') + '</div>';
+    html += '<table class="an-table"><thead><tr>' +
+      '<th title="A stop at this % of the margin both legs tied up - the ' +
+      'base SL % of margin is set on">Stop at (% of margin)</th>' +
+      '<th title="Winners that went this far against before winning: the ' +
+      'stop would have closed them at a loss">Winners it would cut</th>' +
+      '<th title="Losers that went this far: closed at the stop instead">' +
+      'Losers it would stop</th>' +
+      '<th title="Every trade that reached the stop, closed there instead ' +
+      'of where it did: positive = the stop would have made money">' +
+      'Net effect</th><th>On capital</th></tr></thead><tbody>';
+    (st.levels || []).forEach(function (r) {
+      html += '<tr><td>' + fmt(r.pct_margin, 1) + '%</td><td>' +
+        r.winners_cut + '</td><td>' + r.losers_stopped + '</td>' +
+        '<td class="' + anSign(r.net_change) + '">' +
+        (r.net_change > 0 ? '+' : '') + money(r.net_change) + '</td><td class="' +
+        anSign(r.net_change_pct_capital) + '">' +
+        (r.net_change_pct_capital === null ||
+         r.net_change_pct_capital === undefined ? DASH
+          : pctSigned(r.net_change_pct_capital, 2)) + '</td></tr>';
+    });
+    return html + '</tbody></table><p class="hint">Read across: the ' +
+      'cheapest stop is the one that cuts few winners and still stops the ' +
+      'deep losers. Assumes the stop fills at its level - in a spike it ' +
+      'fills worse, so a positive net is a best case.' +
+      (st.trades < 20 ? ' Only ' + st.trades + ' trade(s) so far: a hint, ' +
+        'not a setting.' : '') + '</p>';
+  }
+
+  function reportLink(view, label, title) {
+    /* THE PRINTABLE REPORTS: this period (and, for the trader, this
+     * ladder) on a page of its own laid out for A4. */
+    return ' <a class="an-report an-report-' + view + '" target="_blank" ' +
+      'rel="noopener" href="/report?view=' + view + '&days=' +
+      state.analysisDays + (view === 'trader' && state.analysisPair ?
+        '&pair=' + encodeURIComponent(state.analysisPair) : '') +
+      '&pnl=' + encodeURIComponent(state.analysisPnl || 'show') +
+      '" title="' + title + '">' + label + '</a>';
+  }
+
+  // WHAT A ROUND TRIP COST, per trade - MT5 has no maker / taker: the
+  // bid-ask the trade paid (already in its P&L), the commission and
+  // swap MT5 booked on its own deals, and the sum.
+  function anCostCells(t, cash) {
+    function cell(v, title, estimate) {
+      if (v === null || v === undefined) { return '<td>' + DASH + '</td>'; }
+      return '<td' + (estimate ? ' class="hint"' : '') +
+        (title ? ' title="' + escapeHtml(title) + '"' : '') + '>' +
+        (estimate ? '~' : '') + cash(v) + '</td>';
+    }
+    var mt5 = t.costs_source === 'MT5';
+    var commission = t.commission === null || t.commission === undefined
+      ? null : t.commission + (mt5 && t.fee ? t.fee : 0);
+    return cell(t.bid_ask, t.bid_ask_points === null ||
+        t.bid_ask_points === undefined ? '' : fmt(t.bid_ask_points, 4) +
+        ' of spread at entry, both legs’ bid-ask', false) +
+      cell(commission, mt5 ? 'commission ' + money(t.commission) +
+        (t.fee ? ' + fee ' + money(t.fee) : '') + ', from MT5’s ' +
+        t.deals + ' deal(s)' : 'the desk’s estimate: commission per ' +
+        'lot, both legs, both ends', !mt5) +
+      cell(t.swap, mt5 ? 'from MT5’s deals' : '', false) +
+      cell(t.round_trip, 'bid-ask + commission + swap', false);
+  }
+
+  // THE TALLY under the journal: every round-trip cost, added up.
+  function costTallyHtml(f, cash) {
+    if (!f || (!f.trades && !f.bid_ask_trades)) { return ''; }
+    return '<p class="an-cost-tally"><b>Round trip costs</b> ' +
+      cash(f.round_trip) + ' · <b>bid-ask</b> ' + cash(f.bid_ask) +
+      ' (' + f.bid_ask_trades + ' trade(s), already in the P&amp;L)' +
+      ' · <b>commission</b> ' + cash(f.commission + (f.fee || 0)) +
+      ' · <b>swap</b> ' + cash(f.swap) +
+      (f.measured ? ' · ' + f.measured + ' trade(s) from MT5’s ' +
+        'own ' + f.deals + ' deals' : '') +
+      (f.estimated ? ' · <span class="hint">' + f.estimated +
+        ' trade(s) estimated (~): their deals are not in the journal' +
+        '</span>' : '') + '</p>';
   }
 
   function analysisPane() {
@@ -4480,7 +6784,37 @@
         return '<option value="' + escapeHtml(key) + '"' +
           (state.analysisPair === key ? ' selected' : '') + '>' +
           escapeHtml(pairs[key].name || key) + '</option>';
-      }).join('') + '</select></div>';
+      }).join('') + '</select>' +
+      // THE CAPITAL the trader manages: every trade's return and the
+      // capital it used are read against it below. Saved as the
+      // CAPITAL_MANAGED setting; blank or 0 = not set.
+      ' \u00b7 <label title="The capital you manage on this desk. Each ' +
+      'trade\u2019s return on capital and the capital it used are read ' +
+      'against it; nothing is sized or sent from it.">Capital managed $' +
+      '<input class="an-capital" type="number" min="0" step="100" ' +
+      'placeholder="' + (anBalanceCapital() ? escapeHtml(
+        Math.round(anBalanceCapital()).toLocaleString('en-US')) : 'not set') +
+      '" value="' +
+      (anCapital() ? escapeHtml(String(anCapital())) : '') +
+      '">' + (anBalanceCapital() ? ' <small class="hint" title="Nothing ' +
+        'typed: the balance the accounts hold now (the equity of the ' +
+        'accounts the ladders trade) is the capital. Type a figure to fix ' +
+        'it instead.">= account balance</small>' : '') + '</label> \u00b7 <label title="Show the money each trade made, ' +
+      'mask it with dots, or leave the column out - for a screen or a ' +
+      'report that others see. The percentages stay.">Net P&amp;L ' +
+      '<select class="an-pnl">' + [['show', 'show'], ['mask', 'mask'],
+        ['hide', 'hide']].map(function (o) {
+        return '<option value="' + o[0] + '"' +
+          (state.analysisPnl === o[0] ? ' selected' : '') + '>' + o[1] +
+          '</option>';
+      }).join('') + '</select></label>' +
+      // THE PRINTABLE REPORTS: the trader's whole record, and the
+      // client's returns only.
+      reportLink('trader', 'Trader report', 'Every trade: ladders, ' +
+        'sides, sizes and the journal - for the desk') +
+      reportLink('client', 'Client report', 'Returns only - no ladder, ' +
+        'instrument or count of trades - to share with a client') +
+      '</div>';
     if (a === null) {
       return html + '<p class="hint">reading the record\u2026</p></div>';
     }
@@ -4488,58 +6822,267 @@
       return html + '<p class="down">' + escapeHtml(a.error) + '</p></div>';
     }
     var names = a.names || {};
-    function name(key) { return escapeHtml(names[key] || key || DASH); }
+    function name(key) {
+      // A ladder's name may break only at its joints - after a '|' or
+      // '_' - never in the middle of a word.
+      return escapeHtml(names[key] || key || DASH)
+        .replace(/\|/g, '|<wbr>').replace(/_/g, '_<wbr>');
+    }
+
+    // THE TWO HALVES. Above this line is what the desk actually
+    // TRADED; below it is every stretch the settings signalled,
+    // whether or not an order followed. Both are measured off the same
+    // live book - the difference is that one half moved money. They
+    // are different populations and they were being read as one page:
+    // four rows of em dashes over a busy signal table looks like a
+    // fault rather than like a quiet week.
+    var s = a.summary || {};
+    html += '<h3 class="an-half">What actually happened ' +
+      '<small>\u2014 the trades this desk really put on</small></h3>';
+    if (!(s.count || 0)) {
+      // ONE SENTENCE, not four rows of dashes. Nothing is wrong: there
+      // is simply nothing in this window yet, and saying so plainly
+      // beats a wall of em dashes that reads as a broken page.
+      html += '<p class="hint">No trades opened in this window. The ' +
+        'summary, drawdown, calibration and what-if-held readings ' +
+        'below fill in from the first trade \u2014 widen the range ' +
+        'above, or look at what the Algo would have done further ' +
+        'down.</p>';
+    }
+
+    // THE TRADE JOURNAL FIRST: every closed trade, the table this tab
+    // is opened for, ahead of the summaries built from it.
+    // 7. The journal.
+    //
+    // THE LEVELS ARE COLUMNS, not a sentence under the row. They were
+    // written as prose first - 'stop 71.40 = break-even 71.20 + 0.20
+    // . 2% of margin . closed 71.46, 0.06 past it' - and that reads
+    // fine for one trade and not at all for forty: a journal is a
+    // table, and a number worth printing is worth lining up down the
+    // page where it can be compared with the one above it.
+    var trips = a.journal || [];
+    var total = trips.length ? trips[0].cum_pnl : null;
+    var pnlMode = state.analysisPnl || 'show';
+    var pnlHidden = pnlMode === 'hide';
+    // The money a trade made, as the Net P&L setting above shows it.
+    function pnlCash(x) {
+      return pnlMode === 'show' ? money(x) : '\u2022\u2022\u2022\u2022\u2022';
+    }
+    html += '<h4>Trade journal <small>— ' + trips.length + ' closed' +
+      (pnlHidden ? '' : ', running total ' + pnlCash(total)) +
+      '</small></h4>' +
+      '<table class="an-table"><thead><tr><th title="Every closed trade on ' +
+      'the desk\u2019s record, numbered in the order it closed \u2014 a ' +
+      'trade keeps its number whatever this tab is showing">Trade no</th>' +
+      '<th>Closed</th><th class="l">Pair</th>' +
+      '<th class="l">Side</th><th class="l">Who</th><th>Size</th><th>z in → out</th>' +
+      '<th>Spread in → out</th>' +
+      '<th title="After every cost. The level the other two are ' +
+      'measured from">Break-even</th>' +
+      '<th title="The take-profit this trade was given, and the ' +
+      'setting that put it there">Target</th>' +
+      '<th title="The stop this trade was given, and the setting that ' +
+      'put it there">Stop</th>' +
+      '<th title="How far past the level it was measured against the ' +
+      'close actually went">vs level</th>' +
+      '<th>Leg A in</th><th>Leg B in</th>' +
+      '<th>Held</th><th class="l">Exit</th>' +
+      (pnlHidden ? '' :
+        '<th title="The round turn of both legs\u2019 bid-ask when the ' +
+        'trade was entered, times its size: what the market took. ALREADY ' +
+        'in the P&amp;L - the fills were at the bid and the offer - so it ' +
+        'is shown, not charged again">Bid-ask</th>' +
+        '<th title="The commission (and any fee) MT5 booked on this ' +
+        'trade\u2019s own deals. ~ is the desk\u2019s estimate from the ' +
+        'commission per lot, where the deals are not in the journal">' +
+        'Commission</th>' +
+        '<th title="The swap (overnight financing) MT5 booked on the ' +
+        'trade\u2019s deals; positive a cost, negative a credit. Not in ' +
+        'the Net P&amp;L">Swap</th>' +
+        '<th title="Bid-ask + commission + swap: everything the round ' +
+        'trip cost">Round trip</th>' +
+        '<th>Net P&amp;L</th>') +
+      '<th title="net P&amp;L \u00f7 the margin BOTH legs tied up at entry - ' +
+      'the base the TP % and SL % are set on. NET: after every fee">' +
+      'Net % on margin</th>' +
+      '<th title="net P&amp;L \u00f7 both legs\u2019 face value at entry">' +
+      'Net % of notional</th>' +
+      '<th title="The margin BOTH legs tied up at entry \u00f7 the capital ' +
+      'managed (set above). Hover a cell for the money">Capital used</th>' +
+      '<th title="Both legs\u2019 value at entry: lots \u00d7 contract ' +
+      'size \u00d7 price, leg A plus leg B">Notional value</th>' +
+      '<th title="net P&amp;L \u00f7 the capital managed">Net % on capital</th>' +
+      (pnlHidden ? '' : '<th>Running</th>') +
+      '</tr></thead><tbody>';
+    if (!trips.length) {
+      html += '<tr><td colspan="27" class="hint">no closed trade in this ' +
+        'window</td></tr>';
+    }
+    trips.forEach(function (t) {
+      var x = t.exit || {};
+      html += '<tr><td class="an-no">' + (t.trade_no ? '#' + t.trade_no
+        : DASH) + '</td><td>' + anClock(t.closed_at) + '</td><td class="l">' +
+        name(t.pair_key) + '</td><td class="l">' + anSide(t.side) +
+        '</td><td class="l">' +
+        (t.source === 'ALGO' ? '<b>Algo</b>' : 'Manual') + '</td><td>' +
+        qty(t.quantity) + '</td><td>' + fmt(t.entry_z, 2) + ' → ' +
+        fmt(t.exit_z, 2) + '</td><td>' + fmt(t.entry_spread, 4) + ' → ' +
+        fmt(t.exit_spread, 4) + '</td>' +
+        anLevel(x.break_even, false, x.note) +
+        anLevel(x.tp, x.on_level === 'tp', x.note, x.sized_by,
+                x.level_money) +
+        anLevel(x.sl, x.on_level === 'sl', x.note, x.sized_by,
+                x.level_money) +
+        '<td>' + anGap(x) + '</td>' +
+        '<td>' + (t.leg_a.side || '') + ' ' + fmt(t.leg_a.entry, 3) +
+        '</td><td>' + (t.leg_b.side || '') + ' ' + fmt(t.leg_b.entry, 3) +
+        '</td><td>' + anHeld(t.held_sec) + '</td><td class="l">' +
+        escapeHtml(t.exit_reason || DASH) + '</td>' +
+        (pnlHidden ? '' : anCostCells(t, pnlCash) +
+          '<td class="' + anSign(t.pnl) + '">' +
+          pnlCash(t.pnl) + '</td>') + pctCell(t.pct_margin, 2, t.margin_estimated) +
+        pctCell(t.pct_notional, 3, false) +
+        '<td' + (t.margin ? ' title="' + escapeHtml(money(t.margin)) +
+          ' of margin"' : '') + '>' +
+        (t.pct_capital_used === null || t.pct_capital_used === undefined
+          ? DASH : fmt(t.pct_capital_used, 1) + '%') + '</td>' +
+        '<td>' + (t.notional ? (pnlMode === 'show' ? money(t.notional)
+          : '\u2022\u2022\u2022\u2022\u2022') : DASH) + '</td>' +
+        pctCell(t.pct_capital, 2, false) +
+        (pnlHidden ? '' : '<td class="' + anSign(t.cum_pnl) + '">' +
+          pnlCash(t.cum_pnl) + '</td>') + '</tr>';
+    });
+    html += '</tbody></table>';
+    if (!pnlHidden) { html += costTallyHtml(a.cost_tally, pnlCash); }
 
     // 1. The summary.
-    var s = a.summary || {};
     html += '<h4>Summary</h4><div class="an-tiles">' +
       anTile('Trades', s.count || 0) +
       anTile('Closed', s.closed || 0) +
-      anTile('Net P&amp;L', money(s.net_pnl), anSign(s.net_pnl),
+      anTile('Net P&amp;L', pnlCash(s.net_pnl), anSign(s.net_pnl),
            'realized, after the commission the settings charge') +
       anTile('Win rate', anPct(s.win_rate), '',
            (s.wins || 0) + ' won, ' + (s.losses || 0) + ' lost') +
+      anTile('Return on margin', s.return_on_margin === null ||
+               s.return_on_margin === undefined ? DASH
+               : pctSigned(s.return_on_margin, 2),
+             anSign(s.return_on_margin),
+             'net P&L \u00f7 the margin both legs used, over the ' +
+             (s.margin_trades || 0) + ' closed trade(s) whose margin was ' +
+             'priced') +
+      anTile('Return on capital', s.return_on_capital === null ||
+               s.return_on_capital === undefined ? DASH
+               : pctSigned(s.return_on_capital, 2),
+             anSign(s.return_on_capital),
+             s.capital ? 'net P&L \u00f7 the ' + money(s.capital) +
+               ' capital managed' : 'set the capital you manage above') +
+      anTile('Capital used', s.capital_used_avg === null ||
+               s.capital_used_avg === undefined ? DASH
+               : fmt(s.capital_used_avg, 1) + '%', '',
+             s.capital ? 'the margin a trade tied up \u00f7 the capital ' +
+               'managed: ' + fmt(s.capital_used_avg, 1) + '% on average, ' +
+               fmt(s.capital_used_max, 1) + '% at most'
+               : 'set the capital you manage above') +
       '</div>';
+
+    // 1b. NOTIONAL TRADED: lots x contract size x price, on the broker's
+    // own deals - today, and over the last 7 and 30 days.
+    html += notionalHtml(a.notional, name);
 
     // 2. Drawdown, and each trade's worst and best point.
     var d = a.drawdown || {};
     html += '<h4>Drawdown &amp; excursion <small>\u2014 how bad it got, ' +
       'and how good</small></h4><div class="an-tiles">' +
       anTile('Max drawdown', d.max === null || d.max === undefined ? DASH
-           : money(-d.max), d.max ? 'down' : '',
+           : money(-d.max) + (d.max_pct_capital === null ||
+               d.max_pct_capital === undefined ? ''
+               : ' <small>(' + fmt(-d.max_pct_capital, 2) + '% of capital)' +
+                 '</small>'), d.max ? 'down' : '',
            'the worst fall of the running P&L from a peak, closed trades in ' +
            'the order they closed') +
+      // THE DEEPEST OPEN DRAWDOWN: the same curve with each trade at its
+      // worst point while still open - the low the account really went
+      // through, which a trade that recovered before it closed hides.
+      anTile('Deepest open drawdown', d.open_max === null ||
+               d.open_max === undefined ? DASH
+             : money(-d.open_max) + (d.open_max_pct_capital === null ||
+                 d.open_max_pct_capital === undefined ? ''
+                 : ' <small>(' + fmt(-d.open_max_pct_capital, 2) +
+                   '% of capital)</small>'), d.open_max ? 'down' : '',
+             'the worst fall from a peak counting each trade at its WORST ' +
+             'point while open (its MAE), not where it closed' +
+             (d.open_max_trade ? ' \u2014 on ' +
+               name(d.open_max_trade.pair_key) + ' ' +
+               anSide(d.open_max_trade.side) + ', closed ' +
+               anClock(d.open_max_trade.closed_at) + ': worst ' +
+               money(d.open_max_trade.trough_pnl) + ', closed at ' +
+               money(d.open_max_trade.pnl) : '') +
+             (d.open_max_pct_capital === null ||
+              d.open_max_pct_capital === undefined
+               ? '. Set the capital you manage above for the %' : '')) +
       anTile('Worst trade', money(d.worst_trade), anSign(d.worst_trade),
              'best: ' + money(d.best_trade)) +
       anTile('Below the peak now', d.current === null || d.current === undefined
            ? DASH : money(-d.current), d.current ? 'down' : '') +
       anTile('Peak equity', money(d.peak_equity), 'up') + '</div>';
     var rows = a.excursion || [];
-    html += '<table class="an-table"><thead><tr><th>Closed</th><th class="l">Pair</th>' +
+    html += '<table class="an-table"><thead><tr><th title="The trade\u2019s ' +
+      'number on the desk\u2019s record, as in the journal">Trade no</th>' +
+      '<th>Closed</th><th class="l">Pair</th>' +
       '<th class="l">Side</th><th class="l">Exit</th>' +
       '<th title="Maximum adverse excursion: the worst net P&L while open">' +
       'MAE (worst)</th>' +
+      '<th title="The worst point as a share of the capital: what the ' +
+      'account would have lost had the trade closed there">' +
+      'MAE % capital</th>' +
+      '<th title="The worst point as a share of the margin both legs tied ' +
+      'up at entry - the base the SL % is set on">MAE % margin</th>' +
       '<th title="Maximum favourable excursion: the best net P&L while open">' +
-      'MFE (best)</th><th>Net P&amp;L</th>' +
+      'MFE (best)</th>' +
+      '<th title="The best point as a share of the capital: what the ' +
+      'account would have made had the trade closed there">' +
+      'MFE % capital</th>' +
+      '<th title="The best point as a share of the margin both legs tied ' +
+      'up at entry - the base the TP % is set on">MFE % margin</th>' +
+      '<th>Net P&amp;L</th>' +
       '<th title="How much of its best a WINNING trade kept: net / MFE">Kept</th>' +
       '<th title="Minutes from the open to the best point">Best at</th>' +
       '</tr></thead><tbody>';
     if (!rows.length) {
-      html += '<tr><td colspan="9" class="hint">no closed trade with its ' +
+      html += '<tr><td colspan="14" class="hint">no closed trade with its ' +
         'best and worst point yet \u2014 they are kept from this version on' +
         '</td></tr>';
     }
+    // On the capital: the typed figure, or the account balance.
+    var excCapital = (a.summary || {}).capital || null;
+    function onBase(value, base, missing) {
+      if (value === null || value === undefined || !base) {
+        return '<td' + (base ? '' : ' title="' + missing + '"') +
+          '>' + DASH + '</td>';
+      }
+      var share = value / base * 100;
+      return '<td class="' + anSign(share) + '">' +
+        (share >= 0 ? '+' : '\u2212') + Math.abs(share).toFixed(2) +
+        '%</td>';
+    }
     rows.forEach(function (r) {
-      html += '<tr><td>' + anClock(r.closed_at) + '</td><td class="l">' +
+      var mae = r.mae === null || r.mae === undefined ? null : -r.mae;
+      html += '<tr><td class="an-no">' + (r.trade_no ? '#' + r.trade_no
+        : DASH) + '</td><td>' + anClock(r.closed_at) + '</td><td class="l">' +
         name(r.pair_key) + '</td><td class="l">' + anSide(r.side) +
         '</td><td class="l">' + escapeHtml(r.exit_reason || DASH) + '</td>' +
         '<td class="down">' + (r.mae === null ? DASH : money(-r.mae)) + '</td>' +
+        onBase(mae, excCapital, 'set the capital above') +
+        onBase(mae, r.margin, 'the margin was not priced') +
         '<td class="up">' + money(r.mfe) + '</td>' +
+        onBase(r.mfe, excCapital, 'set the capital above') +
+        onBase(r.mfe, r.margin, 'the margin was not priced') +
         '<td class="' + anSign(r.pnl) + '">' + money(r.pnl) + '</td>' +
         '<td>' + anPct(r.utilisation_pct, 0) + '</td>' +
         '<td>' + anMin(r.peak_min) + '</td></tr>';
     });
     html += '</tbody></table>';
+    html += stopStudyHtml(a.stop_study || {});
 
     // 3. Take / hold calibration.
     var c = a.calibration || {};
@@ -4595,6 +7138,17 @@
       html += '</tbody></table>';
     }
 
+
+    // The ALGO half: nothing below this line happened. It is
+    // what these settings WOULD have done, which is a different
+    // question from what the desk did, and the two were read as
+    // one page until they were given a heading each.
+    html += '<h3 class="an-half">What the Algo signalled <small>' +
+      '\u2014 recorded off the live book as it happened, on the ' +
+      'ladder\u2019s own settings, with its Algo on or off. The ' +
+      'signals are real; the ORDERS are what did not happen' +
+      '</small></h3>';
+
     // 5. The backtest.
     var bt = state.analysisBt;
     html += '<h4>Backtest <small>\u2014 the Algo\u2019s own, on MT5\u2019s ' +
@@ -4612,75 +7166,10 @@
       (bt ? bt.html : 'The ladder\u2019s Algo must be on (Signals is fine).') +
       '</div>';
 
-    // 6. Z-score excursions.
-    var ex = a.z_excursions || {};
-    var keys = Object.keys(ex);
-    html += '<h4>Z-score excursions <small>\u2014 on the Algo\u2019s own ' +
-      'band, while it is on</small> <button class="btn an-reset">Reset</button>' +
-      '</h4>';
-    if (!keys.length) {
-      html += '<p class="hint">nothing counted yet \u2014 counting starts ' +
-        'when a ladder\u2019s Algo is on</p>';
-    }
-    keys.forEach(function (key) {
-      var e = ex[key];
-      var peak = (e.max_z === null || e.min_z === null) ? null :
-        Math.max(Math.abs(e.max_z), Math.abs(e.min_z));
-      html += '<div class="an-sub">' + name(key) + ' <small class="hint">since ' +
-        anClock(e.since) + '</small></div><div class="an-tiles">' +
-        anTile('Touched \u00b12\u03c3', e.touch_2_total, '',
-             '\u2191 ' + e.touch_2_up + '  \u2193 ' + e.touch_2_down) +
-        anTile('Touched \u00b13\u03c3', e.touch_3_total, '',
-             '\u2191 ' + e.touch_3_up + '  \u2193 ' + e.touch_3_down) +
-        anTile('Back to the mean', e.reversions, 'up',
-             'a 2\u03c3 stretch that came all the way back through 0') +
-        anTile('Peak |z|', peak === null ? DASH : peak.toFixed(2), '',
-             'max ' + fmt(e.max_z, 2) + ' / min ' + fmt(e.min_z, 2)) +
-        '</div>';
-      var events = (e.events || []).slice(0, 15);
-      if (events.length) {
-        html += '<table class="an-table"><tbody>' + events.map(function (ev) {
-          var label = {touch_2_up: 'touched +2\u03c3', touch_2_down:
-            'touched \u22122\u03c3', touch_3_up: 'touched +3\u03c3',
-            touch_3_down: 'touched \u22123\u03c3',
-            reversions: 'back to the mean'}[ev.type] || ev.type;
-          return '<tr><td>' + anClock(ev.at) + '</td><td class="l">' + label +
-            '</td><td>' + fmt(ev.z, 2) + '</td></tr>';
-        }).join('') + '</tbody></table>';
-      }
-    });
+    // 6. Signals, and the zone path they were read off.
+    html += signalTable(a);
 
-    // 7. The journal.
-    var trips = a.journal || [];
-    var total = trips.length ? trips[0].cum_pnl : null;
-    html += '<h4>Trade journal <small>\u2014 ' + trips.length +
-      ' closed, running total ' + money(total) + '</small></h4>' +
-      '<table class="an-table"><thead><tr><th>Closed</th><th class="l">Pair</th>' +
-      '<th class="l">Side</th><th class="l">Who</th><th>Size</th><th>z in \u2192 out</th>' +
-      '<th>Spread in \u2192 out</th><th>Leg A in</th><th>Leg B in</th>' +
-      '<th>Held</th><th class="l">Exit</th><th>Net P&amp;L</th><th>Running</th>' +
-      '</tr></thead><tbody>';
-    if (!trips.length) {
-      html += '<tr><td colspan="13" class="hint">no closed trade in this ' +
-        'window</td></tr>';
-    }
-    trips.forEach(function (t) {
-      html += '<tr><td>' + anClock(t.closed_at) + '</td><td class="l">' +
-        name(t.pair_key) + '</td><td class="l">' + anSide(t.side) +
-        '</td><td class="l">' +
-        (t.source === 'ALGO' ? '<b>Algo</b>' : 'Manual') + '</td><td>' +
-        qty(t.quantity) + '</td><td>' + fmt(t.entry_z, 2) + ' \u2192 ' +
-        fmt(t.exit_z, 2) + '</td><td>' + fmt(t.entry_spread, 4) + ' \u2192 ' +
-        fmt(t.exit_spread, 4) + '</td><td>' +
-        (t.leg_a.side || '') + ' ' + fmt(t.leg_a.entry, 3) + '</td><td>' +
-        (t.leg_b.side || '') + ' ' + fmt(t.leg_b.entry, 3) + '</td><td>' +
-        anHeld(t.held_sec) + '</td><td class="l">' +
-        escapeHtml(t.exit_reason || DASH) +
-        '</td><td class="' + anSign(t.pnl) + '">' + money(t.pnl) +
-        '</td><td class="' + anSign(t.cum_pnl) + '">' + money(t.cum_pnl) +
-        '</td></tr>';
-    });
-    html += '</tbody></table></div>';
+    html += '</div>';
     return html;
   }
 
@@ -4907,18 +7396,32 @@
   function onMonitorClick(e) {
     var button = e.target.closest('button');
     if (!button) { return; }
+    if (button.classList.contains('sz-reset')) {
+      state.sizing = null;
+      render();
+      return;
+    }
+    if (button.classList.contains('sz-print')) {
+      printSizingSheet();
+      return;
+    }
+    if (button.classList.contains('sz-win')) {
+      state.sizing = Object.assign(sizingSettings(),
+                                   {win: parseFloat(button.dataset.win)});
+      render();
+      return;
+    }
+    if (button.classList.contains('an-toggle-unconfirmed')) {
+      state.showUnconfirmed = !state.showUnconfirmed;
+      render();
+      return;
+    }
+    if (button.classList.contains('an-derive')) {
+      deriveSignals();
+      return;
+    }
     if (button.classList.contains('an-bt-run')) {
       return runAnalysisBacktest();
-    }
-    if (button.classList.contains('an-reset')) {
-      return ask('Reset the excursion counters?',
-        'This zeroes the \u00b12\u03c3 / \u00b13\u03c3 touch and ' +
-        'reversion counts' + (state.analysisPair ? ' for this ladder' :
-        ' on every ladder') + '. Trades and the journal are not touched.',
-        'Reset', function () {
-          send('reset_excursions', {pair: state.analysisPair || null},
-               function () { loadAnalysis(true); });
-        });
     }
     var row = button.closest('tr');
     if (button.classList.contains('close-unclaimed')) {
@@ -4970,9 +7473,14 @@
       // its last file, against no file at all. Both were called ENGINE
       // DOWN, and the first one is the one where every price on the
       // screen is a photograph.
+      // WAITING is a third case, and the only one a trader can fix
+      // themselves: the launcher is holding the engine on something in
+      // the setup - a MetaTrader 5 that is not where an account says -
+      // and the note names it and says to open Exchanges.
       return {state: 'bad',
-              text: snapshot.engine === 'stalled' ? 'ENGINE STALLED'
-                : 'ENGINE DOWN',
+              text: (snapshot.engine_held || []).length ? 'ENGINE WAITING'
+                : (snapshot.engine === 'stalled' ? 'ENGINE STALLED'
+                  : 'ENGINE DOWN'),
               detail: snapshot.engine_note || 'the coordinator is not running'};
     }
     var health = (snapshot.account_health || {}).accounts || {};
@@ -5191,6 +7699,15 @@
       // The Algo's window: open while the Algo is on, gone when it is
       // off. Turned on, it opens even if it was closed before — turning
       // it on IS asking to see it.
+      var chartId = panelId('chart', key);
+      if (wanted[chartId]) {
+        renderChartWindow(key, snapshot.pairs[key]);
+      }
+      var ladderBox = document.querySelector(
+        '.ladder[data-pair="' + cssEscape(key) + '"] .chart-btn');
+      if (ladderBox) {
+        ladderBox.classList.toggle('on', !!wanted[chartId]);
+      }
       var algoId = panelId('algo', key);
       if (snapshot.pairs[key].algo_on) {
         if (state.open.indexOf(algoId) < 0 && !state.closed[algoId]) {
@@ -5220,10 +7737,67 @@
         // come back to its own corner.
         ensureGrip(node);
         applyLayout(node);
+        applyMaximized(node);
       });
 
     renderTabs();
     revealPanel();
+  }
+
+  // -- maximize ------------------------------------------------------------
+  //
+  // The Trading Monitor and a Chart can take the whole desk: the
+  // window's own button (or a double-click on its title bar) fills the
+  // space between the top bar and the taskbar, and the same again puts
+  // it back where it was. Per panel, kept across redraws. Display only.
+
+  //: The windows that can be maximized, by the class they carry.
+  var MAXIMIZABLE = ['monitor', 'chartwin'];
+
+  function canMaximize(node) {
+    return MAXIMIZABLE.some(function (cls) {
+      return node.classList.contains(cls);
+    });
+  }
+
+  function applyMaximized(node) {
+    if (!canMaximize(node)) { return; }
+    var winbtns = node.querySelector('.titlebar .winbtns');
+    var button = winbtns && winbtns.querySelector('.winbtn.max');
+    if (winbtns && !button) {
+      button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'winbtn max';
+      winbtns.insertBefore(button, winbtns.firstChild);
+    }
+    var on = !!(state.maximized || {})[panelIdOf(node)];
+    if (on) {
+      // The desk's own box: below the top bar, above the taskbar.
+      var desk = el('desktop').getBoundingClientRect();
+      node.style.setProperty('--max-top', desk.top + 'px');
+      node.style.setProperty('--max-bottom',
+                             Math.max(0, window.innerHeight - desk.bottom) +
+                             'px');
+    }
+    node.classList.toggle('maximized', on);
+    if (button) {
+      button.innerHTML = on ? '&#10064;' : '&#9744;';
+      button.title = on ? 'Restore the window to its size and place'
+        : 'Maximize: fill the desk (double-click the title bar does too)';
+    }
+  }
+
+  function toggleMaximized(node) {
+    if (!node || !canMaximize(node)) { return; }
+    state.maximized = state.maximized || {};
+    var id = panelIdOf(node);
+    state.maximized[id] = !state.maximized[id];
+    applyMaximized(node);
+    // Charts draw at the size of their box: redraw at the new one.
+    if (node.classList.contains('chartwin')) {
+      node.dataset.drawn = '';
+      chartRedraw(node.dataset.pair);
+    }
   }
 
   function revealPanel() {
@@ -5363,6 +7937,7 @@
       var label = parts[0] === 'ladder' ? pairName
         : parts[0] === 'algo' ? pairName + ' · Algo'
           : parts[0] === 'fair' ? pairName + ' · Fair'
+          : parts[0] === 'chart' ? pairName + ' · Chart'
             : parts[0] === 'grid' ? 'Market Grid'
               : parts[0] === 'settings' ? 'Exchanges' : 'Positions';
       var badge = '';
@@ -5725,7 +8300,25 @@
     // and go, and a listener per window is a listener per window to
     // forget.
     el('desktop').addEventListener('pointerdown', startDrag);
-    el('tidy').addEventListener('click', tidyWindows);
+    el('desktop').addEventListener('click', function (e) {
+      var button = e.target.closest('.winbtn.max');
+      if (button) { toggleMaximized(button.closest('.window')); }
+    });
+    el('desktop').addEventListener('dblclick', function (e) {
+      if (!e.target.closest('.titlebar') ||
+          e.target.closest('button, select, input, a')) { return; }
+      toggleMaximized(e.target.closest('.window'));
+    });
+    // The desk changes size with the browser: a maximized window follows.
+    window.addEventListener('resize', function () {
+      Array.prototype.forEach.call(
+        document.querySelectorAll('.window.maximized'), applyMaximized);
+    });
+    // Tidy tiles the desk; with Shift held, every window back in the
+    // plain row instead.
+    el('tidy').addEventListener('click', function (e) {
+      if (e.shiftKey) { tidyWindows(); render(); } else { tileWindows(); }
+    });
     poll();
     window.setInterval(poll, REFRESH_MS);
   }
@@ -5739,11 +8332,28 @@
   // The settings panel lives in its own file and borrows these: one
   // modal, one toast rack, one command path. A second copy of any of
   // them is a second set of house rules to keep.
+  // The fills list stays folded or open across the poll's repaint:
+  // `toggle` does not bubble, so it is caught on the way down.
+  document.addEventListener('toggle', function (event) {
+    var box = event.target;
+    if (box && box.classList && box.classList.contains('slip-detail')) {
+      state.slipDetailOpen = box.open;
+      return;
+    }
+    if (!box || !box.classList || !box.classList.contains('aw-fills')) {
+      return;
+    }
+    state.fillsOpen = state.fillsOpen || {};
+    state.fillsOpen[box.dataset.key] = box.open;
+  }, true);
+
   window.MT5Trader = {
     state: state, render: render, toast: toast, ask: ask, send: send,
     panelId: panelId, openPanel: openPanel, closePanel: closePanel,
     fmt: fmt, money: money, DASH: DASH,
-    tidyWindows: tidyWindows, sound: sound,
+    tidyWindows: tidyWindows, tileWindows: tileWindows, sound: sound,
+    sizingPane: sizingPane, sizingRow: sizingRow,
+    sizingMarket: sizingMarket, sizingSheetHtml: sizingSheetHtml,
     showFairWindow: showFairWindow, setAlgo: setAlgo,
     toastOutcome: toastOutcome
   };

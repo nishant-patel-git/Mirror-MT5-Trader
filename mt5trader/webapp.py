@@ -18,16 +18,20 @@ Two rules from the spec shape the endpoints here:
   response body, for the panel to print.
 """
 
+import datetime
 import logging
 import os
 import re
+import secrets
 import time
 from datetime import date
+from urllib.parse import urlencode
 
 from flask import Flask, jsonify, render_template, request
 
 from . import analysis, atomicfile, config as cfg, diagnostics, fairvalue, \
-    hedgeratio, sizing, slippage
+    hedgeratio, signals, sizing, slippage
+from . import report as trade_report
 from .commands import CommandLog
 from .legs import RemoteLeg
 
@@ -89,6 +93,14 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         anyway - so a browser that was closed without unlocking still
         finds the machine locked when it comes back.
         """
+        bot_secret = app.config.get('BOT_SECRET')
+        if bot_secret and secrets.compare_digest(
+                request.headers.get('X-MT5Trader-Bot', ''), bot_secret):
+            # The Telegram bot, from INSIDE this process (telegram.py).
+            # The lock guards the desk PC; the bot has its own guard,
+            # the allow-list of Telegram users, and this secret is made
+            # fresh at start-up and never leaves the process.
+            return None
         if request.method == 'GET':
             # Reading is not trading. The ladder goes on ticking behind
             # the overlay, exactly as it does behind TT's.
@@ -194,9 +206,32 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         cache.update({'stamp': stamp, 'body': body, 'path': status_path})
         return body
 
+    def held_reasons():
+        """What the launcher is holding the engine for, read from the
+        same config by the same rules (`config.engine_hold_reasons`).
+        Only asked while the engine is not up, so it costs nothing in
+        the normal case."""
+        try:
+            return cfg.engine_hold_reasons(cfg.load_raw(config_path))
+        except Exception:
+            return []
+
+    def waiting_note(held):
+        # What to DO comes first: the banner is one line, and the
+        # path in the reason can be long enough to push it off the end.
+        return ('the engine is waiting — open Exchanges to fix its setup; '
+                'it starts by itself once that is right. ' + held[0])
+
     def status():
         snapshot = read_status_file()
         if snapshot is None:
+            held = held_reasons()
+            if held:
+                # Not "down": WAITING, and for something a person can
+                # fix on this screen. Said, with where to fix it.
+                return {'engine': 'down', 'engine_held': held,
+                        'engine_note': waiting_note(held),
+                        'pairs': {}, 'accounts': {}}
             return {'engine': 'down',
                     'engine_note': ('the coordinator is not running — no '
                                     'prices, and a click would go nowhere'),
@@ -205,9 +240,19 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         snapshot['status_age_sec'] = age
         if age > STATUS_STALE_SEC:
             snapshot['engine'] = 'stalled'
-            snapshot['engine_note'] = (
-                f'the last snapshot is {age:.1f}s old — the coordinator has '
-                f'stopped or is stuck. Nothing on this screen is live.')
+            held = held_reasons()
+            if held:
+                # The launcher stopped the engine over a config change
+                # it will not run on. The last snapshot is still on disk,
+                # so the screen must say plainly that none of it is live.
+                snapshot['engine_held'] = held
+                snapshot['engine_note'] = (
+                    waiting_note(held) + ' Nothing on this screen is live.')
+            else:
+                snapshot['engine_note'] = (
+                    f'the last snapshot is {age:.1f}s old — the coordinator '
+                    f'has stopped or is stuck. Nothing on this screen is '
+                    f'live.')
         else:
             snapshot['engine'] = 'up'
         return snapshot
@@ -255,6 +300,48 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                             'pin_set': lock.pin_is_set(),
                             'auto_lock_sec': auto_lock_seconds()}
         return jsonify(snapshot)
+
+    @app.get('/api/chart/<path:key>')
+    def api_chart(key):
+        """One ladder's chart: its spread and the Algo's z over the
+        last `minutes`, as the engine last wrote them. Read-only."""
+        from .chart import chart_path
+        try:
+            minutes = max(1.0, min(float(request.args.get('minutes', 60)),
+                                   120.0))
+        except ValueError:
+            minutes = 60.0
+        body = read_json(chart_path(status_path)) or {}
+        series = (body.get('pairs') or {}).get(key)
+        if series is None:
+            return jsonify({'ok': True, 'candles': [], 'minutes': minutes,
+                            'note': 'no prices for this ladder yet \u2014 '
+                                    'the chart fills while the engine '
+                                    'runs'})
+        at = body.get('at')
+        candles = series.get('candles') or []
+        if at is not None:
+            since = float(at) - minutes * 60.0
+            candles = [c for c in candles if c.get('t', 0) >= since]
+        lows = [c['l'] for c in candles if c.get('l') is not None]
+        highs = [c['h'] for c in candles if c.get('h') is not None]
+        return jsonify(dict(series, ok=True, at=at, minutes=minutes,
+                            candles=candles,
+                            spread_min=min(lows) if lows else None,
+                            spread_max=max(highs) if highs else None))
+
+    @app.get('/api/chart_history/<path:key>')
+    def api_chart_history(key):
+        """One ladder's 15m / 1h / 4h candles, as the engine last fetched
+        them from MT5 - or that there are none yet, so the screen asks
+        the engine for them. Read-only."""
+        from .chart import history_path
+        tf = request.args.get('tf', '15')
+        body = (read_json(history_path(status_path)) or {}).get(
+            f'{key}#{tf}')
+        if not body:
+            return jsonify({'ok': False, 'missing': True})
+        return jsonify(body)
 
     @app.get('/api/config')
     def api_config():
@@ -421,6 +508,12 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         names = {key: (pair or {}).get('name') or key
                  for key, pair in (raw.get('pairs') or {}).items()}
         body = slippage.report(positions, window=window, names=names)
+        # Which MT5 account, at which broker: the terminal's own word.
+        body['account_info'] = {
+            name: {'login': (info or {}).get('login'),
+                   'broker': ((info or {}).get('company')
+                              or (info or {}).get('server'))}
+            for name, info in (snapshot.get('accounts') or {}).items()}
         # The journal over the SAME window, on the broker's stamps, as
         # the check on coverage: positions we know about against deals
         # the account actually saw.
@@ -435,6 +528,106 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
             body['journal'] = None
         return body, None
 
+    # -- the Analysis tab's capital and costs ------------------------------
+
+    def desk_capital(raw):
+        """THE CAPITAL returns are read against: the CAPITAL_MANAGED
+        setting when one is set, otherwise the BALANCE the accounts hold
+        now - the equity of the accounts the ladders trade, added up.
+        (capital, 'set' | 'balance' | None)."""
+        try:
+            typed = max(0.0, float((raw.get('settings') or {}).get(
+                'CAPITAL_MANAGED') or 0.0))
+        except (TypeError, ValueError):
+            typed = 0.0
+        if typed:
+            return typed, 'set'
+        snapshot = read_status_file() or {}
+        accounts = snapshot.get('accounts') or {}
+        names = set()
+        for pair in (snapshot.get('pairs') or {}).values():
+            for leg in ('account_a', 'account_b'):
+                if (pair or {}).get(leg):
+                    names.add(pair[leg])
+        names = names or set(accounts)
+        total = 0.0
+        for name in names:
+            try:
+                total += float((accounts.get(name) or {}).get('equity')
+                               or 0.0)
+            except (TypeError, ValueError):
+                continue
+        return (round(total, 2), 'balance') if total > 0 else (0.0, None)
+
+    def attach_costs(db, body, positions, now):
+        """TRADE NO over the whole record, and WHAT EACH ROUND TRIP COST -
+        the bid-ask, and MT5's own commission, swap and fee from the
+        deals - for the Analysis tab and the trader report alike."""
+        try:
+            analysis.number_trades(body, analysis.trade_numbers(
+                db.positions_between(None, None)))
+        except Exception as e:
+            logging.error('the trades could not be numbered: %s', e)
+        try:
+            first = min((p.get('opened_at') or now for p in positions),
+                        default=now)
+            fills = db.fills(ours_only=True,
+                             since_ms=int((first - 86400.0) * 1000),
+                             limit=200000)
+            body['cost_tally'] = analysis.attach_costs(
+                body.get('journal'), positions, fills)
+        except Exception as e:
+            logging.error('the deals could not be matched: %s', e)
+            body['cost_tally'] = None
+
+    # -- the printable report ---------------------------------------------------
+
+    @app.get('/report')
+    def trading_report():
+        """The Analysis tab's record as a printable report: the same
+        trades, period (`days`) and ladder (`pair`), laid out for A4 and
+        the browser's Print / Save as PDF, with the logo on top."""
+        db = store()
+        if db is None:
+            return 'the database could not be opened', 503
+        try:
+            days = float(request.args.get('days', 7))
+        except ValueError:
+            days = 7.0
+        pair_key = request.args.get('pair') or None
+        now = time.time()
+        start = None if days <= 0 else now - days * 86400.0
+        positions = db.positions_between(start, None, pair_key=pair_key)
+        events = db.events_between(('algo_signal', 'algo_order'), start)
+        if pair_key:
+            events = [e for e in events if e.get('pair_key') == pair_key]
+        raw = cfg.load_raw(config_path)
+        names = {key: (pair or {}).get('name') or key
+                 for key, pair in (raw.get('pairs') or {}).items()}
+        capital, capital_source = desk_capital(raw)
+        body = analysis.report(positions, events, now=now, capital=capital)
+        body.setdefault('summary', {})['capital_source'] = capital_source
+        attach_costs(db, body, positions, now)
+        folder = os.path.dirname(os.path.abspath(config_path))
+        pnl = request.args.get('pnl') or 'show'
+
+        def link(mode):
+            query = dict(request.args.items(), pnl=mode)
+            return '/report?' + urlencode(query)
+        if request.args.get('view') == 'client':
+            # Returns only: never what was traded, or how often.
+            page = trade_report.render_client(
+                body, days, now, logo=trade_report.logo_html(folder),
+                pnl=pnl, link=link)
+        else:
+            page = trade_report.render(body, names, days, pair_key, now,
+                                       logo=trade_report.logo_html(folder),
+                                       pnl=pnl, link=link)
+        response = app.make_response(page)
+        response.headers['Content-Type'] = 'text/html; charset=utf-8'
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+
     # -- the Analysis tab ------------------------------------------------------
 
     @app.get('/api/analysis')
@@ -445,6 +638,12 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         counters. Computes no price of its own.
 
         `days`: trades OPENED in the last N days (0 = every one kept).
+        `zone_days`: the SIGMA ZONE track's own range, which is a
+            different question and has its own dropdown — the zone rows
+            are a tick-by-tick record and a day of them is the usual
+            read, where a day of trades is usually none. Filtered in
+            the query (see `Store.zone_events`), never by handing the
+            browser everything and throwing most of it away.
         `pair`: one ladder, or all.
         """
         db = store()
@@ -470,9 +669,127 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         raw = cfg.load_raw(config_path)
         names = {key: (pair or {}).get('name') or key
                  for key, pair in (raw.get('pairs') or {}).items()}
-        body = analysis.report(positions, events, shadows, excursions, now)
+        capital, capital_source = desk_capital(raw)
+        body = analysis.report(positions, events, shadows, excursions, now,
+                               capital=capital)
+        body.setdefault('summary', {})['capital_source'] = capital_source
+        attach_costs(db, body, positions, now)
+        try:
+            zone_days = float(request.args.get('zone_days', 1))
+        except ValueError:
+            zone_days = 1.0
+        zone_since = None if zone_days <= 0 else now - zone_days * 86400.0
+        # ONE DAY, on the BROKER's clock, beats the rolling window when
+        # it is given: "5 Nov" is a question about a day, not about the
+        # last 24 hours, and the two are different near a boundary.
+        zone_date = (request.args.get('date') or '').strip() or None
+        if zone_date and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', zone_date):
+            return jsonify({'ok': False,
+                            'error': f'{zone_date} is not a date — '
+                                     f'YYYY-MM-DD'}), 400
+        try:
+            signal_rows = db.signals(pair_key, since=zone_since,
+                                     broker_day=zone_date)
+            signal_days = db.signal_days(pair_key)
+        except Exception as e:
+            # A tab that cannot read one section still shows the rest:
+            # the zone track is a reading, not the money.
+            logging.error('the signal track could not be read: %s', e)
+            signal_rows, signal_days = [], []
+        # NOTIONAL TRADED: the broker's own deals over the last 30 days,
+        # priced lots x contract size x price. A day of margin on the
+        # query, because it is on the BROKER's clock.
+        # A picked RANGE as well - from one broker day to another, both
+        # inclusive - from the two date pickers. One of them alone is
+        # that one day.
+        def day(name):
+            value = (request.args.get(name) or '').strip()
+            return value if re.fullmatch(r'\d{4}-\d{2}-\d{2}', value) \
+                else None
+        volume_from, volume_to = day('volume_from'), day('volume_to')
+        volume_from = volume_from or volume_to
+        volume_to = volume_to or volume_from
+        if volume_from and volume_to and volume_to < volume_from:
+            volume_from, volume_to = volume_to, volume_from
+        try:
+            since = now - 31 * 86400.0
+            picked = None
+            if volume_from:
+                # Midnights on the BROKER's clock: its stamps are its
+                # wall clock written as an epoch.
+                def midnight(value):
+                    return datetime.datetime.strptime(
+                        value, '%Y-%m-%d').replace(
+                        tzinfo=datetime.timezone.utc).timestamp()
+                picked = (midnight(volume_from),
+                          midnight(volume_to) + 86400.0)
+                since = min(since, picked[0] - 86400.0)
+            deals = db.fills(pair_key=pair_key, ours_only=True,
+                             since_ms=int(since * 1000), limit=200000)
+            snapshot = status() or {}
+            sizes = analysis.contract_sizes(
+                snapshot.get('pairs'),
+                db.positions_between(now - 400 * 86400.0, None))
+            label = None
+            if volume_from:
+                label = volume_from if volume_from == volume_to \
+                    else f'{volume_from} \u2192 {volume_to}'
+            notional = analysis.notional_traded(
+                deals, sizes, now, date=label,
+                date_ms=None if picked is None else
+                (int(picked[0] * 1000), int(picked[1] * 1000)))
+            notional['from'], notional['to'] = volume_from, volume_to
+            # Which MT5 account, at which broker, each account is: the
+            # terminal's own word, read live.
+            notional['account_info'] = {
+                name: {'login': (info or {}).get('login'),
+                       'broker': ((info or {}).get('company')
+                                  or (info or {}).get('server'))}
+                for name, info in (snapshot.get('accounts') or {}).items()}
+        except Exception as e:
+            logging.error('notional traded could not be read: %s', e)
+            notional = None
         return jsonify(dict(body, ok=True, days=days, pair=pair_key,
-                            names=names))
+                            names=names,
+                            notional=notional,
+                            zone_days=zone_days,
+                            date=zone_date,
+                            # The JOURNAL shape: newest first, each row
+                            # carrying why it ended and a running total.
+                            signals=signals.journal(signal_rows),
+                            signal_days=signal_days,
+                            signal_tally=signals.tally(signal_rows)))
+
+    @app.get('/api/position/<position_id>')
+    def api_position(position_id):
+        """One position as recorded, with what its message needs that the
+        record alone does not hold: each leg's CLOSING price from the
+        broker's own closing deals, and the Algo's z at both ends."""
+        db = store()
+        if db is None:
+            return jsonify({'ok': False,
+                            'error': 'the database could not be opened'}), 503
+        row = db.position(position_id)
+        if row is None:
+            return jsonify({'ok': False, 'error': 'no such position'}), 404
+        exits = {}
+        for leg in ('leg_a', 'leg_b'):
+            fill = row.get(leg) or {}
+            try:
+                exits[leg] = db.closing_price(fill.get('account'),
+                                              fill.get('position_tickets'))
+            except Exception as e:                # a journal mid-write
+                logging.error('closing price of %s: %s', position_id, e)
+                exits[leg] = None
+        opened = row.get('opened_at') or 0
+        events = [e for e in db.events_between(
+            ('algo_signal', 'algo_order'), opened - 120.0,
+            (row.get('closed_at') or time.time()) + 60.0)
+            if e.get('pair_key') == row.get('pair_key')]
+        entry_z, exit_z = analysis.algo_z(events)
+        return jsonify({'ok': True, 'position': row, 'exit_prices': exits,
+                        'entry_z': entry_z.get(position_id),
+                        'exit_z': exit_z.get(position_id)})
 
     @app.get('/api/slippage')
     def api_slippage():
@@ -587,9 +904,24 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                                                account.get('login')),
                 'terminal_clash': cfg.terminal_clash(
                     raw, name, account.get('terminal_path')),
+                # A MetaTrader 5 that is not where the row says - on the
+                # row, in words, because the launcher holds the engine
+                # until it is found and this is where it gets fixed.
+                'terminal_missing': cfg.terminal_missing(
+                    account.get('terminal_path')),
             })
         return jsonify({'accounts': accounts,
                         'next_free_port': cfg.next_free_port(raw)})
+
+    @app.get('/api/terminals')
+    def api_terminals():
+        """Every MetaTrader 5 installed on this PC, to PICK on the
+        Exchanges page instead of typing a path - and which account, if
+        any, already uses each. Works with the engine down, which is
+        exactly when it is needed."""
+        raw = cfg.load_raw(config_path)
+        return jsonify({'ok': True,
+                        'terminals': cfg.find_terminals(raw)})
 
     @app.post('/api/accounts/<path:name>')
     def api_save_account(name):
@@ -605,7 +937,8 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         # What the row held BEFORE the edit: the guards must only refuse
         # a value being newly CLAIMED, or an existing clash is unfixable
         # because every save of either row trips over the other.
-        was = {'terminal_path': (account.get('terminal_path') or '').strip(),
+        was = {'terminal_path': cfg.clean_terminal_path(
+                   account.get('terminal_path')),
                'endpoint': (account.get('endpoint') or '').strip(),
                'login': str(account.get('login') or '')}
 
@@ -620,7 +953,10 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                 endpoint = f'{host}:{port}'
             except ValueError as e:
                 return jsonify({'ok': False, 'error': str(e)}), 400
-        path = (payload.get('terminal_path') or '').strip()
+        # What was PASTED, made into the file it means: the quotes
+        # Windows' "Copy as path" adds come off, and a MetaTrader folder
+        # becomes the terminal64.exe inside it.
+        path = cfg.terminal_file(payload.get('terminal_path'))
         if path and path.lower() != was['terminal_path'].lower():
             clash = cfg.terminal_clash(raw, name, path)
             if clash:
@@ -633,7 +969,10 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
 
         account.update({
             'endpoint': endpoint or account.get('endpoint'),
-            'terminal_path': path or account.get('terminal_path'),
+            # Saving the row also cleans a path saved BEFORE this was
+            # cleaned: the quotes come off the file, not only the read.
+            'terminal_path': path or cfg.clean_terminal_path(
+                account.get('terminal_path')) or None,
             'login': int(login) if login else account.get('login'),
             'server': payload.get('server') or account.get('server'),
             'password_env': account.get('password_env')
@@ -649,8 +988,13 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
             cfg.write_env_value(env_path, account['password_env'], password)
         return jsonify({'ok': True, 'account': name,
                         'restart_required': True,
-                        'note': 'accounts are structural — restart the '
-                                'launcher for this to take effect'})
+                        # The launcher watches the accounts and restarts
+                        # the engine itself; nobody has to.
+                        'note': 'saved — the engine restarts by itself to '
+                                'pick it up',
+                        'terminal_path': account.get('terminal_path'),
+                        'terminal_missing': cfg.terminal_missing(
+                            account.get('terminal_path'))})
 
     @app.get('/api/accounts/<path:name>/symbols')
     def api_find_symbols(name):
@@ -1132,7 +1476,7 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                       'time_in_force', 'overnight', 'quoting_leg', 'enabled',
                       'rows', 'clip_lots_a', 'clip_lots_b',
                       'contract_size_a', 'contract_size_b',
-                      'max_quote_age_sec',
+                      'max_quote_age_sec', 'max_positions',
                       'expiry', 'expiry_a',
                       'swap_a_long_per_lot', 'swap_a_short_per_lot',
                       'swap_b_long_per_lot', 'swap_b_short_per_lot',
@@ -1269,6 +1613,13 @@ def main():
     logsetup.quiet_polling()
     app = create_app(args.status, args.commands, args.results, args.config,
                      args.db)
+    # Telegram, if .env carries a bot token. The token is read from the
+    # environment only — never from config.json, never logged.
+    if cfg.load_dotenv is not None:
+        cfg.load_dotenv(os.path.join(
+            os.path.dirname(os.path.abspath(args.config)) or '.', '.env'))
+    from . import telegram
+    telegram.start(app)
     app.run(host=args.host, port=args.port, threaded=True)
 
 
